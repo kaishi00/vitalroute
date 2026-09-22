@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    name: Validate and build
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Validate repository and project
+        id: inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s README.md
+          test -s .gitignore
+
+          PROJECT="$(find . -maxdepth 3 -type d -name '*.xcodeproj' -not -path './.git/*' -print -quit)"
+          if [[ -z "$PROJECT" ]]; then
+            echo "No Xcode project is present yet; repository validation passed. Build and tests will run once the project is added."
+            echo "project_present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "project_present=true" >> "$GITHUB_OUTPUT"
+          echo "project_path=$PROJECT" >> "$GITHUB_OUTPUT"
+          plutil -lint "$PROJECT/project.pbxproj"
+
+          PROJECT_INFO="$(mktemp)"
+          trap 'rm -f "$PROJECT_INFO"' EXIT
+          xcodebuild -list -json -project "$PROJECT" > "$PROJECT_INFO"
+          SCHEME="$(basename "$PROJECT" .xcodeproj)"
+          if ! jq -e --arg scheme "$SCHEME" '.project.schemes | index($scheme) != null' "$PROJECT_INFO" >/dev/null; then
+            echo "::error::Expected a shared Xcode scheme named '$SCHEME'. Available schemes:"
+            jq -r '.project.schemes[]' "$PROJECT_INFO"
+            exit 1
+          fi
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+
+          if jq -e '.project.targets[] | select(test("Tests$"; "i"))' "$PROJECT_INFO" >/dev/null; then
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build for iOS Simulator
+        if: steps.inspect.outputs.project_present == 'true'
+        env:
+          PROJECT_PATH: ${{ steps.inspect.outputs.project_path }}
+          IOS_SCHEME: ${{ steps.inspect.outputs.scheme }}
+        run: >-
+          xcodebuild -project "$PROJECT_PATH" -scheme "$IOS_SCHEME"
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO build
+
+      - name: Run XCTest targets
+        if: steps.inspect.outputs.project_present == 'true' && steps.inspect.outputs.has_tests == 'true'
+        env:
+          PROJECT_PATH: ${{ steps.inspect.outputs.project_path }}
+          IOS_SCHEME: ${{ steps.inspect.outputs.scheme }}
+        run: >-
+          xcodebuild -project "$PROJECT_PATH" -scheme "$IOS_SCHEME"
+          -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+          CODE_SIGNING_ALLOWED=NO test
