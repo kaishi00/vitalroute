@@ -53,9 +53,11 @@ enum HealthKitRecordMapper {
             value = workout.duration
             unit = "s"
             metadata["activityTypeCode"] = String(workout.workoutActivityType.rawValue)
-            if let energyType = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned),
-               let energy = workout.statistics(for: energyType)?.sumQuantity() {
-                metadata["activeEnergyKcal"] = String(energy.doubleValue(for: .kilocalorie()))
+            if let energyType = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned) {
+                let energy = workout.statistics(for: energyType)?.sumQuantity() ?? workout.totalEnergyBurned
+                if let energy {
+                    metadata["activeEnergyKcal"] = String(energy.doubleValue(for: .kilocalorie()))
+                }
             }
             if let distance = workout.totalDistance {
                 metadata["distanceMeters"] = String(distance.doubleValue(for: .meter()))

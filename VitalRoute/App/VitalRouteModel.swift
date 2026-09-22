@@ -32,6 +32,7 @@ final class VitalRouteModel {
         isLoadingHealthData = true
         healthDataError = nil
         hasSuccessfulHealthQuery = false
+        recentRecords.removeAll(keepingCapacity: true)
         defer { isLoadingHealthData = false }
 
         do {

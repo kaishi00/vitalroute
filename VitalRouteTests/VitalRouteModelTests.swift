@@ -27,23 +27,72 @@ final class VitalRouteModelTests: XCTestCase {
         XCTAssertTrue(model.recentRecords.isEmpty)
         XCTAssertNotNil(model.healthDataError)
     }
+
+    @MainActor
+    func testFailedRefreshClearsPreviouslyLoadedRecords() async {
+        let record = HealthRecord(
+            metric: .steps,
+            value: 42,
+            unit: "count",
+            startDate: Date(timeIntervalSince1970: 1_735_689_600),
+            endDate: Date(timeIntervalSince1970: 1_735_689_600)
+        )
+        let provider = StubHealthDataProvider(records: [record])
+        let model = VitalRouteModel(healthData: provider)
+
+        await model.requestAccessAndLoadRecentData()
+        XCTAssertEqual(model.recentRecords, [record])
+        XCTAssertTrue(model.hasSuccessfulHealthQuery)
+
+        provider.shouldFailQuery = true
+        await model.requestAccessAndLoadRecentData()
+
+        XCTAssertTrue(model.recentRecords.isEmpty)
+        XCTAssertFalse(model.hasSuccessfulHealthQuery)
+        XCTAssertNotNil(model.healthDataError)
+    }
+
+    @MainActor
+    func testAuthorizationFailureDoesNotMarkRequestCompleteOrQuery() async {
+        let provider = StubHealthDataProvider(records: [], shouldFailAuthorization: true)
+        let model = VitalRouteModel(healthData: provider)
+
+        await model.requestAccessAndLoadRecentData()
+
+        XCTAssertFalse(model.authorizationRequestCompleted)
+        XCTAssertFalse(model.hasSuccessfulHealthQuery)
+        XCTAssertEqual(provider.queryCount, 0)
+        XCTAssertNotNil(model.healthDataError)
+    }
 }
 
 @MainActor
 private final class StubHealthDataProvider: HealthDataProviding {
     let records: [HealthRecord]
-    let shouldFailQuery: Bool
+    var shouldFailQuery: Bool
+    let shouldFailAuthorization: Bool
+    private(set) var queryCount = 0
 
-    init(records: [HealthRecord], shouldFailQuery: Bool = false) {
+    init(
+        records: [HealthRecord],
+        shouldFailQuery: Bool = false,
+        shouldFailAuthorization: Bool = false
+    ) {
         self.records = records
         self.shouldFailQuery = shouldFailQuery
+        self.shouldFailAuthorization = shouldFailAuthorization
     }
 
     var isAvailable: Bool { true }
 
-    func requestReadAuthorization() async throws {}
+    func requestReadAuthorization() async throws {
+        if shouldFailAuthorization {
+            throw StubHealthDataError.authorizationFailed
+        }
+    }
 
     func queryRecentRecords(since startDate: Date, perMetricLimit: Int) async throws -> [HealthRecord] {
+        queryCount += 1
         if shouldFailQuery {
             throw StubHealthDataError.queryFailed
         }
@@ -53,8 +102,14 @@ private final class StubHealthDataProvider: HealthDataProviding {
 
 private enum StubHealthDataError: LocalizedError {
     case queryFailed
+    case authorizationFailed
 
     var errorDescription: String? {
-        "The test query failed."
+        switch self {
+        case .queryFailed:
+            "The test query failed."
+        case .authorizationFailed:
+            "The test authorization request failed."
+        }
     }
 }
