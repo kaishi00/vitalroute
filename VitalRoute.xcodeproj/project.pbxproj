@@ -1,0 +1,539 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1C742BB156BA1C9D13A87C47 /* DestinationConfigurationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EC2C1065C0877FBEE1659AB /* DestinationConfigurationStore.swift */; };
+		3764D99AFB5EC1848AFC1AF8 /* VitalRouteModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 711E1DD1FC2624EA1E6E61DA /* VitalRouteModel.swift */; };
+		455CFE7448618721CD3C731B /* SyncPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */; };
+		475A17FA563DBBC2A932511D /* OverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF0B77CA424E9FB356524D3B /* OverviewView.swift */; };
+		4D4BCA61CC398A1E3B16E185 /* HealthMetric.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCF0F120103661DDE2DB95CA /* HealthMetric.swift */; };
+		52D4DA3AE945A7FC71B7BD66 /* DestinationConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 253F1897B82767544D465728 /* DestinationConfiguration.swift */; };
+		716183D76BC33A673A83EE97 /* SyncPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CBAF875332D415C9CF4E581 /* SyncPayload.swift */; };
+		7581D6EA5F72BF5A9E52B9B9 /* DestinationConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4008320A95D4EFD02B848CE8 /* DestinationConfigurationTests.swift */; };
+		84AC933F1A7E394C9E30F379 /* HealthDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F8CBF05F56585C49B20A509 /* HealthDataView.swift */; };
+		8C3425E2B66FCF5F2407753E /* VitalRouteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C3CC9CC03A4A57281C7B761 /* VitalRouteApp.swift */; };
+		8D2774DFB08F3B8FDA2F413E /* HealthKitService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72C40C84194F8D920E7D0A3B /* HealthKitService.swift */; };
+		9E253D3281ADB7C0A54D591B /* HealthDataProviding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41D146C98D4771728A2EB763 /* HealthDataProviding.swift */; };
+		A952F88D913704440572EBF7 /* HealthRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BEC5CE89D985751A16DDB80 /* HealthRecord.swift */; };
+		CDE20B962DE63B29863105FE /* HealthMetricTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */; };
+		D47D0CB96AFF64D45C6812E9 /* DestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB6E1A524629690F037A76D /* DestinationView.swift */; };
+		EF523D7479DDEC47947B8576 /* DestinationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 688DE9D09497671C7F7A1321 /* DestinationClient.swift */; };
+		FB5CB25EF9EF364A44BFB33E /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C2ECF345888AF47CAD8FD2 /* SettingsView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		AB9252F7A6B7DB97BEFE9DC3 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C4FD3439A5E19A3F81BC6C08 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 58130E2D7AABBABC37EF3203;
+			remoteInfo = VitalRoute;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		1D244659BE71C0EC41544089 /* VitalRouteTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = VitalRouteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		253F1897B82767544D465728 /* DestinationConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfiguration.swift; sourceTree = "<group>"; };
+		2BEC5CE89D985751A16DDB80 /* HealthRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRecord.swift; sourceTree = "<group>"; };
+		2CBAF875332D415C9CF4E581 /* SyncPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPayload.swift; sourceTree = "<group>"; };
+		2F8CBF05F56585C49B20A509 /* HealthDataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataView.swift; sourceTree = "<group>"; };
+		3EC2C1065C0877FBEE1659AB /* DestinationConfigurationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfigurationStore.swift; sourceTree = "<group>"; };
+		4008320A95D4EFD02B848CE8 /* DestinationConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfigurationTests.swift; sourceTree = "<group>"; };
+		41D146C98D4771728A2EB763 /* HealthDataProviding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataProviding.swift; sourceTree = "<group>"; };
+		4DB6E1A524629690F037A76D /* DestinationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationView.swift; sourceTree = "<group>"; };
+		65FE661EF803A7FA195EA8C9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		688DE9D09497671C7F7A1321 /* DestinationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationClient.swift; sourceTree = "<group>"; };
+		711E1DD1FC2624EA1E6E61DA /* VitalRouteModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VitalRouteModel.swift; sourceTree = "<group>"; };
+		72C40C84194F8D920E7D0A3B /* HealthKitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitService.swift; sourceTree = "<group>"; };
+		9C3CC9CC03A4A57281C7B761 /* VitalRouteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VitalRouteApp.swift; sourceTree = "<group>"; };
+		A9C2ECF345888AF47CAD8FD2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		BF0B77CA424E9FB356524D3B /* OverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewView.swift; sourceTree = "<group>"; };
+		D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthMetricTests.swift; sourceTree = "<group>"; };
+		D54B37CCD5BA917FB54C8B85 /* VitalRoute.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VitalRoute.entitlements; sourceTree = "<group>"; };
+		DCF0F120103661DDE2DB95CA /* HealthMetric.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthMetric.swift; sourceTree = "<group>"; };
+		F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPayloadTests.swift; sourceTree = "<group>"; };
+		F91B0740C51996005F797DAE /* VitalRoute.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VitalRoute.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		04F2AF219DC7BA0D15BF1D45 /* HealthData */ = {
+			isa = PBXGroup;
+			children = (
+				2F8CBF05F56585C49B20A509 /* HealthDataView.swift */,
+			);
+			path = HealthData;
+			sourceTree = "<group>";
+		};
+		17D454C7449BAB945637C5EB /* Health */ = {
+			isa = PBXGroup;
+			children = (
+				41D146C98D4771728A2EB763 /* HealthDataProviding.swift */,
+				72C40C84194F8D920E7D0A3B /* HealthKitService.swift */,
+			);
+			path = Health;
+			sourceTree = "<group>";
+		};
+		3B85AD8DB31198943D5E377A /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				C24FCDDE7D1C6D2BF48077DB /* Destination */,
+				04F2AF219DC7BA0D15BF1D45 /* HealthData */,
+				E4B020B1CE13FE7C3EEC0A75 /* Overview */,
+				4E7A4A57D28EF2E64C365900 /* Settings */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		4E7A4A57D28EF2E64C365900 /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				A9C2ECF345888AF47CAD8FD2 /* SettingsView.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		53E8280464E86920F479D0F4 /* Persistence */ = {
+			isa = PBXGroup;
+			children = (
+				3EC2C1065C0877FBEE1659AB /* DestinationConfigurationStore.swift */,
+			);
+			path = Persistence;
+			sourceTree = "<group>";
+		};
+		784DF52C5D73D45D80876F92 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				F91B0740C51996005F797DAE /* VitalRoute.app */,
+				1D244659BE71C0EC41544089 /* VitalRouteTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		8B5581564CA18168D8B90B17 /* VitalRoute */ = {
+			isa = PBXGroup;
+			children = (
+				65FE661EF803A7FA195EA8C9 /* Info.plist */,
+				D54B37CCD5BA917FB54C8B85 /* VitalRoute.entitlements */,
+				C098FDEBF8A5F339F341B727 /* App */,
+				3B85AD8DB31198943D5E377A /* Features */,
+				17D454C7449BAB945637C5EB /* Health */,
+				98B7EF8D5B6F01F6590A0D42 /* Models */,
+				98F927E6B1CC1A3D910824FC /* Networking */,
+				53E8280464E86920F479D0F4 /* Persistence */,
+			);
+			path = VitalRoute;
+			sourceTree = "<group>";
+		};
+		98B7EF8D5B6F01F6590A0D42 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				DCF0F120103661DDE2DB95CA /* HealthMetric.swift */,
+				2BEC5CE89D985751A16DDB80 /* HealthRecord.swift */,
+				2CBAF875332D415C9CF4E581 /* SyncPayload.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		98F927E6B1CC1A3D910824FC /* Networking */ = {
+			isa = PBXGroup;
+			children = (
+				688DE9D09497671C7F7A1321 /* DestinationClient.swift */,
+				253F1897B82767544D465728 /* DestinationConfiguration.swift */,
+			);
+			path = Networking;
+			sourceTree = "<group>";
+		};
+		B20EF6BCF989B380D2B1F3C5 = {
+			isa = PBXGroup;
+			children = (
+				8B5581564CA18168D8B90B17 /* VitalRoute */,
+				F65FAF79D6FC759A9A829919 /* VitalRouteTests */,
+				784DF52C5D73D45D80876F92 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		C098FDEBF8A5F339F341B727 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				9C3CC9CC03A4A57281C7B761 /* VitalRouteApp.swift */,
+				711E1DD1FC2624EA1E6E61DA /* VitalRouteModel.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		C24FCDDE7D1C6D2BF48077DB /* Destination */ = {
+			isa = PBXGroup;
+			children = (
+				4DB6E1A524629690F037A76D /* DestinationView.swift */,
+			);
+			path = Destination;
+			sourceTree = "<group>";
+		};
+		E4B020B1CE13FE7C3EEC0A75 /* Overview */ = {
+			isa = PBXGroup;
+			children = (
+				BF0B77CA424E9FB356524D3B /* OverviewView.swift */,
+			);
+			path = Overview;
+			sourceTree = "<group>";
+		};
+		F65FAF79D6FC759A9A829919 /* VitalRouteTests */ = {
+			isa = PBXGroup;
+			children = (
+				4008320A95D4EFD02B848CE8 /* DestinationConfigurationTests.swift */,
+				D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */,
+				F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */,
+			);
+			path = VitalRouteTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1FEE785F34EDD1ECB14BE547 /* VitalRouteTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 658AA7A9B0A54461C8F3A53F /* Build configuration list for PBXNativeTarget "VitalRouteTests" */;
+			buildPhases = (
+				8597E35A0F52FC65E68D9749 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6D9D3F387EF8F49F5BFAF2B5 /* PBXTargetDependency */,
+			);
+			name = VitalRouteTests;
+			packageProductDependencies = (
+			);
+			productName = VitalRouteTests;
+			productReference = 1D244659BE71C0EC41544089 /* VitalRouteTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		58130E2D7AABBABC37EF3203 /* VitalRoute */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 232764D652C5E7A485DA99EA /* Build configuration list for PBXNativeTarget "VitalRoute" */;
+			buildPhases = (
+				51B5ABAEB7AF6E53EA158AD4 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VitalRoute;
+			packageProductDependencies = (
+			);
+			productName = VitalRoute;
+			productReference = F91B0740C51996005F797DAE /* VitalRoute.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C4FD3439A5E19A3F81BC6C08 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
+			};
+			buildConfigurationList = AFF6287CC4DF8CAAB94E0C65 /* Build configuration list for PBXProject "VitalRoute" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = B20EF6BCF989B380D2B1F3C5;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 784DF52C5D73D45D80876F92 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				58130E2D7AABBABC37EF3203 /* VitalRoute */,
+				1FEE785F34EDD1ECB14BE547 /* VitalRouteTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		51B5ABAEB7AF6E53EA158AD4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EF523D7479DDEC47947B8576 /* DestinationClient.swift in Sources */,
+				52D4DA3AE945A7FC71B7BD66 /* DestinationConfiguration.swift in Sources */,
+				1C742BB156BA1C9D13A87C47 /* DestinationConfigurationStore.swift in Sources */,
+				D47D0CB96AFF64D45C6812E9 /* DestinationView.swift in Sources */,
+				9E253D3281ADB7C0A54D591B /* HealthDataProviding.swift in Sources */,
+				84AC933F1A7E394C9E30F379 /* HealthDataView.swift in Sources */,
+				8D2774DFB08F3B8FDA2F413E /* HealthKitService.swift in Sources */,
+				4D4BCA61CC398A1E3B16E185 /* HealthMetric.swift in Sources */,
+				A952F88D913704440572EBF7 /* HealthRecord.swift in Sources */,
+				475A17FA563DBBC2A932511D /* OverviewView.swift in Sources */,
+				FB5CB25EF9EF364A44BFB33E /* SettingsView.swift in Sources */,
+				716183D76BC33A673A83EE97 /* SyncPayload.swift in Sources */,
+				8C3425E2B66FCF5F2407753E /* VitalRouteApp.swift in Sources */,
+				3764D99AFB5EC1848AFC1AF8 /* VitalRouteModel.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8597E35A0F52FC65E68D9749 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7581D6EA5F72BF5A9E52B9B9 /* DestinationConfigurationTests.swift in Sources */,
+				CDE20B962DE63B29863105FE /* HealthMetricTests.swift in Sources */,
+				455CFE7448618721CD3C731B /* SyncPayloadTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		6D9D3F387EF8F49F5BFAF2B5 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 58130E2D7AABBABC37EF3203 /* VitalRoute */;
+			targetProxy = AB9252F7A6B7DB97BEFE9DC3 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		2BB19F2235CF3B58F36CCC45 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.milim.vitalroute.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VitalRoute.app/VitalRoute";
+			};
+			name = Release;
+		};
+		40CEFCC52EEB13A851B4C104 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.milim.vitalroute.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VitalRoute.app/VitalRoute";
+			};
+			name = Debug;
+		};
+		7CC80D79A30E9627427C60A7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		9CCDC14622901E2E429BEFC1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = VitalRoute/VitalRoute.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				INFOPLIST_FILE = VitalRoute/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.milim.vitalroute;
+				PRODUCT_NAME = VitalRoute;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		BE3AB4ABA75FB7DF43DF9ADF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = VitalRoute/VitalRoute.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				INFOPLIST_FILE = VitalRoute/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.milim.vitalroute;
+				PRODUCT_NAME = VitalRoute;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		E389C097FBC4B7251F690D3F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		232764D652C5E7A485DA99EA /* Build configuration list for PBXNativeTarget "VitalRoute" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BE3AB4ABA75FB7DF43DF9ADF /* Debug */,
+				9CCDC14622901E2E429BEFC1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		658AA7A9B0A54461C8F3A53F /* Build configuration list for PBXNativeTarget "VitalRouteTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				40CEFCC52EEB13A851B4C104 /* Debug */,
+				2BB19F2235CF3B58F36CCC45 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		AFF6287CC4DF8CAAB94E0C65 /* Build configuration list for PBXProject "VitalRoute" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7CC80D79A30E9627427C60A7 /* Debug */,
+				E389C097FBC4B7251F690D3F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = C4FD3439A5E19A3F81BC6C08 /* Project object */;
+}
