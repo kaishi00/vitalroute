@@ -7,10 +7,10 @@ final class VitalRouteModel {
     @ObservationIgnored private let healthData: any HealthDataProviding
 
     private(set) var authorizationRequestCompleted = false
+    private(set) var hasSuccessfulHealthQuery = false
     private(set) var recentRecords: [HealthRecord] = []
     private(set) var isLoadingHealthData = false
     private(set) var healthDataError: String?
-    private(set) var lastReadAt: Date?
 
     init(healthData: any HealthDataProviding) {
         self.healthData = healthData
@@ -31,14 +31,16 @@ final class VitalRouteModel {
 
         isLoadingHealthData = true
         healthDataError = nil
+        hasSuccessfulHealthQuery = false
         defer { isLoadingHealthData = false }
 
         do {
             try await healthData.requestReadAuthorization()
             authorizationRequestCompleted = true
             let startDate = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
-            recentRecords = try await healthData.queryRecentRecords(since: startDate, perMetricLimit: 20)
-            lastReadAt = Date()
+            let records = try await healthData.queryRecentRecords(since: startDate, perMetricLimit: 20)
+            recentRecords = records
+            hasSuccessfulHealthQuery = true
         } catch {
             healthDataError = error.localizedDescription
         }

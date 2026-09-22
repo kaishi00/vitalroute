@@ -22,7 +22,7 @@ VitalRoute requests read-only access to seven Apple Health categories: steps, he
 
 After the user taps the access action, the app queries up to 20 recent samples per category from the preceding seven days and keeps returned records in memory. Apple Health does not tell apps whether read permission was declined, so an empty query is shown as “no samples returned,” not as proof that access was denied or granted.
 
-The app has no analytics, advertising, account, or vendor-cloud integration. Health data is not sent anywhere in this initial build. A validated HTTPS endpoint can be saved on-device; API keys are not stored or sent. Keychain-backed credentials and HTTPS delivery must be implemented before sync is enabled.
+The app has no analytics, advertising, account, or vendor-cloud integration. Health data is not sent anywhere in this initial build. A validated HTTPS endpoint is stored in Keychain, so secret-bearing route paths are kept out of preferences. API keys are not saved to this device or sent. Keychain-backed credential handling and HTTPS delivery must be implemented before sync is enabled.
 
 ## Build and test
 

@@ -4,25 +4,38 @@ struct DestinationView: View {
     @Environment(DestinationConfigurationStore.self) private var destinationStore
     @State private var endpointDraft = ""
     @State private var tokenDraft = ""
+    @State private var isEditingEndpoint = false
     @State private var statusMessage: String?
 
     var body: some View {
         Form {
             Section {
-                Text("Send future exports to an HTTPS endpoint you control. The endpoint is saved on this device; this build does not send health data.")
+                Text("Send future exports to an HTTPS endpoint you control. The endpoint is saved securely on this device; this build does not send health data.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                TextField("https://your-server.example/health", text: $endpointDraft)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textContentType(.URL)
-                    .accessibilityLabel("HTTPS destination endpoint")
+                if isEditingEndpoint {
+                    TextField("https://your-server.example/health", text: $endpointDraft)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textContentType(.URL)
+                        .accessibilityLabel("HTTPS destination endpoint")
+                } else {
+                    Label("HTTPS endpoint saved securely", systemImage: "checkmark.shield")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button("Change endpoint") {
+                        endpointDraft = destinationStore.savedEndpoint
+                        isEditingEndpoint = true
+                    }
+                }
             } header: {
                 Text("Destination")
             } footer: {
-                Text(destinationStore.isConfigured ? "Saved: \(destinationStore.savedEndpoint)" : "HTTPS is required. Credentials and query strings are not accepted in the URL.")
+                Text(isEditingEndpoint
+                     ? "HTTPS is required. User info, query strings, and fragments are not accepted in the endpoint."
+                     : "The saved destination is protected by Keychain on this device.")
             }
 
             Section {
@@ -30,7 +43,7 @@ struct DestinationView: View {
                     .textContentType(.password)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Text("This field is temporary and is not stored or sent. Keychain support will be in place before network delivery is added.")
+                Text("This value is kept only in memory and is neither saved to this device nor sent. Keychain-backed credential support will be added before network delivery.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } header: {
@@ -38,21 +51,38 @@ struct DestinationView: View {
             }
 
             Section {
-                Button("Save endpoint") {
-                    do {
-                        try destinationStore.save(endpoint: endpointDraft)
-                        endpointDraft = destinationStore.savedEndpoint
-                        statusMessage = "HTTPS endpoint saved on this device."
-                    } catch {
-                        statusMessage = error.localizedDescription
+                if isEditingEndpoint {
+                    Button("Save endpoint") {
+                        do {
+                            try destinationStore.save(endpoint: endpointDraft)
+                            endpointDraft = ""
+                            isEditingEndpoint = false
+                            statusMessage = "HTTPS endpoint saved securely on this device."
+                        } catch {
+                            statusMessage = error.localizedDescription
+                        }
+                    }
+                    .disabled(!isValidEndpoint)
+
+                    if destinationStore.isConfigured {
+                        Button("Cancel", role: .cancel) {
+                            endpointDraft = ""
+                            isEditingEndpoint = false
+                        }
                     }
                 }
-                .disabled(!isValidEndpoint)
 
                 Button("Test connection") {}
                     .disabled(true)
             } footer: {
                 Text("Connection testing and synchronization will be added after secure credential storage and HTTPS delivery are implemented.")
+            }
+
+            if let storageError = destinationStore.storageError {
+                Section {
+                    Label(storageError, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if let statusMessage {
@@ -67,17 +97,25 @@ struct DestinationView: View {
             if destinationStore.isConfigured {
                 Section {
                     Button("Remove saved endpoint", role: .destructive) {
-                        destinationStore.clear()
-                        endpointDraft = ""
-                        statusMessage = "Saved endpoint removed."
+                        do {
+                            try destinationStore.clear()
+                            endpointDraft = ""
+                            isEditingEndpoint = true
+                            statusMessage = "Saved endpoint removed."
+                        } catch {
+                            statusMessage = error.localizedDescription
+                        }
                     }
                 }
             }
         }
         .onAppear {
-            if endpointDraft.isEmpty {
-                endpointDraft = destinationStore.savedEndpoint
+            if !destinationStore.isConfigured {
+                isEditingEndpoint = true
             }
+        }
+        .onDisappear {
+            tokenDraft = ""
         }
         .navigationTitle("Destination")
         .navigationBarTitleDisplayMode(.large)

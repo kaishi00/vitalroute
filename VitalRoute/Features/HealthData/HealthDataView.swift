@@ -46,6 +46,16 @@ struct HealthDataView: View {
         .navigationBarTitleDisplayMode(.large)
     }
 
+    private func emptyRowDescription(for metric: HealthMetric) -> String {
+        if model.hasSuccessfulHealthQuery {
+            return "No samples returned"
+        }
+        if model.isLoadingHealthData {
+            return "Loading recent data…"
+        }
+        return model.authorizationRequestCompleted ? "Query did not complete" : metric.shortDescription
+    }
+
     private func metricRow(for metric: HealthMetric) -> some View {
         let records = model.records(for: metric)
         let newestRecord = records.first
@@ -60,7 +70,7 @@ struct HealthDataView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(metric.displayName)
                     .font(.body.weight(.medium))
-                Text(newestRecord.map { "Latest: " + $0.displayValue } ?? (model.authorizationRequestCompleted ? "No samples returned" : metric.shortDescription))
+                Text(newestRecord.map { "Latest: " + $0.displayValue } ?? emptyRowDescription(for: metric))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)

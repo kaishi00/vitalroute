@@ -101,10 +101,10 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Your destination")
                     .font(.headline)
-                Text(destinationStore.isConfigured ? "HTTPS endpoint saved" : "Not configured")
+                Text(destinationStore.isConfigured ? "Configured · HTTPS" : "Not configured")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Text(destinationStore.isConfigured ? destinationStore.savedEndpoint : "Add an endpoint you control.")
+                Text(destinationStore.isConfigured ? "Saved securely in Keychain" : "Add an endpoint you control.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -155,8 +155,16 @@ struct OverviewView: View {
                 Label(error, systemImage: "exclamationmark.circle")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+            } else if model.isLoadingHealthData {
+                Label("Loading recent health data…", systemImage: "hourglass")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             } else if !model.authorizationRequestCompleted {
                 Text("Review Apple Health access to load recent samples.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if !model.hasSuccessfulHealthQuery {
+                Text("The latest health-data query did not complete.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else if model.recentRecords.isEmpty {
