@@ -26,7 +26,7 @@ struct VitalRouteApp: App {
             workGate: sharedGate
         )
         engine.scheduleBackgroundRetry = { delay in
-            _ = BackgroundSyncTasks.scheduleNext(after: delay)
+            BackgroundSyncTasks.scheduleNext(after: delay)
         }
 
         _appModel = State(initialValue: VitalRouteModel(healthData: healthKitService))
@@ -47,7 +47,11 @@ struct VitalRouteApp: App {
     }
 
     nonisolated private static func syncDirectory() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            // Unreachable on iOS; a container-relative path keeps the durable
+            // stores inside the sandbox rather than somewhere shared.
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
         return base.appendingPathComponent("VitalRouteSync", isDirectory: true)
     }
 
@@ -77,6 +81,12 @@ struct VitalRouteApp: App {
                     syncConfigurationWithEngine()
                 }
                 .onChange(of: credentialStore.credentialEndpoint) {
+                    syncConfigurationWithEngine()
+                }
+                // A replacement for the same endpoint changes neither
+                // `hasCredential` nor `credentialEndpoint`; the revision is
+                // what tells the engine its credential is stale.
+                .onChange(of: credentialStore.credentialRevision) {
                     syncConfigurationWithEngine()
                 }
                 .onChange(of: selectionStore.selectedMetrics) {

@@ -436,7 +436,7 @@ private final class StubHealthDataProvider: HealthDataProviding {
 
     func observeChanges(
         for metrics: Set<HealthMetric>,
-        handler: @escaping @Sendable () -> Void
+        handler: @escaping @Sendable (ObserverCompletion) -> Void
     ) async throws {}
 
     func stopObservingChanges() async {}

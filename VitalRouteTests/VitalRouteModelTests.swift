@@ -161,11 +161,11 @@ private final class StubHealthDataProvider: HealthDataProviding {
 
     private(set) var observedMetrics: [Set<HealthMetric>] = []
     private(set) var observationStopCount = 0
-    private var observerHandler: (@Sendable () -> Void)?
+    private var observerHandler: (@Sendable (ObserverCompletion) -> Void)?
 
     func observeChanges(
         for metrics: Set<HealthMetric>,
-        handler: @escaping @Sendable () -> Void
+        handler: @escaping @Sendable (ObserverCompletion) -> Void
     ) async throws {
         observedMetrics.append(metrics)
         observerHandler = handler
@@ -177,7 +177,7 @@ private final class StubHealthDataProvider: HealthDataProviding {
     }
 
     func fireObserver() {
-        observerHandler?()
+        observerHandler?(ObserverCompletion {})
     }
 }
 

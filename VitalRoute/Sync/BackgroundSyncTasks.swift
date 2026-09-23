@@ -42,8 +42,9 @@ enum BackgroundSyncTasks {
 
     /// Submits an app-refresh request no earlier than `delay` seconds from
     /// now. Submission can legitimately fail (too many pending requests,
-    /// unsupported identifier); the outcome is reported so callers can
-    /// surface that the retry is not armed.
+    /// unsupported identifier); the outcome is returned rather than only
+    /// logged, because the engine reports whether a wake-up is actually
+    /// armed instead of implying one is.
     @discardableResult
     static func scheduleNext(after delay: TimeInterval) -> Bool {
         let request = BGAppRefreshTaskRequest(identifier: appRefreshIdentifier)

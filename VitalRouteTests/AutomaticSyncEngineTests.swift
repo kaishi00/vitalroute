@@ -74,6 +74,37 @@ final class AutomaticSyncEngineTests: XCTestCase {
         await engine.enable(destination: endpoint, token: token, metrics: metrics)
     }
 
+    /// Spins the main actor until `condition` holds. Race regressions are
+    /// asserted by waiting for the state that must appear, never by sleeping
+    /// and hoping it did.
+    private func waitFor(
+        _ description: String,
+        timeout: TimeInterval = 5,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ condition: () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline {
+            await Task.yield()
+        }
+        XCTAssertTrue(condition(), "timed out waiting for \(description)", file: file, line: line)
+    }
+
+    private func page(
+        additions: [HealthRecord] = [],
+        deletions: [DeletedRecord] = [],
+        anchor: String?,
+        isFull: Bool = false
+    ) -> HealthChangePage {
+        HealthChangePage(
+            additions: additions,
+            deletions: deletions,
+            anchorData: anchor.map { Data($0.utf8) },
+            isFull: isFull
+        )
+    }
+
     // MARK: Lifecycle
 
     func testEnableRequiresPrerequisites() async {
@@ -166,7 +197,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let relaunched = makeEngine(provider: ScriptedHealthProvider(), client: ScriptedSyncClient())
         XCTAssertTrue(relaunched.isEnabled)
 
-        relaunched.disable()
+        await relaunched.disable()
         XCTAssertFalse(relaunched.isEnabled)
         XCTAssertFalse(defaults.bool(forKey: "automaticSync.enabled"))
     }
@@ -185,7 +216,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         client.resetDelivery()
         engine.foregroundCatchUp()
         try await Task.sleep(nanoseconds: 50_000_000)
-        engine.disable()
+        await engine.disable()
         try await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertEqual(provider.observationStopCount, 1)
@@ -391,7 +422,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
 
         // The user replaces the credential for the SAME destination; the
         // pause is actionable so the user re-enables.
-        engine.disable()
+        await engine.disable()
         client.resetDelivery()
         provider.script = [:]
         _ = await engine.enable(destination: endpoint, token: "replaced-token-0002", metrics: [.steps])
@@ -553,6 +584,10 @@ final class AutomaticSyncEngineTests: XCTestCase {
             events.append(.upsert(record(index + 1)))
         }
         _ = try await outbox.append(events)
+        // Queued changes carry the identity of the destination they were
+        // captured for; a real queue is always written by a capture that
+        // recorded it first.
+        await SyncStateStore(directory: tempDirectory).savePendingScope(endpoint)
 
         let queriesBefore = provider.changeQueries.count
         client.resetDelivery()
@@ -857,6 +892,454 @@ final class AutomaticSyncEngineTests: XCTestCase {
         await engine.waitUntilIdle()
         XCTAssertEqual(client.sentChangeBatches.count, 1)
     }
+
+    // MARK: Observer completion lifetime
+
+    func testObserverCompletionWaitsForDurableCapture() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        provider.script = [.steps: [page(additions: [record(5)], anchor: "c1")]]
+        provider.resetConsumption()
+        client.resetDelivery()
+        provider.captureGate = AsyncGate()
+
+        guard let fired = provider.fireObserver() else {
+            return XCTFail("no observer was registered")
+        }
+        await waitFor("the capture to start") { provider.parkedCaptureCount == 1 }
+
+        XCTAssertEqual(fired.releases.count, 0,
+                       "HealthKit must not be answered while the capture is still parked")
+        XCTAssertFalse(fired.completion.hasBeenReleased)
+
+        provider.captureGate?.open()
+        await waitFor("the completion to be released") { fired.releases.count == 1 }
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(fired.releases.count, 1, "and only once")
+        XCTAssertEqual(engine.pendingCount, 0, "the captured change was durable and delivered")
+        XCTAssertNotNil(engine.lastDeliveryAt)
+    }
+
+    func testObserverCompletionIsReleasedWhileNetworkIsParked() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        provider.script = [.steps: [page(additions: [record(6)], anchor: "d1")]]
+        provider.resetConsumption()
+        client.resetDelivery()
+        // The upload parks: durable capture must answer HealthKit anyway.
+        client.sendGate = AsyncGate()
+
+        guard let fired = provider.fireObserver() else {
+            return XCTFail("no observer was registered")
+        }
+        await waitFor("the completion to be released while the network is parked") {
+            fired.releases.count == 1
+        }
+
+        // Durable, not transmitted: the change is in the outbox and the
+        // upload has not been acknowledged.
+        let queued = try await Outbox(directory: tempDirectory).pendingCount()
+        XCTAssertEqual(queued, 1, "the capture preceded the completion")
+
+        client.sendGate?.open()
+        await engine.waitUntilIdle()
+        XCTAssertEqual(fired.releases.count, 1, "exactly once, even after delivery completes")
+        XCTAssertEqual(engine.pendingCount, 0)
+    }
+
+    func testObserverCompletionReleasesExactlyOnceWhenCaptureIsCancelled() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        provider.script = [.steps: [page(additions: [record(7)], anchor: "e1")]]
+        provider.resetConsumption()
+        client.resetDelivery()
+        provider.captureGate = AsyncGate()
+
+        guard let fired = provider.fireObserver() else {
+            return XCTFail("no observer was registered")
+        }
+        await waitFor("the capture to start") { provider.parkedCaptureCount == 1 }
+        XCTAssertEqual(fired.releases.count, 0)
+
+        // Turning automatic sync off mid-capture abandons the capture — and
+        // still answers HealthKit, once.
+        await engine.disable()
+        provider.captureGate?.open()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(fired.releases.count, 1)
+        let queued = try await Outbox(directory: tempDirectory).pendingCount()
+        XCTAssertEqual(queued, 0, "the cancelled capture committed nothing")
+    }
+
+    func testObserverCompletionReleasesExactlyOnceWhenCaptureFails() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        provider.resetConsumption()
+        client.resetDelivery()
+        provider.changePageError = HealthKitServiceError.unavailable
+
+        guard let fired = provider.fireObserver() else {
+            return XCTFail("no observer was registered")
+        }
+        await waitFor("the completion to be released after a failed capture") {
+            fired.releases.count == 1
+        }
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(fired.releases.count, 1, "a failed capture still answers HealthKit, exactly once")
+        XCTAssertEqual(engine.mode, .active, "an unavailable HealthKit defers rather than pausing")
+    }
+
+    func testOverlappingObserverNotificationsEachReleaseExactlyOnce() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        provider.script = [.steps: [page(additions: [record(8)], anchor: "f1")]]
+        provider.resetConsumption()
+        client.resetDelivery()
+        provider.captureGate = AsyncGate()
+
+        guard let first = provider.fireObserver() else {
+            return XCTFail("no observer was registered")
+        }
+        await waitFor("the capture to start") { provider.parkedCaptureCount == 1 }
+
+        // Two more notifications arrive while the first capture is in flight.
+        guard let second = provider.fireObserver(), let third = provider.fireObserver() else {
+            return XCTFail("observer registration was lost")
+        }
+        XCTAssertEqual(first.releases.count, 0)
+        XCTAssertEqual(second.releases.count, 0)
+        XCTAssertEqual(third.releases.count, 0)
+
+        provider.captureGate?.open()
+        await waitFor("every overlapping notification to be answered") {
+            first.releases.count == 1 && second.releases.count == 1 && third.releases.count == 1
+        }
+        await engine.waitUntilIdle()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(first.releases.count, 1)
+        XCTAssertEqual(second.releases.count, 1)
+        XCTAssertEqual(third.releases.count, 1)
+        XCTAssertEqual(engine.pendingCount, 0)
+    }
+
+    // MARK: Configuration ownership
+
+    func testConfigurationChangeDuringAuthorizationSupersedesEnable() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+
+        // The user's tap suspends in the HealthKit authorization prompt.
+        provider.authorizationGate = AsyncGate()
+        let enabling = Task { await engine.enable(destination: endpoint, token: token, metrics: [.steps]) }
+        await waitFor("authorization to start") { provider.authorizationRequests == 1 }
+
+        // Meanwhile the destination moves.
+        await engine.configurationChanged(destination: otherEndpoint, token: "other-token-0002", metrics: [.sleep])
+        provider.authorizationGate?.open()
+        let result = await enabling.value
+
+        guard case .failed(let message) = result else {
+            return XCTFail("an enable superseded mid-flight must not report success")
+        }
+        XCTAssertTrue(message.contains("configuration changed"), message)
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertFalse(defaults.bool(forKey: "automaticSync.enabled"),
+                       "the obsolete enable must not persist the opt-in")
+        XCTAssertEqual(client.testConnectionCount, 0,
+                       "no capability check may run for a destination the user already replaced")
+        XCTAssertTrue(provider.observedMetrics.isEmpty,
+                      "no observers may be armed for the obsolete selection")
+        XCTAssertTrue(provider.changeQueries.isEmpty)
+        XCTAssertTrue(client.sentChangeBatches.isEmpty)
+    }
+
+    func testCategoryChangeDuringEnablementSupersedesIt() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+
+        provider.authorizationGate = AsyncGate()
+        let enabling = Task { await engine.enable(destination: endpoint, token: token, metrics: [.steps]) }
+        await waitFor("authorization to start") { provider.authorizationRequests == 1 }
+
+        await engine.configurationChanged(destination: endpoint, token: token, metrics: [.sleep])
+        provider.authorizationGate?.open()
+        let result = await enabling.value
+
+        guard case .failed = result else {
+            return XCTFail("expected the enable to be superseded by the category change")
+        }
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertFalse(defaults.bool(forKey: "automaticSync.enabled"))
+        XCTAssertTrue(provider.observedMetrics.isEmpty)
+    }
+
+    func testCancelledPassCannotOverwritePurgeWithPause() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        provider.script = [.steps: [page(additions: [record(3)], anchor: "g1")]]
+        provider.resetConsumption()
+        client.resetDelivery()
+        provider.captureGate = AsyncGate()
+
+        engine.foregroundCatchUp()
+        await waitFor("the pass to park in the capture") { provider.parkedCaptureCount == 1 }
+
+        // The pass ends in an actionable failure at the same moment the user
+        // repoints the destination. The purge's disabled state must survive:
+        // the stale pass owns nothing any more.
+        provider.changePageError = DestinationClientError.authenticationFailed
+        let purge = Task {
+            await engine.configurationChanged(destination: otherEndpoint, token: token, metrics: [.steps])
+        }
+        await waitFor("the purge to disable the engine") { !engine.isEnabled }
+        provider.captureGate?.open()
+        await purge.value
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(engine.mode, .disabled,
+                       "a superseded pass must not resurrect a pause over the purge")
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertFalse(defaults.bool(forKey: "automaticSync.enabled"),
+                       "live state and persisted consent must agree")
+    }
+
+    func testDestinationChangeDisablesBeforeAwaitingInFlightWork() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(4)], anchor: "h1")]]
+        let client = ScriptedSyncClient()
+        client.sendGate = AsyncGate()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await waitFor("the enable pass to park in delivery") { client.sentChangeBatches.count == 1 }
+
+        let queriesBefore = provider.changeQueries.count
+        let purge = Task {
+            await engine.configurationChanged(destination: otherEndpoint, token: token, metrics: [.steps])
+        }
+        await waitFor("the engine to report disabled") { !engine.isEnabled }
+        XCTAssertFalse(defaults.bool(forKey: "automaticSync.enabled"))
+
+        // A trigger arriving while the purge is suspended must find the
+        // engine off — no capture may start against the old destination.
+        engine.foregroundCatchUp()
+        XCTAssertEqual(provider.changeQueries.count, queriesBefore)
+
+        client.sendGate?.open()
+        await purge.value
+        XCTAssertFalse(engine.isEnabled)
+    }
+
+    func testEnableSuspendedInRegistrationIsSupersededByDisable() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+
+        provider.registrationGate = AsyncGate()
+        let enabling = Task { await engine.enable(destination: endpoint, token: token, metrics: [.steps]) }
+        await waitFor("registration to start") { provider.registrationAttempts == 1 }
+
+        // The user turns it back off while registration is still suspended.
+        await engine.disable()
+        provider.registrationGate?.open()
+        let result = await enabling.value
+
+        guard case .failed = result else {
+            return XCTFail("a superseded enable must not report success")
+        }
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertFalse(defaults.bool(forKey: "automaticSync.enabled"),
+                       "a registration that resumed late must not persist the opt-in")
+        XCTAssertTrue(client.sentChangeBatches.isEmpty, "no pass may run for a superseded enable")
+        XCTAssertTrue(provider.changeQueries.isEmpty)
+    }
+
+    func testDisableAwaitsObserverTeardownBeforeReturning() async throws {
+        // The regression: teardown used to be fire-and-forget, so a quick
+        // off/on cycle could stop the observers a re-enable had just armed.
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        provider.stopGate = AsyncGate()
+        let disabling = Task { await engine.disable() }
+        await waitFor("teardown to start") { provider.observationStopCount == 1 }
+        XCTAssertFalse(engine.isEnabled)
+
+        // A re-enable issued while teardown is still in flight must land
+        // after it, and must leave exactly one live registration.
+        provider.registrationGate = AsyncGate()
+        let reenabling = Task { await enable(engine) }
+        await waitFor("the re-enable to reach registration") { provider.registrationAttempts == 2 }
+
+        provider.stopGate?.open()
+        provider.registrationGate?.open()
+        await disabling.value
+        let result = await reenabling.value
+        XCTAssertEqual(result, .enabled)
+        await engine.waitUntilIdle()
+
+        XCTAssertTrue(engine.isEnabled)
+        XCTAssertEqual(provider.observedMetrics.count, 2, "the re-enable installed one observer set")
+    }
+
+    // MARK: Destination-bound queue
+
+    func testDestinationChangeWhileDisabledDiscardsQueuedWork() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(1), record(2)], anchor: "i1")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 2)
+
+        // Sync is turned off with work still queued, and only then does the
+        // destination move. Queued health data must never wait for a new
+        // endpoint to become deliverable.
+        await engine.disable()
+        await engine.configurationChanged(destination: otherEndpoint, token: "other-token-0002", metrics: [.steps])
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.pendingCount, 0)
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertNil(checkpoint)
+        XCTAssertTrue(engine.lastStatusMessage?.contains("discarded") == true,
+                      engine.lastStatusMessage ?? "")
+    }
+
+    func testQueueCapturedForAnotherDestinationIsNeverDelivered() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(1)], anchor: "j1")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        let queued = try await Outbox(directory: tempDirectory).pendingCount()
+        XCTAssertEqual(queued, 1)
+        client.resetDelivery()
+        // The relaunch captures the new destination's own window.
+        provider.script = [.steps: [page(additions: [record(2)], anchor: "j2")]]
+        provider.resetConsumption()
+
+        // The app terminates here. On relaunch the destination is different —
+        // the change happened while it was not running, so no in-session
+        // purge ever saw it.
+        let relaunched = makeEngine(provider: provider, client: client)
+        await relaunched.restoreOnLaunch(
+            destination: otherEndpoint,
+            token: "other-token-0002",
+            metrics: [.steps]
+        )
+        await relaunched.waitUntilIdle()
+
+        // The queued change captured for the old destination is discarded;
+        // only work captured for the new one is ever sent to it.
+        let delivered = client.sentChangeBatches.flatMap(\.changes)
+        XCTAssertEqual(delivered, [.upsert(record(2))],
+                       "queued health data must never reach a destination it was not captured for")
+        XCTAssertEqual(relaunched.pendingCount, 0)
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.scope.destination, otherEndpoint,
+                       "the surviving checkpoint belongs to the new destination's own window")
+        XCTAssertTrue(relaunched.lastStatusMessage?.contains("different destination") == true,
+                      relaunched.lastStatusMessage ?? "")
+    }
+
+    // MARK: Reporting
+
+    func testBackgroundRetrySubmissionFailureIsSurfaced() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(1)], anchor: "k1")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        // iOS refuses the request (too many pending requests, or an
+        // unpermitted identifier): the status line must not imply a wake-up
+        // is armed.
+        engine.scheduleBackgroundRetry = { _ in false }
+
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(engine.pendingCount, 1)
+        XCTAssertTrue(
+            engine.lastStatusMessage?.contains("did not accept a background retry request") == true,
+            engine.lastStatusMessage ?? ""
+        )
+    }
+
+    func testBackgroundRetryIsReportedAsScheduledWhenAccepted() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(1)], anchor: "l1")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        engine.scheduleBackgroundRetry = { _ in true }
+
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        XCTAssertTrue(
+            engine.lastStatusMessage?.contains("retry is scheduled with backoff") == true,
+            engine.lastStatusMessage ?? ""
+        )
+    }
+
+    func testWhitespaceOnlyCredentialIsNotACredential() async throws {
+        let engine = makeEngine(provider: ScriptedHealthProvider(), client: ScriptedSyncClient())
+
+        let result = await engine.enable(destination: endpoint, token: "  \n\t ", metrics: [.steps])
+
+        XCTAssertEqual(result, .failed(message: AutomaticSyncPauseReason.credentialMissing.userMessage))
+        XCTAssertFalse(engine.isEnabled)
+    }
+
+    func testWhitespaceOnlyCredentialChangePausesInsteadOfSending() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        await engine.configurationChanged(destination: endpoint, token: "   ", metrics: [.steps])
+
+        XCTAssertEqual(engine.mode, .paused(.credentialMissing),
+                       "a whitespace-only key must not be used as a credential")
+    }
 }
 
 // MARK: - Test doubles
@@ -879,13 +1362,40 @@ final class ClockBox: @unchecked Sendable {
     }
 }
 
-/// Scripted health provider: pages are consumed in order per metric.
+/// Counts releases of an observer completion. Lock-backed because the
+/// release closure runs wherever the release happens, not on the main actor.
+private final class ReleaseCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+}
+
+/// Scripted health provider: pages are consumed in order per metric, and
+/// observer notifications can be fired on demand.
 @MainActor
 private final class ScriptedHealthProvider: HealthDataProviding {
     struct RecordedQuery {
         let metric: HealthMetric
         let anchorData: Data?
         let windowStart: Date
+    }
+
+    /// One fired notification: the completion the app must release, and a
+    /// counter of how many times it was actually released.
+    struct FiredNotification {
+        let completion: ObserverCompletion
+        let releases: ReleaseCounter
     }
 
     var script: [HealthMetric: [HealthChangePage]] = [:]
@@ -899,19 +1409,35 @@ private final class ScriptedHealthProvider: HealthDataProviding {
     private(set) var observedMetrics: [Set<HealthMetric>] = []
     private(set) var observationStopCount = 0
     private(set) var authorizationRequests = 0
+    private(set) var registrationAttempts = 0
+    /// Incremented each time a capture page parks on `captureGate`.
+    private(set) var parkedCaptureCount = 0
+    private(set) var firedNotifications: [FiredNotification] = []
     /// When set, change queries throw this instead of paging.
     var storageWriteError: Error?
     /// When set, change queries throw this before recording.
     var changePageError: Error?
     /// When set, observeChanges throws.
     var observeError: Error?
+    /// Parks authorization, so a configuration change can land mid-enable.
+    var authorizationGate: AsyncGate?
+    /// Parks observer registration.
+    var registrationGate: AsyncGate?
+    /// Parks a capture page, so tests can inspect state while a capture is
+    /// genuinely in flight.
+    var captureGate: AsyncGate?
+    /// Parks observer teardown.
+    var stopGate: AsyncGate?
 
-    private var observerHandler: (@Sendable () -> Void)?
+    private var observerHandler: (@Sendable (ObserverCompletion) -> Void)?
 
     var isAvailable: Bool { true }
 
     func requestReadAuthorization(for metrics: Set<HealthMetric>) async throws {
         authorizationRequests += 1
+        if let authorizationGate {
+            await authorizationGate.enter()
+        }
     }
 
     func queryRecentRecords(
@@ -936,6 +1462,10 @@ private final class ScriptedHealthProvider: HealthDataProviding {
         windowStart: Date,
         limit: Int
     ) async throws -> HealthChangePage {
+        if let captureGate {
+            parkedCaptureCount += 1
+            await captureGate.enter()
+        }
         if let changePageError {
             throw changePageError
         }
@@ -954,10 +1484,14 @@ private final class ScriptedHealthProvider: HealthDataProviding {
 
     func observeChanges(
         for metrics: Set<HealthMetric>,
-        handler: @escaping @Sendable () -> Void
+        handler: @escaping @Sendable (ObserverCompletion) -> Void
     ) async throws {
+        registrationAttempts += 1
         if let observeError {
             throw observeError
+        }
+        if let registrationGate {
+            await registrationGate.enter()
         }
         observedMetrics.append(metrics)
         observerHandler = handler
@@ -965,11 +1499,24 @@ private final class ScriptedHealthProvider: HealthDataProviding {
 
     func stopObservingChanges() async {
         observationStopCount += 1
+        if let stopGate {
+            await stopGate.enter()
+        }
         observerHandler = nil
     }
 
-    func fireObserver() {
-        observerHandler?()
+    /// Fires one notification the way HealthKit would: the app receives an
+    /// exactly-once completion whose releases are counted, so a test can
+    /// prove the engine neither answers early nor answers twice.
+    @discardableResult
+    func fireObserver() -> FiredNotification? {
+        guard let observerHandler else { return nil }
+        let releases = ReleaseCounter()
+        let completion = ObserverCompletion { releases.increment() }
+        let fired = FiredNotification(completion: completion, releases: releases)
+        firedNotifications.append(fired)
+        observerHandler(completion)
+        return fired
     }
 }
 
@@ -1112,7 +1659,7 @@ private final class ManualStubHealthProvider: HealthDataProviding {
 
     func observeChanges(
         for metrics: Set<HealthMetric>,
-        handler: @escaping @Sendable () -> Void
+        handler: @escaping @Sendable (ObserverCompletion) -> Void
     ) async throws {}
 
     func stopObservingChanges() async {}

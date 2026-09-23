@@ -62,13 +62,16 @@ actor SyncStateStore {
     private let decoder = JSONDecoder()
     private let protection: FileProtectionType
     private var prepared = false
+    /// Avoids rewriting the scope file on every capture pass.
+    private var cachedPendingScope: String?
 
     init(directory: URL, protection: FileProtectionType = .completeUntilFirstUserAuthentication) {
         self.directory = directory.appendingPathComponent("state", isDirectory: true)
         self.protection = protection
     }
 
-    /// Prepares the on-disk layout. Call once before use.
+    /// Prepares the on-disk layout. Call once before use; callers that write
+    /// without loading first reach it through `ensurePrepared()`.
     func prepare() throws {
         try FileManager.default.createDirectory(
             at: directory,
@@ -81,6 +84,10 @@ actor SyncStateStore {
                 try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
             }
         }
+        // Set here, not only in ensurePrepared(): `prepareStorage()` calls
+        // this directly at launch, and leaving the flag false made every
+        // later write redo the directory setup.
+        prepared = true
     }
 
     func loadCheckpoint(for metric: HealthMetric) -> CategoryCheckpoint? {
@@ -122,10 +129,45 @@ actor SyncStateStore {
         return (try? decoder.decode(DeliveryRetryState.self, from: data)) ?? .initial
     }
 
+    /// Persists backoff bookkeeping. `ensurePrepared()` matters here: retry
+    /// state is written before any checkpoint exists (a purge writes
+    /// `.initial`), and writing into an absent directory silently discarded
+    /// the schedule instead of persisting it.
     func saveRetryState(_ state: DeliveryRetryState) {
+        try? ensurePrepared()
         if let data = try? encoder.encode(state) {
             try? atomicWrite(data, to: retryURL)
         }
+    }
+
+    // MARK: - Pending-work scope
+
+    /// The destination identity the queued changes belong to.
+    ///
+    /// Pending health data must never become deliverable to a destination it
+    /// was not captured for, and that includes a change that happened while
+    /// the app was not running. The engine records the destination here when
+    /// it arms one and clears it when the queue is discarded, so delivery can
+    /// refuse a queue whose owner no longer matches.
+    func loadPendingScope() -> String? {
+        guard let data = try? Data(contentsOf: pendingScopeURL) else {
+            return nil
+        }
+        return try? decoder.decode(String.self, from: data)
+    }
+
+    func savePendingScope(_ destination: String) {
+        guard destination != cachedPendingScope else { return }
+        try? ensurePrepared()
+        if let data = try? encoder.encode(destination) {
+            try? atomicWrite(data, to: pendingScopeURL)
+        }
+        cachedPendingScope = destination
+    }
+
+    func clearPendingScope() {
+        cachedPendingScope = nil
+        try? FileManager.default.removeItem(at: pendingScopeURL)
     }
 
     // MARK: - Files
@@ -136,6 +178,10 @@ actor SyncStateStore {
 
     private var retryURL: URL {
         directory.appendingPathComponent("retry.json")
+    }
+
+    private var pendingScopeURL: URL {
+        directory.appendingPathComponent("pending-scope.json")
     }
 
     /// Write-then-rename so a crash mid-write never truncates prior state.

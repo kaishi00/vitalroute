@@ -30,6 +30,14 @@ final class DestinationCredentialStore {
     private(set) var credentialEndpoint = ""
     private(set) var hasCredential = false
     private(set) var storageError: String?
+    /// Bumped by every credential write.
+    ///
+    /// Nonsecret by construction, and the only observable signal that an
+    /// existing credential was *replaced*: a replacement for the same
+    /// endpoint changes neither `hasCredential` nor `credentialEndpoint`, and
+    /// the token itself is deliberately not observable. Observers use this to
+    /// learn that the credential in use has changed.
+    private(set) var credentialRevision = 0
     /// The actual token for `credentialEndpoint`; used only to build requests,
     /// never logged. Observable-change tracking is deliberately skipped.
     @ObservationIgnored private(set) var loadedToken: String?
@@ -81,6 +89,7 @@ final class DestinationCredentialStore {
         credentialEndpoint = endpoint
         storageError = nil
         isLoaded = true
+        credentialRevision += 1
     }
 
     /// Removes the credential for one endpoint. Call this when the endpoint
@@ -94,6 +103,7 @@ final class DestinationCredentialStore {
             credentialEndpoint = endpoint
             isLoaded = true
         }
+        credentialRevision += 1
     }
 
     private func apply(token: String?, endpoint: String, readFailed: Bool) {

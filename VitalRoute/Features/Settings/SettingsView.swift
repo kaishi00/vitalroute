@@ -65,7 +65,10 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .disabled(isTogglingAutomaticSync || !prerequisitesSatisfied)
+            // Prerequisites gate *enabling* only. A user whose categories were
+            // cleared, or whose API key was removed, must still be able to
+            // turn automatic sync off.
+            .disabled(isTogglingAutomaticSync || (!autoSyncEngine.isEnabled && !prerequisitesSatisfied))
         }
     }
 
@@ -131,7 +134,7 @@ struct SettingsView: View {
                     metrics: selectionStore.selectedMetrics
                 )
             } else {
-                autoSyncEngine.disable()
+                await autoSyncEngine.disable()
             }
         }
     }
