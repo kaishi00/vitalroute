@@ -21,7 +21,7 @@ struct DestinationView: View {
                         .autocorrectionDisabled()
                         .textContentType(.URL)
                         .accessibilityLabel("HTTPS destination endpoint")
-                } else {
+                } else if destinationStore.isConfigured {
                     Label("HTTPS endpoint saved securely", systemImage: "checkmark.shield")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -30,6 +30,10 @@ struct DestinationView: View {
                         statusMessage = nil
                         isEditingEndpoint = true
                     }
+                } else {
+                    Label("Checking secure storage…", systemImage: "key")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
             } header: {
                 Text("Destination")
