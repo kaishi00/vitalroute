@@ -146,6 +146,10 @@ actor Outbox {
         for name in names {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
+        // Quarantined files are health data too: a full clear discards them.
+        try? FileManager.default.removeItem(
+            at: directory.appendingPathComponent("quarantine", isDirectory: true)
+        )
         nextSequence = 0
     }
 

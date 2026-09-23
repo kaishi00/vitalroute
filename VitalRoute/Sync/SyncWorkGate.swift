@@ -32,8 +32,8 @@ actor SyncWorkGate {
     func run<T: Sendable>(_ operation: @escaping @Sendable () async throws -> T) async throws -> T {
         await acquire()
         defer { release() }
-        // A waiter cancelled while queued releases the gate immediately
-        // instead of running a dead operation.
+        // A waiter cancelled while queued is still resumed by the next
+        // release(); this check makes it exit without running the operation.
         try Task.checkCancellation()
         return try await operation()
     }

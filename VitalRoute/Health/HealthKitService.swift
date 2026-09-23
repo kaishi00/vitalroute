@@ -400,6 +400,10 @@ final class HealthKitService: HealthDataProviding {
                 }
             }
         }
+        // Set as soon as delivery is armed: if observer registration below
+        // fails, the next stopObservingChanges() must still unwind the
+        // partially enabled background delivery.
+        hasEnabledBackgroundDelivery = !sampleTypes.isEmpty
         var registered: [HKObserverQuery] = []
         for sampleType in sampleTypes {
             // The observer callback must complete exactly once, promptly:
@@ -412,7 +416,6 @@ final class HealthKitService: HealthDataProviding {
             registered.append(observer)
         }
         activeObservers = registered
-        hasEnabledBackgroundDelivery = !sampleTypes.isEmpty
     }
 
     func stopObservingChanges() {

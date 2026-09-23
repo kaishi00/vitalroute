@@ -12,7 +12,6 @@ struct SettingsView: View {
         List {
             Section("Privacy") {
                 Label("No analytics or advertising", systemImage: "hand.raised")
-                    .accessibilityHidden(true)
                 Text("Sync sends only the categories you enable, only to the destination you configure — manually when you tap Sync Now, automatically only if you turn automatic sync on.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)

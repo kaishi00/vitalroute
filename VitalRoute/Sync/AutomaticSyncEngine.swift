@@ -315,6 +315,7 @@ final class AutomaticSyncEngine {
             }
             activeRunTask = nil
             isRunning = false
+            needsCatchUp = false
             await healthDataStopObserving()
             observersRegistered = false
             await outbox.removeAll()
@@ -343,6 +344,7 @@ final class AutomaticSyncEngine {
             }
             activeRunTask = nil
             isRunning = false
+            needsCatchUp = false
         }
         for removed in previousMetrics where !newMetrics.contains(removed) {
             await outbox.removeCategory(removed)
@@ -446,7 +448,11 @@ final class AutomaticSyncEngine {
             guard let self else { return }
             await self.performPass(trigger: trigger)
             self.activeRunTask = nil
-            if self.needsCatchUp, self.isEnabled {
+            // A cancelled run must never spawn a successor: configuration
+            // purges (destination change, category disable) cancel-and-await
+            // this task, and an absorbed catch-up here would run uncancelled
+            // against already-purged state.
+            if self.needsCatchUp, self.isEnabled, !Task.isCancelled {
                 self.needsCatchUp = false
                 self.startPass(trigger: .absorbedCatchUp)
                 return
@@ -486,6 +492,8 @@ final class AutomaticSyncEngine {
                 return
             }
             mode = .active
+            // Recovered: the pause notice is stale once work resumes.
+            lastStatusMessage = nil
         } else if let reason = unsatisfiedPrerequisite() {
             mode = .paused(reason)
             lastStatusMessage = reason.userMessage
@@ -615,10 +623,15 @@ final class AutomaticSyncEngine {
             return
         }
 
+        var quarantinedDuringRun = 0
         for _ in 0..<BackgroundSyncLimits.maxDeliveryBatchesPerRun {
             try Task.checkCancellation()
             let snapshot = try await outbox.nextBatch()
             pendingCount = snapshot.totalPending
+            quarantinedDuringRun += snapshot.quarantinedCount
+            if quarantinedDuringRun > 0 {
+                lastStatusMessage = "Some captured changes were unreadable and were set aside (\(quarantinedDuringRun)). Delivery of the remaining changes continues."
+            }
             if snapshot.events.isEmpty {
                 break
             }
@@ -642,7 +655,9 @@ final class AutomaticSyncEngine {
                 retryState.lastSuccessAt = now()
                 await stateStore.saveRetryState(retryState)
                 nextRetryAt = nil
-                lastStatusMessage = nil
+                if quarantinedDuringRun == 0 {
+                    lastStatusMessage = nil
+                }
             } catch {
                 let classification = Self.classify(error)
                 switch classification {
