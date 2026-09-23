@@ -698,6 +698,34 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertEqual(delivered.filter { $0.endpoint.absoluteString == otherEndpoint }.count, 0)
     }
 
+    func testZombieCatchUpAfterDestinationChangeIsSuppressed() async throws {
+        // The regression: a cancelled run with an absorbed trigger must not
+        // spawn a successor pass after the destination purge.
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(additions: [record(1), record(2)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
+        ]
+        let client = ScriptedSyncClient()
+        client.sendGate = AsyncGate()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(engine.isRunning)
+
+        // A trigger arrives mid-run (absorbed), then the destination changes.
+        engine.foregroundCatchUp()
+        await engine.configurationChanged(destination: otherEndpoint, token: token, metrics: [.steps])
+        if let gate = client.sendGate { await gate.openAndWait() }
+        await engine.waitUntilIdle()
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let outbox = Outbox(directory: tempDirectory)
+        let pending = try await outbox.pendingCount()
+        XCTAssertEqual(pending, 0, "no zombie pass may re-append after the purge")
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertNil(checkpoint, "no zombie pass may recreate the checkpoint")
+    }
+
     func testHTTP429IsTransientNotActionable() {
         let classification = AutomaticSyncEngine.classify(
             DestinationClientError.serverRejected(status: 429)
