@@ -1,0 +1,72 @@
+name: VitalRoute
+
+options:
+  bundleIdPrefix: com.milim
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    TARGETED_DEVICE_FAMILY: "1"
+
+targets:
+  VitalRoute:
+    type: application
+    platform: iOS
+    sources:
+      - path: VitalRoute
+    entitlements:
+      path: VitalRoute/VitalRoute.entitlements
+      properties:
+        com.apple.developer.healthkit: true
+    info:
+      path: VitalRoute/Info.plist
+      properties:
+        CFBundleDisplayName: VitalRoute
+        CFBundleShortVersionString: 0.1.0
+        CFBundleVersion: '1'
+        NSHealthShareUsageDescription: VitalRoute reads only the Apple Health categories shown in Health Data so you can route recent records to a destination you control.
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.milim.vitalroute
+        PRODUCT_NAME: VitalRoute
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_PREVIEWS: "YES"
+        SUPPORTS_MACCATALYST: "NO"
+        TARGETED_DEVICE_FAMILY: "1"
+
+  VitalRouteTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: VitalRouteTests
+    dependencies:
+      - target: VitalRoute
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.milim.vitalroute.tests
+        GENERATE_INFOPLIST_FILE: "YES"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/VitalRoute.app/VitalRoute"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  VitalRoute:
+    build:
+      targets:
+        VitalRoute: all
+        VitalRouteTests: [test]
+    test:
+      config: Debug
+      targets:
+        - VitalRouteTests
+    run:
+      config: Debug
+    profile:
+      config: Release
+    archive:
+      config: Release
