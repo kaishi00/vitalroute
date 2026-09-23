@@ -319,6 +319,11 @@ final class AutomaticSyncEngine {
             // exception is a decision that superseded this enablement without
             // touching observation — the engine is off and no newer attempt
             // is coming, so these observers would stay armed with no owner.
+            //
+            // Checked synchronously, immediately before the teardown is
+            // issued: a re-enable that starts in the instant between them has
+            // its registration unwound by this stop and fails visibly with a
+            // clean end state, rather than being silently left half-armed.
             if attempt == registrationAttempts, mode == .disabled {
                 await healthData.stopObservingChanges()
             }
@@ -450,6 +455,9 @@ final class AutomaticSyncEngine {
             defaults.set(false, forKey: Self.enabledFlagKey)
             destination = ""
             token = nil
+            // The claim is dropped with the rest of the purged state; a
+            // trigger arriving from here on belongs to whatever comes next.
+            needsCatchUp = false
             let passWasRunning = activeRunTask != nil
             activeRunTask?.cancel()
             if let task = activeRunTask {
@@ -457,7 +465,6 @@ final class AutomaticSyncEngine {
             }
             activeRunTask = nil
             isRunning = false
-            needsCatchUp = false
             releaseObserverCompletions()
             await healthData.stopObservingChanges()
             guard isCurrent(generation) else { return }
@@ -472,15 +479,18 @@ final class AutomaticSyncEngine {
 
         // Categories that were disabled must never upload their queued data.
         // A pass re-appending that category's events mid-flight is drained
-        // first so the purge is authoritative.
+        // first so the purge is authoritative, and the absorbed claim is
+        // dropped before the first suspension — the cancelled run must not
+        // spawn a successor that drains the queue generically, before the
+        // removal below runs, with the disabled category's events in it.
         if !previousMetrics.subtracting(newMetrics).isEmpty {
+            needsCatchUp = false
             activeRunTask?.cancel()
             if let task = activeRunTask {
                 _ = await task.value
             }
             activeRunTask = nil
             isRunning = false
-            needsCatchUp = false
         }
         for removed in previousMetrics where !newMetrics.contains(removed) {
             await outbox.removeCategory(removed)
@@ -626,14 +636,16 @@ final class AutomaticSyncEngine {
             guard let self else { return }
             await self.performPass(trigger: trigger, generation: generation)
             self.activeRunTask = nil
-            // A cancelled run must never spawn a successor against purged
-            // state. That is enforced by `isEnabled` together with the purge
-            // paths clearing `needsCatchUp` synchronously before their first
-            // suspension, so a surviving flag was set by a trigger arriving
-            // for the configuration in effect now — and dropping it would
-            // defer that work to the next unrelated trigger (a credential
-            // replacement during a pass is the common case).
-            if self.needsCatchUp, self.isEnabled {
+            // A cancelled run must never spawn a successor: a purge cancels
+            // and awaits this task precisely so nothing continues against the
+            // state it is about to mutate, and a background-task expiration is
+            // an explicit instruction to stop spending budget. A run that was
+            // superseded *without* being cancelled — a credential replacement
+            // for the same destination, say — still honours the absorbed
+            // trigger, because that claim belongs to the configuration now in
+            // effect; dropping it there would defer delivery to an unrelated
+            // trigger.
+            if self.needsCatchUp, self.isEnabled, !Task.isCancelled {
                 self.needsCatchUp = false
                 self.startPass(trigger: .absorbedCatchUp)
                 return

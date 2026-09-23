@@ -1285,6 +1285,85 @@ final class AutomaticSyncEngineTests: XCTestCase {
                        "nothing was queued, so the notice must not claim a discard")
     }
 
+    func testCategoryDisablePurgeIsNotUndoneByAnAbsorbedTrigger() async throws {
+        // The regression: a trigger absorbed during a pass let the cancelled
+        // run spawn a successor, and that successor drained the outbox
+        // generically — with the disabled category's events still in it.
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [page(additions: [record(1)], anchor: "n1")],
+            .sleep: [page(additions: [record(2, metric: .sleep)], anchor: "n2")],
+        ]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine, metrics: [.steps, .sleep])
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 2, "both categories are queued")
+
+        provider.script = [:]
+        provider.resetConsumption()
+        client.resetDelivery()
+        provider.captureGate = AsyncGate()
+
+        engine.foregroundCatchUp()
+        await waitFor("the pass to park in the capture") { provider.parkedCaptureCount == 1 }
+        let sleepQueriesBeforePurge = provider.changeQueries.filter { $0.metric == .sleep }.count
+
+        // A trigger arrives while the pass is in flight and is absorbed.
+        // A foreground catch-up is used rather than an observer fire so the
+        // claim is recorded synchronously: an observer notification is
+        // delivered on its own task and would legitimately start a further
+        // pass for the new configuration, which would blur the count below.
+        engine.foregroundCatchUp()
+
+        // The user disables one category: its queued data must never upload.
+        await engine.configurationChanged(destination: endpoint, token: token, metrics: [.sleep])
+        provider.captureGate?.open()
+        await engine.waitUntilIdle()
+        await engine.waitUntilIdle()
+
+        // The cancelled run must not have spawned a successor: the only pass
+        // after these are the purge's own, which runs once the disabled
+        // category's events are already gone. A successor would add another
+        // capture — and, before the purge's removal landed, could have drained
+        // the queue with those events in it.
+        let sleepQueriesAfterPurge = provider.changeQueries.filter { $0.metric == .sleep }.count
+        XCTAssertEqual(sleepQueriesAfterPurge, sleepQueriesBeforePurge + 1,
+                       "only the purge's own pass may run; a successor spawned by the cancelled run would add another")
+        let sent = client.sentChangeBatches.flatMap(\.changes)
+        XCTAssertFalse(sent.contains { $0.metric == .steps },
+                       "the disabled category's queued data must never reach the destination")
+        let snapshot = try await Outbox(directory: tempDirectory).nextBatch()
+        XCTAssertFalse(snapshot.events.contains { $0.metric == .steps })
+        let stepsCheckpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertNil(stepsCheckpoint)
+    }
+
+    func testBackgroundExpirationDoesNotSpawnASuccessorPass() async throws {
+        // The regression: dropping the cancelled-run guard let an expired
+        // background task start a fresh pass after the system said stop.
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(1)], anchor: "o1")]]
+        let client = ScriptedSyncClient()
+        client.sendGate = AsyncGate()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await waitFor("the enable pass to park in delivery") { client.sentChangeBatches.count == 1 }
+
+        let queriesBefore = provider.changeQueries.count
+        // A trigger arrives, then the background task expires.
+        engine.foregroundCatchUp()
+        engine.cancelActiveWork()
+        client.sendGate?.open()
+        await engine.waitUntilIdle()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.count, queriesBefore,
+                       "an expired background task must not start a fresh pass")
+        XCTAssertFalse(engine.isRunning)
+    }
+
     // MARK: Destination-bound queue
 
     func testDestinationChangeWhileDisabledDiscardsQueuedWork() async throws {
