@@ -514,6 +514,13 @@ final class AutomaticSyncEngine {
         // its checkpoint was cleared above.
         do {
             try await registerObservers(for: newMetrics, generation: generation)
+        } catch let error as HealthKitServiceError where error == .registrationSuperseded {
+            // One user action is reported through several observable
+            // properties, so this call is not alone: a concurrent report for
+            // the same decision won the registration race and owns
+            // observation. Reporting that as a failure would pause the engine
+            // and mark it unarmed while it is in fact armed.
+            return
         } catch {
             guard isCurrent(generation) else { return }
             observersRegistered = false
@@ -740,6 +747,11 @@ final class AutomaticSyncEngine {
         if !observersRegistered {
             do {
                 try await registerObservers(for: selectedMetrics, generation: generation)
+            } catch let error as HealthKitServiceError where error == .registrationSuperseded {
+                // A concurrent reconfiguration installed the observers for
+                // this same decision; that decision's own pass does the work,
+                // and this one must not pause over a race it lost.
+                return false
             } catch {
                 guard isCurrent(generation) else { return false }
                 mode = .paused(.deferred("observers could not be registered: \(error.localizedDescription)"))
@@ -903,6 +915,13 @@ final class AutomaticSyncEngine {
                 if quarantinedDuringRun == 0 {
                     lastStatusMessage = discardedWorkNotice
                 }
+            } catch let cancellation as CancellationError {
+                // A deliberate stop — background-task expiration, a purge —
+                // is not a destination fault. Recording it as a failed
+                // attempt would inflate the backoff and report a failure that
+                // never happened; the pass's own cancellation handling owns
+                // the message.
+                throw cancellation
             } catch {
                 // The error may have arrived after a newer configuration
                 // decision superseded this pass; that decision owns the mode

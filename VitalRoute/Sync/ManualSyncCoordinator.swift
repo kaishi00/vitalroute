@@ -158,6 +158,15 @@ final class ManualSyncCoordinator {
         let gate = workGate
         let task = Task { [weak self] in
             guard let self else { return }
+            // The in-flight marker is cleared here rather than inside
+            // `runSync`: a cancellation that lands while this task is still
+            // queued behind the gate makes `gate.run` throw before `runSync`
+            // is ever entered, and an uncleared marker reads as a permanent
+            // "syncing" state that also blocks every later start.
+            defer {
+                self.syncTask = nil
+                self.phase = .idle
+            }
             // Serialized with automatic sync: the whole manual operation
             // (query + upload) holds the gate.
             do {
@@ -185,11 +194,6 @@ final class ManualSyncCoordinator {
     }
 
     private func runSync(plan: SyncPlan) async throws {
-        defer {
-            syncTask = nil
-            phase = .idle
-        }
-
         let startedAt = Date()
         var summary = SyncSummary()
         currentSummary = summary

@@ -346,6 +346,61 @@ final class ManualSyncCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testCancellingWhileQueuedBehindTheGateClearsTheSyncState() async throws {
+        // The regression: `runSync`'s cleanup never ran when the cancellation
+        // landed while the task was still queued behind the work gate, so the
+        // in-flight marker stayed set and manual sync could never start again.
+        let gate = SyncWorkGate()
+        let sendGate = AsyncGate()
+
+        let holderClient = StubDestinationClient()
+        holderClient.sendGate = sendGate
+        let holder = ManualSyncCoordinator(
+            healthData: StubHealthDataProvider(export: [record(1)]),
+            client: holderClient,
+            defaults: makeDefaults(),
+            workGate: gate
+        )
+        let queuedClient = StubDestinationClient()
+        let queued = ManualSyncCoordinator(
+            healthData: StubHealthDataProvider(export: []),
+            client: queuedClient,
+            defaults: makeDefaults(),
+            workGate: gate
+        )
+
+        // The first sync takes the gate and parks inside its upload.
+        holder.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await sendGate.waitForEntry()
+
+        // The second queues behind it, then the user cancels.
+        queued.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        XCTAssertTrue(queued.isSyncing)
+        queued.cancelSync()
+
+        await sendGate.open()
+        await waitForCompletion(holder)
+
+        // The queued run never entered; it must still stop reporting as
+        // syncing once the gate is released.
+        var attempts = 0
+        while queued.isSyncing && attempts < 250 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 2_000_000)
+            attempts += 1
+        }
+
+        XCTAssertFalse(queued.isSyncing, "a cancellation while queued must not wedge manual sync")
+        XCTAssertEqual(queued.phase, .idle)
+        XCTAssertEqual(queuedClient.sentPayloads.count, 0, "the cancelled run must not have uploaded")
+
+        // And the coordinator is usable again.
+        queued.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(queued)
+        XCTAssertEqual(queued.lastOutcome?.result, .completed)
+    }
+
+    @MainActor
     func testRetryAfterFailureIsUserInitiatedOnly() async throws {
         // A failed sync leaves no residual task: the next startSync runs.
         let provider = StubHealthDataProvider(export: [record(1)])

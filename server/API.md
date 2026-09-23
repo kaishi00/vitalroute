@@ -106,6 +106,14 @@ Server semantics with tombstones:
   `duplicateDeletions`. Deletions of ids never seen before still create
   tombstones, so a late-arriving addition is suppressed too.
 
+**Retention**: tombstones are kept indefinitely and are consulted on every
+upsert, at both contract versions. That is deliberate — pruning an old
+tombstone would let a sufficiently stale replayed addition resurrect a
+deleted sample — but it means `deleted_ids` grows without bound on a
+long-running receiver and must be planned for operationally (size the volume
+for it, and monitor table growth). If a deployment needs pruning, the
+retention window must be longer than any batch that could still be replayed.
+
 Acknowledgment (after commit):
 
 ```json
