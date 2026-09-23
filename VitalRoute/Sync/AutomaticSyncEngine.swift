@@ -611,6 +611,13 @@ final class AutomaticSyncEngine {
     /// Cancels in-flight work (background task expiration). Pending work is
     /// preserved by construction; the checkpoint only ever covers changes
     /// already durably recorded.
+    ///
+    /// An absorbed trigger is deliberately left in place across the
+    /// cancellation: the successor guard stops the cancelled run from
+    /// spawning one, and the flag is then consumed by whatever pass runs next
+    /// — under the configuration in effect by then, after any purge has
+    /// committed. That is redundant work at worst, never a leak; clearing it
+    /// here is not required and must not be replaced by dropping the guard.
     func cancelActiveWork() {
         activeRunTask?.cancel()
     }
