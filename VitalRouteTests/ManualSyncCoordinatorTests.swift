@@ -362,10 +362,11 @@ final class ManualSyncCoordinatorTests: XCTestCase {
             workGate: gate
         )
         let queuedClient = StubDestinationClient()
-        // A non-empty export, so the "nothing was uploaded" assertion below
-        // actually proves `runSync` was never entered.
+        // A non-empty export, so "nothing was uploaded" is not vacuous, and
+        // the provider's counters below prove `runSync` was never entered.
+        let queuedProvider = StubHealthDataProvider(export: [record(99)])
         let queued = ManualSyncCoordinator(
-            healthData: StubHealthDataProvider(export: [record(99)]),
+            healthData: queuedProvider,
             client: queuedClient,
             defaults: makeDefaults(),
             workGate: gate
@@ -395,6 +396,12 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         XCTAssertFalse(queued.isSyncing, "a cancellation while queued must not wedge manual sync")
         XCTAssertEqual(queued.phase, .idle)
         XCTAssertEqual(queuedClient.sentPayloads.count, 0, "the cancelled run must not have uploaded")
+        XCTAssertEqual(queuedProvider.authorizationCount, 0, "the cancelled run was never entered")
+        guard case .cancelled? = queued.lastOutcome?.result else {
+            return XCTFail(
+                "a queued cancellation must be reported as cancelled, got \(String(describing: queued.lastOutcome?.result))"
+            )
+        }
 
         // And the coordinator is usable again.
         queued.startSync(endpoint: endpoint, token: token, metrics: [.steps])

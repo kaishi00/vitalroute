@@ -156,6 +156,8 @@ final class ManualSyncCoordinator {
         }
 
         let gate = workGate
+        // Captured before the task so a cancellation while queued can report
+        // the start the user actually experienced.
         let startedAt = Date()
         let task = Task { [weak self] in
             guard let self else { return }

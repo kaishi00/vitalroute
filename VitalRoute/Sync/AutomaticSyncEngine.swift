@@ -520,9 +520,11 @@ final class AutomaticSyncEngine {
             // the same decision won the registration race and owns
             // observation. Reporting that as a failure would pause the engine
             // and mark it unarmed while it is in fact armed, so this falls
-            // through to the tail below — the pass it schedules is what
-            // drains anything pending, in case the run that won is itself
-            // generation-stale and skips delivery.
+            // through to the tail below, which schedules a pass. That is safe
+            // to run redundantly — the loser shares the winner's generation,
+            // the pass is single-flight and idempotent, and `startPass`
+            // itself refuses to run while the engine is off, so a concurrent
+            // destination change that already purged cannot be undone by it.
         } catch {
             guard isCurrent(generation) else { return }
             observersRegistered = false

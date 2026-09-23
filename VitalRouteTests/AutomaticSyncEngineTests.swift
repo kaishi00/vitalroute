@@ -1364,6 +1364,30 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertFalse(engine.isRunning)
     }
 
+    func testLostRegistrationRaceIsNotReportedAsAFailure() async throws {
+        // One user action is reported through several observable properties,
+        // so several reconfigurations race for observer registration. The
+        // losers must not pause the engine or claim it is unarmed: the winner
+        // owns observation.
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.mode, .active)
+
+        provider.observeError = HealthKitServiceError.registrationSuperseded
+        await engine.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(engine.mode, .active, "a lost registration race must not pause the engine")
+        XCTAssertFalse(
+            engine.lastStatusMessage?.contains("observers could not be registered") == true,
+            engine.lastStatusMessage ?? ""
+        )
+        XCTAssertTrue(engine.isEnabled)
+    }
+
     // MARK: Destination-bound queue
 
     func testDestinationChangeWhileDisabledDiscardsQueuedWork() async throws {
