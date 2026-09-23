@@ -76,6 +76,9 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _send_error_json(self, status, code, message, extra_headers=None):
+        # Log the machine-readable code with the status line: codes are
+        # contract identifiers, not sensitive data.
+        logger.info("%s %s -> %d error_code=%s", self.command, self.path.split("?", 1)[0], status, code)
         self._send_json(
             status, {"error": {"code": code, "message": message}}, extra_headers
         )
@@ -150,7 +153,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
     def _handle_connection_test(self):
         if not self._is_authorized():
             self._reject_unauthorized()
-            self._log_request(401)
             return
         # A connection test must never carry a body: reject rather than ignore,
         # so a client bug cannot smuggle records into a test operation.
@@ -160,7 +162,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 self._send_error_json(
                     411, "length_required", "Content-Length is required."
                 )
-                self._log_request(411)
                 return
             body_length = 0
         else:
@@ -173,7 +174,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "connection_test_body_not_allowed",
                 "The connection test accepts no request body.",
             )
-            self._log_request(400)
             return
         self._send_json(
             200,
@@ -188,7 +188,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
     def _handle_ingestion(self):
         if not self._is_authorized():
             self._reject_unauthorized()
-            self._log_request(401)
             return
 
         content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
@@ -196,7 +195,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             self._send_error_json(
                 400, "invalid_content_type", "Content-Type must be application/json."
             )
-            self._log_request(400)
             return
 
         content_length = self._content_length()
@@ -207,7 +205,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             self._send_error_json(
                 411, "length_required", "Content-Length is required."
             )
-            self._log_request(411)
             return
 
         config = self.receiver_config
@@ -216,7 +213,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             self._send_error_json(
                 413, "payload_too_large", "The request body exceeds the size limit."
             )
-            self._log_request(413)
             return
 
         body = self.rfile.read(content_length) if content_length > 0 else b""
@@ -224,7 +220,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             payload = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             self._send_error_json(400, "invalid_json", "The request body is not valid JSON.")
-            self._log_request(400)
             return
 
         try:
@@ -232,9 +227,7 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 payload, config.max_records_per_batch
             )
         except validation.ValidationError as error:
-            status = 400
-            self._send_error_json(status, error.code, error.message)
-            self._log_request(status)
+            self._send_error_json(400, error.code, error.message)
             return
 
         try:
@@ -242,7 +235,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 - never leak internals to the client
             logger.exception("Ingestion failed with an internal error.")
             self._send_error_json(500, "internal_error", "Ingestion failed.")
-            self._log_request(500)
             return
 
         self._send_json(
