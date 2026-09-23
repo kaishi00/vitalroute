@@ -51,7 +51,7 @@ final class ReceiverIntegrationTests: XCTestCase {
     func testConnectionTestAgainstLiveReceiver() throws {
         let configuration = try integrationConfiguration()
 
-        let response = try awaitWithTimeout {
+        let response = try await awaitWithTimeout {
             try await self.client.testConnection(
                 to: configuration.endpoint,
                 authorization: DestinationAuthorization(bearerToken: configuration.token)
@@ -66,7 +66,7 @@ final class ReceiverIntegrationTests: XCTestCase {
         let configuration = try integrationConfiguration()
         let payload = syntheticPayload(count: 6)
 
-        let first = try awaitWithTimeout {
+        let first = try await awaitWithTimeout {
             try await self.client.send(
                 payload,
                 to: configuration.endpoint,
@@ -77,7 +77,7 @@ final class ReceiverIntegrationTests: XCTestCase {
         XCTAssertEqual(first.duplicates, 0)
 
         // Retrying the identical batch must not duplicate records.
-        let retry = try awaitWithTimeout {
+        let retry = try await awaitWithTimeout {
             try await self.client.send(
                 payload,
                 to: configuration.endpoint,
@@ -93,7 +93,7 @@ final class ReceiverIntegrationTests: XCTestCase {
         let payload = syntheticPayload(count: 2)
 
         do {
-            _ = try awaitWithTimeout {
+            _ = try await awaitWithTimeout {
                 try await self.client.send(
                     payload,
                     to: configuration.endpoint,
