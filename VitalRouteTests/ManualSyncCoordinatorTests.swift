@@ -419,6 +419,27 @@ private final class StubHealthDataProvider: HealthDataProviding {
             truncatedMetrics: truncated
         )
     }
+
+    func changePage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthChangePage {
+        HealthChangePage(
+            additions: [],
+            deletions: [],
+            anchorData: anchorData,
+            isFull: false
+        )
+    }
+
+    func observeChanges(
+        for metrics: Set<HealthMetric>,
+        handler: @escaping @Sendable () -> Void
+    ) async throws {}
+
+    func stopObservingChanges() async {}
 }
 
 private final class StubDestinationClient: DestinationClient, @unchecked Sendable {
@@ -455,7 +476,27 @@ private final class StubDestinationClient: DestinationClient, @unchecked Sendabl
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse {
-        ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 1)
+        ReceiverHealthResponse(
+            status: "ok",
+            service: "vitalroute-receiver",
+            apiVersion: 1,
+            capabilities: []
+        )
+    }
+
+    func sendChanges(
+        _ changes: [SyncChangeEvent],
+        batchID: UUID,
+        to endpoint: URL,
+        authorization: DestinationAuthorization
+    ) async throws -> ChangeAcknowledgment {
+        ChangeAcknowledgment(
+            accepted: changes.count,
+            duplicates: 0,
+            superseded: 0,
+            appliedDeletions: 0,
+            duplicateDeletions: 0
+        )
     }
 }
 

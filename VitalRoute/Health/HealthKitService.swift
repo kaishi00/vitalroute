@@ -283,12 +283,180 @@ final class HealthKitService: HealthDataProviding {
             healthStore.execute(query)
         }
     }
+
+    // MARK: - Incremental changes
+
+    func changePage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthChangePage {
+        guard isAvailable else {
+            throw HealthKitServiceError.unavailable
+        }
+        let anchor = try Self.deserialize(anchorData)
+        let predicate = HKQuery.predicateForSamples(
+            withStart: windowStart,
+            end: nil,
+            options: [.strictStartDate]
+        )
+        return try await Self.queryChangePage(
+            for: metric,
+            using: healthStore,
+            predicate: predicate,
+            anchor: anchor,
+            limit: limit
+        )
+    }
+
+    private nonisolated static func queryChangePage(
+        for metric: HealthMetric,
+        using healthStore: HKHealthStore,
+        predicate: NSPredicate,
+        anchor: HKQueryAnchor?,
+        limit: Int
+    ) async throws -> HealthChangePage {
+        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
+            return HealthChangePage(additions: [], deletions: [], anchorData: Self.serialize(anchor), isFull: false)
+        }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HealthChangePage, Error>) in
+            let once = ContinuationGuard()
+            let queryBox = QueryBox()
+            let query = HKAnchoredObjectQuery(
+                type: sampleType,
+                predicate: predicate,
+                anchor: anchor,
+                limit: limit
+            ) { _, samples, deletedObjects, newAnchor, error in
+                guard once.claim() else { return }
+                if let query = queryBox.query {
+                    healthStore.stop(query)
+                }
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                // Map on HealthKit's callback thread so only Sendable values
+                // cross the continuation. Deletions are captured as events
+                // here: they cannot be recovered by re-querying later.
+                let additions = (samples ?? []).compactMap {
+                    HealthKitRecordMapper.makeRecord(from: $0, metric: metric)
+                }
+                let deletions = (deletedObjects ?? []).map { deleted in
+                    DeletedRecord(
+                        id: deleted.uuid,
+                        metric: metric,
+                        startDate: deleted.startDate,
+                        endDate: deleted.endDate
+                    )
+                }
+                continuation.resume(returning: HealthChangePage(
+                    additions: additions,
+                    deletions: deletions,
+                    anchorData: Self.serialize(newAnchor),
+                    // The query limit applies to new samples; a full page of
+                    // additions marks a pagination boundary for the pager.
+                    isFull: (samples?.count ?? 0) >= limit
+                ))
+            }
+            queryBox.query = query
+            healthStore.execute(query)
+        }
+    }
+
+    // MARK: - Observers
+
+    func observeChanges(
+        for metrics: Set<HealthMetric>,
+        handler: @escaping @Sendable () -> Void
+    ) async throws {
+        guard isAvailable else {
+            throw HealthKitServiceError.unavailable
+        }
+        stopObservingChanges()
+
+        let store = healthStore
+        var registered: [HKObserverQuery] = []
+        for metric in HealthMetric.allCases where metrics.contains(metric) {
+            guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
+                continue
+            }
+            let observer = HKObserverQuery(sampleType: sampleType, predicate: nil) { _, completionHandler, _ in
+                // The observer callback must complete exactly once, promptly:
+                // signal the trigger, let the engine do bounded async work.
+                handler()
+                completionHandler()
+            }
+            store.execute(observer)
+            registered.append(observer)
+        }
+        activeObservers = registered
+        if !registered.isEmpty {
+            // Enables background delivery for each observed type; the system
+            // throttles wake-ups and never guarantees immediacy.
+            for metric in HealthMetric.allCases where metrics.contains(metric) {
+                guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
+                    continue
+                }
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    store.enableBackgroundDelivery(for: sampleType, frequency: .immediate) { success, error in
+                        if let error {
+                            continuation.resume(throwing: error)
+                        } else if success {
+                            continuation.resume()
+                        } else {
+                            continuation.resume(throwing: HealthKitServiceError.authorizationFailed)
+                        }
+                    }
+                }
+            }
+            hasEnabledBackgroundDelivery = true
+        }
+    }
+
+    func stopObservingChanges() {
+        for observer in activeObservers {
+            healthStore.stop(observer)
+        }
+        let hadDelivery = !activeObservers.isEmpty || hasEnabledBackgroundDelivery
+        activeObservers.removeAll()
+        if hadDelivery {
+            hasEnabledBackgroundDelivery = false
+            healthStore.disableAllBackgroundDelivery { _, _ in }
+        }
+    }
+
+    private var activeObservers: [HKObserverQuery] = []
+    private var hasEnabledBackgroundDelivery = false
+
+    // MARK: - Anchor serialization
+
+    private static func serialize(_ anchor: HKQueryAnchor?) -> Data? {
+        guard let anchor else { return nil }
+        return try? NSKeyedArchiver.archivedData(
+            withRootObject: anchor,
+            requiringSecureCoding: true
+        )
+    }
+
+    private static func deserialize(_ data: Data?) throws -> HKQueryAnchor? {
+        guard let data else { return nil }
+        guard let anchor = try? NSKeyedUnarchiver.unarchivedObject(
+            ofClass: HKQueryAnchor.self,
+            from: data
+        ) else {
+            throw HealthKitServiceError.corruptedAnchor
+        }
+        return anchor
+    }
 }
 
 enum HealthKitServiceError: LocalizedError, Equatable {
     case unavailable
     case authorizationFailed
     case noMetricsRequested
+    case corruptedAnchor
 
     var errorDescription: String? {
         switch self {
@@ -298,6 +466,8 @@ enum HealthKitServiceError: LocalizedError, Equatable {
             "Apple Health authorization could not be completed. Grant access in Settings > Health and try again."
         case .noMetricsRequested:
             "Select at least one category in Health Data first."
+        case .corruptedAnchor:
+            "The stored synchronization checkpoint is unreadable; it will be rebuilt from the initial window."
         }
     }
 

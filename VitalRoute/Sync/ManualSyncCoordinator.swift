@@ -94,14 +94,21 @@ final class ManualSyncCoordinator {
     private(set) var lastSuccessfulSync: LastSyncInfo?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
 
+    /// Shared with the automatic engine: the single serialization boundary
+    /// that keeps manual and background work from racing checkpoints or
+    /// duplicating active uploads.
+    @ObservationIgnored private let workGate: SyncWorkGate
+
     init(
         healthData: any HealthDataProviding,
         client: any DestinationClient,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        workGate: SyncWorkGate = SyncWorkGate()
     ) {
         self.healthData = healthData
         self.client = client
         self.defaults = defaults
+        self.workGate = workGate
         lastSuccessfulSync = Self.loadLastSync(from: defaults)
     }
 
@@ -148,9 +155,19 @@ final class ManualSyncCoordinator {
             return
         }
 
+        let gate = workGate
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.runSync(plan: plan)
+            // Serialized with automatic sync: the whole manual operation
+            // (query + upload) holds the gate.
+            do {
+                try await gate.run { @MainActor [weak self] () throws -> Void in
+                    try await self?.runSync(plan: plan)
+                }
+            } catch {
+                // runSync handles its own failures; only cancellation can
+                // escape the gate wrapper.
+            }
         }
         syncTask = task
     }
@@ -167,7 +184,7 @@ final class ManualSyncCoordinator {
         )
     }
 
-    private func runSync(plan: SyncPlan) async {
+    private func runSync(plan: SyncPlan) async throws {
         defer {
             syncTask = nil
             phase = .idle

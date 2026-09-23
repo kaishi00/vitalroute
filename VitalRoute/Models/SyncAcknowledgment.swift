@@ -12,8 +12,15 @@ struct SyncAcknowledgment: Equatable {
 }
 
 /// Receiver response for the connection test. Contains no health data.
+/// `capabilities` is present on contract-v2 receivers; a v1 receiver omits
+/// it. `supportsDeletions` is the gate automatic sync checks.
 struct ReceiverHealthResponse: Equatable {
     let status: String
     let service: String
     let apiVersion: Int
+    let capabilities: Set<String>
+
+    var supportsDeletions: Bool {
+        apiVersion >= 2 && capabilities.contains("deletions")
+    }
 }

@@ -12,6 +12,16 @@ struct HealthExportResult: Equatable {
     }
 }
 
+/// One page of incremental changes for a category. `anchorData` is the
+/// serialized cursor to persist after the page's changes are durably
+/// recorded; `isFull` marks a pagination boundary.
+struct HealthChangePage: Equatable {
+    let additions: [HealthRecord]
+    let deletions: [DeletedRecord]
+    let anchorData: Data?
+    let isFull: Bool
+}
+
 @MainActor
 protocol HealthDataProviding {
     var isAvailable: Bool { get }
@@ -34,4 +44,26 @@ protocol HealthDataProviding {
         through endDate: Date,
         metrics: Set<HealthMetric>
     ) async throws -> HealthExportResult
+
+    /// One incremental page of additions and deletions for a category since
+    /// the given serialized anchor, restricted to samples starting at or
+    /// after `windowStart`. The predicate is fixed per scope and must never
+    /// move: anchors are only valid with the predicate that produced them.
+    func changePage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthChangePage
+
+    /// Registers change observers for the categories; the handler runs on a
+    /// HealthKit queue and is a trigger, not a result. Re-registering
+    /// replaces the previous observer set.
+    func observeChanges(
+        for metrics: Set<HealthMetric>,
+        handler: @escaping @Sendable () -> Void
+    ) async throws
+
+    /// Removes all observers registered by this service.
+    func stopObservingChanges() async
 }

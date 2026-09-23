@@ -144,6 +144,41 @@ private final class StubHealthDataProvider: HealthDataProviding {
             truncatedMetrics: []
         )
     }
+
+    func changePage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthChangePage {
+        HealthChangePage(
+            additions: records.filter { $0.metric == metric },
+            deletions: [],
+            anchorData: anchorData,
+            isFull: false
+        )
+    }
+
+    private(set) var observedMetrics: [Set<HealthMetric>] = []
+    private(set) var observationStopCount = 0
+    private var observerHandler: (@Sendable () -> Void)?
+
+    func observeChanges(
+        for metrics: Set<HealthMetric>,
+        handler: @escaping @Sendable () -> Void
+    ) async throws {
+        observedMetrics.append(metrics)
+        observerHandler = handler
+    }
+
+    func stopObservingChanges() async {
+        observationStopCount += 1
+        observerHandler = nil
+    }
+
+    func fireObserver() {
+        observerHandler?()
+    }
 }
 
 private enum StubHealthDataError: LocalizedError {

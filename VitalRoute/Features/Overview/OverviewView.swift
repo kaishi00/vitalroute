@@ -6,6 +6,7 @@ struct OverviewView: View {
     @Environment(DestinationCredentialStore.self) private var credentialStore
     @Environment(ExportSelectionStore.self) private var selectionStore
     @Environment(ManualSyncCoordinator.self) private var syncCoordinator
+    @Environment(AutomaticSyncEngine.self) private var autoSyncEngine
 
     var body: some View {
         ScrollView {
@@ -186,6 +187,13 @@ struct OverviewView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if autoSyncEngine.isEnabled {
+                Text(automaticSyncSummary)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Text("Syncing sends every record found in the window for the selected categories — not just the preview above — in batches of \(SyncLimits.recordsPerUploadBatch). It only happens when you tap Sync Now; saving settings or opening the app never uploads data. Retrying is safe: the receiver keeps one copy of each record.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -260,6 +268,20 @@ struct OverviewView: View {
     }
 
     // MARK: Derived state
+
+    private var automaticSyncSummary: String {
+        let pending = autoSyncEngine.pendingCount > 0
+            ? " · \(autoSyncEngine.pendingCount) pending"
+            : ""
+        switch autoSyncEngine.mode {
+        case .disabled:
+            return ""
+        case .active:
+            return "Automatic sync is on\(pending). iOS throttles background delivery; it is never guaranteed to be immediate."
+        case .paused(let reason):
+            return "\(reason.userMessage)\(pending)"
+        }
+    }
 
     private var accessStatus: String {
         if !model.isHealthAvailable {

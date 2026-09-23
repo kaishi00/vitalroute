@@ -92,7 +92,7 @@ final class HTTPDestinationClientTests: XCTestCase {
 
         let response = try await client.testConnection(to: endpoint, authorization: authorization)
 
-        XCTAssertEqual(response, ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 1))
+        XCTAssertEqual(response, ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 1, capabilities: []))
         let request = try XCTUnwrap(box.request)
         XCTAssertEqual(request.httpMethod, "GET")
         XCTAssertNil(request.httpBody)

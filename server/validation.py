@@ -1,7 +1,8 @@
 """Payload validation for the VitalRoute receiver.
 
-Implements contract v1 (see API.md). Every function raises ValidationError
-with a machine-readable code and a safe, payload-free message.
+Implements contracts v1 and v2 (see API.md). Every function raises
+ValidationError with a machine-readable code and a safe, payload-free
+message.
 """
 
 import datetime
@@ -10,8 +11,10 @@ import re
 import uuid
 
 SUPPORTED_SCHEMA_VERSION = 1
-SUPPORTED_API_VERSION = 1
+SUPPORTED_SCHEMA_VERSION_MAX = 2
+SUPPORTED_API_VERSION = 2
 SERVICE_NAME = "vitalroute-receiver"
+RECEIVER_CAPABILITIES = ("additions", "deletions")
 
 ALLOWED_METRICS = frozenset(
     {
@@ -237,3 +240,107 @@ def _validate_record(record, index):
         _require_optional_string(record.get("deviceName"), "%s deviceName" % where),
         _require_metadata(record["metadata"], "%s metadata" % where),
     )
+
+
+# ---- contract v2: additions + deletions -----------------------------------
+
+_V2_TOP_LEVEL_KEYS = frozenset({"schemaVersion", "createdAt", "batchId", "changes"})
+_CHANGE_KEYS = frozenset({"kind"})
+_UPSERT_KEYS = frozenset({"record"})
+_DELETE_KEYS = frozenset({"id", "metric", "startDate", "endDate"})
+
+
+class PreparedChange:
+    """One validated v2 change, ready for transactional application."""
+
+    def __init__(self, kind, record_id, metric, record_tuple=None, dates=None):
+        self.kind = kind  # "upsert" | "delete"
+        self.record_id = record_id
+        self.metric = metric
+        self.record_tuple = record_tuple  # v1 record tuple for upserts
+        self.dates = dates  # (start_text, end_text) for deletes
+
+
+def validate_change_payload(payload, max_changes):
+    """Validates a schemaVersion 2 payload.
+
+    Returns (batch_created_at_text, [PreparedChange, ...]).
+    """
+    if not isinstance(payload, dict):
+        raise ValidationError("invalid_json", "The request body must be a JSON object.")
+    if set(payload) != _V2_TOP_LEVEL_KEYS:
+        raise ValidationError(
+            "invalid_payload",
+            "The v2 payload must contain exactly schemaVersion, createdAt, batchId, and changes.",
+        )
+
+    schema_version = payload["schemaVersion"]
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise ValidationError("unsupported_schema_version", "schemaVersion must be an integer.")
+    if schema_version != 2:
+        raise ValidationError(
+            "unsupported_schema_version",
+            "Unsupported schemaVersion %s; this receiver supports 1 and 2." % schema_version,
+        )
+
+    batch_created_at = parse_timestamp(payload["createdAt"], "createdAt")
+    batch_created_at_text = format_timestamp_utc(batch_created_at)
+    parse_record_id(payload["batchId"], "batchId")
+
+    changes = payload["changes"]
+    if not isinstance(changes, list):
+        raise ValidationError("invalid_payload", "changes must be an array.")
+    if len(changes) == 0:
+        raise ValidationError("empty_batch", "changes must contain at least one change.")
+    if len(changes) > max_changes:
+        raise ValidationError(
+            "too_many_records",
+            "A batch may contain at most %d changes; got %d." % (max_changes, len(changes)),
+        )
+
+    prepared = [
+        _validate_change(change, index) for index, change in enumerate(changes)
+    ]
+    return batch_created_at_text, prepared
+
+
+def _validate_change(change, index):
+    where = "change at index %d" % index
+    if not isinstance(change, dict):
+        raise ValidationError("invalid_record", "%s must be an object." % where)
+    keys = set(change)
+    if not keys >= _CHANGE_KEYS or not keys <= (_CHANGE_KEYS | _UPSERT_KEYS | _DELETE_KEYS):
+        raise ValidationError(
+            "invalid_record", "%s must contain kind plus the fields for that kind." % where
+        )
+    kind = change["kind"]
+    if kind == "upsert":
+        if _UPSERT_KEYS != keys - _CHANGE_KEYS:
+            raise ValidationError("invalid_record", "%s upsert must contain exactly record." % where)
+        record = change["record"]
+        if not isinstance(record, dict):
+            raise ValidationError("invalid_record", "%s record must be an object." % where)
+        record_tuple = _validate_record(record, index)
+        return PreparedChange("upsert", record_tuple[0], record_tuple[1], record_tuple=record_tuple)
+    if kind == "delete":
+        if _DELETE_KEYS != keys - _CHANGE_KEYS:
+            raise ValidationError(
+                "invalid_record", "%s delete must contain exactly id, metric, startDate, endDate." % where
+            )
+        record_id = parse_record_id(change["id"], "%s id" % where)
+        metric = change["metric"]
+        if not isinstance(metric, str) or metric not in ALLOWED_METRICS:
+            raise ValidationError("unknown_metric", "%s has an unsupported metric." % where)
+        start_date = parse_timestamp(change["startDate"], "%s startDate" % where)
+        end_date = parse_timestamp(change["endDate"], "%s endDate" % where)
+        if end_date < start_date:
+            raise ValidationError(
+                "invalid_record", "%s endDate must not precede startDate." % where
+            )
+        return PreparedChange(
+            "delete",
+            record_id,
+            metric,
+            dates=(format_timestamp_utc(start_date), format_timestamp_utc(end_date)),
+        )
+    raise ValidationError("invalid_record", "%s has an unsupported kind." % where)

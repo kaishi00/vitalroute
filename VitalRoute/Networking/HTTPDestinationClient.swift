@@ -130,6 +130,38 @@ final class HTTPDestinationClient: DestinationClient {
         return try Self.decodeHealthResponse(data)
     }
 
+    func sendChanges(
+        _ changes: [SyncChangeEvent],
+        batchID: UUID,
+        to endpoint: URL,
+        authorization: DestinationAuthorization
+    ) async throws -> ChangeAcknowledgment {
+        try Self.requireHTTPS(endpoint)
+        // The contract rejects empty batches; an empty payload here is a
+        // caller bug that must not be reported as a successful delivery.
+        guard !changes.isEmpty else {
+            throw DestinationClientError.emptyBatch
+        }
+        let body = try ChangeBatchEncoder.encode(batchID: batchID, createdAt: Date(), changes: changes)
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        Self.authorize(request: &request, authorization: authorization)
+
+        let data = try await perform(request)
+        let acknowledgment = try ChangeAcknowledgmentDecoder.decode(data)
+        let upserts = changes.filter { if case .upsert = $0 { return true } else { return false } }.count
+        let deletes = changes.count - upserts
+        // The contract guarantees every sent change is accounted for; a
+        // receiver that acknowledges fewer has not confirmed the batch.
+        guard acknowledgment.reconciles(upsertsSent: upserts, deletesSent: deletes) else {
+            throw DestinationClientError.malformedAcknowledgment
+        }
+        return acknowledgment
+    }
+
     private func perform(_ request: URLRequest) async throws -> Data {
         let data: Data
         let response: URLResponse
@@ -217,6 +249,7 @@ final class HTTPDestinationClient: DestinationClient {
             let status: String
             let service: String
             let apiVersion: Int
+            let capabilities: [String]?
         }
         let shape: Shape
         do {
@@ -227,7 +260,12 @@ final class HTTPDestinationClient: DestinationClient {
         guard shape.status == "ok", !shape.service.isEmpty, shape.apiVersion >= 1 else {
             throw DestinationClientError.malformedAcknowledgment
         }
-        return ReceiverHealthResponse(status: shape.status, service: shape.service, apiVersion: shape.apiVersion)
+        return ReceiverHealthResponse(
+            status: shape.status,
+            service: shape.service,
+            apiVersion: shape.apiVersion,
+            capabilities: Set(shape.capabilities ?? [])
+        )
     }
 }
 

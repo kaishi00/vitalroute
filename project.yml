@@ -30,6 +30,11 @@ targets:
         CFBundleVersion: '1'
         NSHealthShareUsageDescription: VitalRoute reads only the Apple Health categories shown in Health Data so you can route recent records to a destination you control.
         UILaunchScreen: {}
+        UIBackgroundModes:
+          - fetch
+          - processing
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.milim.vitalroute.sync
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.milim.vitalroute
