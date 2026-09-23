@@ -361,6 +361,11 @@ final class AutomaticSyncEngine {
         // checkpoint, so answering only abandons the notification.
         releaseObserverCompletions()
         discardedWorkNotice = nil
+        // No retry belongs to a disabled engine: leaving this set made
+        // Settings show a "Next retry" for sync that is off. An already
+        // armed background request is harmless — its handler finds the
+        // engine off and does nothing.
+        nextRetryAt = nil
         lastStatusMessage = "Automatic sync is off."
 
         await healthData.stopObservingChanges()
@@ -395,6 +400,10 @@ final class AutomaticSyncEngine {
         }
         do {
             try await registerObservers(for: metrics, generation: generation)
+        } catch let error as HealthKitServiceError where error == .registrationSuperseded {
+            // Launch runs this alongside the SwiftUI configuration callbacks,
+            // which can share its generation; the concurrent report that won
+            // owns observation, so this must not pause over a race it lost.
         } catch {
             guard isCurrent(generation) else { return }
             observersRegistered = false
@@ -420,14 +429,21 @@ final class AutomaticSyncEngine {
         // A real change invalidates in-flight work before the first
         // suspension; an unchanged re-report (the UI re-renders) must not
         // cancel an enablement the user just asked for.
-        let generation = claimConfigurationIfChanged(
+        let claim = claimConfigurationIfChanged(
             destination: newDestination,
             token: newToken,
             metrics: newMetrics
         )
+        let generation = claim.generation
 
         let previousDestination = destination
         let previousMetrics = selectedMetrics
+        // Observation is bound to the destination identity and the category
+        // set, not to the credential: re-arming it for an identical
+        // re-report would tear down and rebuild background delivery for
+        // nothing, and is what made the registration race reachable.
+        let registrationChanged = claim.isNew
+            && (previousDestination != newDestination || previousMetrics != newMetrics)
         let destinationChanged = !previousDestination.isEmpty && previousDestination != newDestination
 
         if mode == .disabled {
@@ -511,7 +527,15 @@ final class AutomaticSyncEngine {
 
         // Re-register observers for the (possibly changed) set; a category
         // re-enable gets a fresh scope generation on its next query because
-        // its checkpoint was cleared above.
+        // its checkpoint was cleared above. An identical re-report, or one
+        // that only replaced the credential, keeps the existing registration.
+        guard registrationChanged || !observersRegistered else {
+            if case .paused(let reason) = mode, reason.isAutoRecoverable {
+                mode = .active
+            }
+            startPass(trigger: .foregroundCatchUp)
+            return
+        }
         do {
             try await registerObservers(for: newMetrics, generation: generation)
         } catch let error as HealthKitServiceError where error == .registrationSuperseded {
@@ -1129,22 +1153,28 @@ final class AutomaticSyncEngine {
         return configurationGeneration
     }
 
+    private struct ConfigurationClaim {
+        let generation: Int
+        /// Whether anything the engine acts on actually differs. The UI
+        /// re-reports identical values on unrelated renders, and that must
+        /// neither cancel work the user just asked for nor churn observation.
+        let isNew: Bool
+    }
+
     /// Claims a new generation only when the configuration actually differs
-    /// from the last one reported. The UI re-reports identical values on
-    /// unrelated renders, and that must not cancel work the user just asked
-    /// for.
+    /// from the last one reported.
     private func claimConfigurationIfChanged(
         destination: String,
         token: String?,
         metrics: Set<HealthMetric>
-    ) -> Int {
+    ) -> ConfigurationClaim {
         let new = ConfigurationSnapshot(destination: destination, token: token, metrics: metrics)
         guard new != latestConfiguration else {
-            return configurationGeneration
+            return ConfigurationClaim(generation: configurationGeneration, isNew: false)
         }
         latestConfiguration = new
         configurationGeneration += 1
-        return configurationGeneration
+        return ConfigurationClaim(generation: configurationGeneration, isNew: true)
     }
 
     // MARK: - Classification

@@ -1388,6 +1388,60 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertTrue(engine.isEnabled)
     }
 
+    func testUnchangedConfigurationDoesNotReRegisterObservers() async throws {
+        // The UI re-reports one change through several observable properties.
+        // Those re-reports must not tear down and rebuild background delivery
+        // for nothing — and doing so is what made the registration race
+        // reachable in the first place.
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        let attemptsAfterEnable = provider.registrationAttempts
+
+        await engine.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await engine.waitUntilIdle()
+        XCTAssertEqual(provider.registrationAttempts, attemptsAfterEnable,
+                       "an identical re-report must not churn observation")
+        XCTAssertTrue(engine.isEnabled)
+
+        // A credential that must be used stays current without a re-arm.
+        await engine.configurationChanged(destination: endpoint, token: "replaced-token-0009", metrics: [.steps])
+        await engine.waitUntilIdle()
+        XCTAssertEqual(provider.registrationAttempts, attemptsAfterEnable,
+                       "a credential-only change must not churn observation")
+
+        // A real change still re-arms.
+        await engine.configurationChanged(destination: endpoint, token: "replaced-token-0009", metrics: [.steps, .sleep])
+        await engine.waitUntilIdle()
+        XCTAssertEqual(provider.registrationAttempts, attemptsAfterEnable + 1,
+                       "a changed category set must re-arm observation")
+    }
+
+    func testRestoreToleratesALostRegistrationRace() async throws {
+        // Launch runs restoration alongside the SwiftUI configuration
+        // callbacks, which can share its generation and win the registration
+        // race. The restore must not turn that into a pause.
+        defaults.set(true, forKey: "automaticSync.enabled")
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+
+        provider.observeError = HealthKitServiceError.registrationSuperseded
+        await engine.restoreOnLaunch(destination: endpoint, token: token, metrics: [.steps])
+        await engine.waitUntilIdle()
+
+        XCTAssertTrue(engine.isEnabled)
+        if case .paused(let reason) = engine.mode {
+            XCTFail("a lost registration race must not pause restoration: \(reason)")
+        }
+        XCTAssertFalse(
+            engine.lastStatusMessage?.contains("observers could not be registered") == true,
+            engine.lastStatusMessage ?? ""
+        )
+    }
+
     // MARK: Destination-bound queue
 
     func testDestinationChangeWhileDisabledDiscardsQueuedWork() async throws {

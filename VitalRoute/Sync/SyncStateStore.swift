@@ -34,7 +34,6 @@ struct DeliveryRetryState: Codable, Equatable {
     var lastFailureIsActionable = false
     var lastFailureMessage: String?
     var lastSuccessAt: Date?
-    var lastCheckAt: Date?
 
     static let initial = DeliveryRetryState()
 
