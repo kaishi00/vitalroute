@@ -1,28 +1,38 @@
 # VitalRoute
 
-VitalRoute is a native iOS app for routing the Apple Health data a person chooses to an HTTPS endpoint they control. The repository is intended to hold the iOS client and a reference receiving server together.
+VitalRoute is a native iOS app for routing the Apple Health data a person chooses to an HTTPS endpoint they control. The repository holds the iOS client and a reference receiving server together.
+
+## What works today (manual sync milestone)
+
+- **Explicit export selection** — the seven categories (steps, heart rate, resting heart rate, heart rate variability, sleep, active energy, workouts) are opt-in toggles; nothing is selected by default, and VitalRoute requests HealthKit read access only for the categories you enable.
+- **Secure destination + credential** — the HTTPS endpoint and its API key are stored separately in the device Keychain. Keys are namespaced per destination, so changing endpoints never reuses the previous destination's key. "Test connection" checks reachability, TLS, and the key without sending health records.
+- **Manual sync** — "Sync Now" reads every record in the last seven days for the selected categories (not the dashboard's 20-sample preview), uploads in bounded batches over HTTPS with normal certificate validation and no redirects, and reports acknowledged counts, partial failures, truncation, and cancellation honestly. Retrying is safe: the receiver stores each record once.
+- **Reference receiver** — `server/` contains a dependency-free Python receiver with Bearer-token auth, strict validation, transactional SQLite persistence, and idempotent ingestion. See `server/README.md` and the contract in `server/API.md`.
+
+Nothing syncs automatically: saving configuration, opening the app, or refreshing the dashboard never uploads data. Only tapping Sync Now does.
 
 ## Project structure
 
-- `VitalRoute/App/` — app entry point and shared app state
+- `VitalRoute/App/` — app entry point, shared app state, and dependency wiring
 - `VitalRoute/Features/` — Overview, Health Data, Destination, and Settings screens
-- `VitalRoute/Health/` — HealthKit service boundary and read queries
-- `VitalRoute/Models/` — health records, metrics, and versioned JSON payload
-- `VitalRoute/Networking/` — destination validation and future HTTPS transport contract
-- `VitalRoute/Persistence/` — local destination endpoint preference
-- `VitalRouteTests/` — unit tests for endpoint validation, metric mapping, and JSON serialization
-- `server/` — reserved for the reference receiving server; not implemented yet
-- `.github/workflows/` — iOS CI and the additional OpenCode pull request review
+- `VitalRoute/Health/` — HealthKit service boundary, record mapping, and paged export queries
+- `VitalRoute/Models/` — health records, metrics, payload, and receiver acknowledgments
+- `VitalRoute/Networking/` — destination validation and the HTTPS transport client
+- `VitalRoute/Persistence/` — Keychain-backed destination and credential stores, export selection
+- `VitalRoute/Sync/` — the manual sync coordinator
+- `VitalRouteTests/` — unit tests (mocked transport) plus an env-gated live receiver integration test
+- `server/` — reference receiving server, its tests, contract, and synthetic-data tooling
+- `.github/workflows/` — iOS + receiver CI and the additional OpenCode pull request review
 
 The Xcode project is `VitalRoute.xcodeproj`. `project.yml` is its XcodeGen source specification. The shared Xcode scheme is named `VitalRoute`.
 
 ## Health data and privacy
 
-VitalRoute requests read-only access to seven Apple Health categories: steps, heart rate, resting heart rate, heart rate variability (SDNN), sleep, active energy, and workouts. It does not request write access.
+VitalRoute requests read-only access, only to the categories you enable, and never writes to Apple Health. Apple does not tell apps whether read permission was granted, so an empty query is shown as "no samples returned" rather than as proof of denial or consent.
 
-After the user taps the access action, the app queries up to 20 recent samples per category from the preceding seven days and keeps returned records in memory. Apple Health does not tell apps whether read permission was declined, so an empty query is shown as “no samples returned,” not as proof that access was denied or granted.
+The app has no analytics, advertising, accounts, or vendor-cloud integration. Health records are held in memory only for the operation you started — there is no local outbox or health database on the device. The destination endpoint and its API key live in the Keychain; record counts and the last-success timestamp are the only sync metadata stored, in plain preferences. The destination URL must be HTTPS without credentials, query strings, or fragments; requests follow no redirects.
 
-The app has no analytics, advertising, account, or vendor-cloud integration. Health data is not sent anywhere in this initial build. A validated HTTPS endpoint is stored in Keychain, so secret-bearing route paths are kept out of preferences. API keys are not saved to this device or sent. Keychain-backed credential handling and HTTPS delivery must be implemented before sync is enabled.
+The reference receiver may hold real health records: treat its SQLite database, token, and certificates as sensitive, keep them out of the repository, and read `server/README.md` before deploying it.
 
 ## Build and test
 
@@ -41,11 +51,36 @@ xcodebuild -project VitalRoute.xcodeproj -scheme VitalRoute -destination 'generi
 xcodebuild -project VitalRoute.xcodeproj -scheme VitalRoute -destination 'platform=iOS Simulator,name=iPhone 17 Pro' CODE_SIGNING_ALLOWED=NO test
 ```
 
+To run the receiver tests:
+
+```sh
+cd server
+python3 -m unittest discover -s tests -v
+```
+
+### Live receiver integration (optional)
+
+The XCTest target includes `ReceiverIntegrationTests`, which runs the production
+HTTP client against a real receiver. It is skipped unless both environment
+variables are set when running tests:
+
+```sh
+VITALROUTE_INTEGRATION_URL='https://localhost:8787/v1/records' \
+VITALROUTE_INTEGRATION_TOKEN='<receiver token>' \
+xcodebuild ... test
+```
+
+The URL must be HTTPS with a certificate the host trusts; production TLS
+validation is never weakened for these tests. See `server/README.md` for
+running the receiver, including with direct TLS.
+
 ## CI and review
 
-The existing iOS workflow validates the repository and shared scheme, builds for the iOS Simulator, and runs XCTest when test targets exist. OpenCode runs as an additional pull request review. To enable it, add these GitHub Actions repository secrets:
+The iOS workflow validates the repository and shared scheme, builds for the iOS Simulator, and runs XCTest; a separate workflow runs the receiver tests on Linux. OpenCode runs as an additional pull request review. To enable it, add these GitHub Actions repository secrets:
 
 - `OPENCODE_GO_API_KEY`
 - `OPENCODE_GH_PAT`
 
-The reference server, background HealthKit delivery, incremental cursors, retries, deletion handling, secure credential storage, and actual HTTPS synchronization are future work.
+## Roadmap boundaries
+
+Background delivery, anchored incremental synchronization, deletion propagation, and the read-only query/MCP interface for downstream consumers are future milestones; this repository currently delivers foreground manual sync and the reference receiver only.

@@ -2,90 +2,32 @@ import SwiftUI
 
 struct DestinationView: View {
     @Environment(DestinationConfigurationStore.self) private var destinationStore
+    @Environment(DestinationCredentialStore.self) private var credentialStore
     @State private var endpointDraft = ""
     @State private var tokenDraft = ""
     @State private var isEditingEndpoint = false
+    @State private var isEditingToken = false
     @State private var statusMessage: String?
+    @State private var isTestingConnection = false
+    @State private var connectionResult: String?
+    @State private var connectionClient = HTTPDestinationClient()
 
     var body: some View {
         Form {
-            Section {
-                Text("Send future exports to an HTTPS endpoint you control. The endpoint is saved securely on this device; this build does not send health data.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                if isEditingEndpoint {
-                    TextField("https://your-server.example/health", text: $endpointDraft)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .textContentType(.URL)
-                        .accessibilityLabel("HTTPS destination endpoint")
-                } else if destinationStore.isConfigured {
-                    Label("HTTPS endpoint saved securely", systemImage: "checkmark.shield")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Button("Change endpoint") {
-                        endpointDraft = destinationStore.savedEndpoint
-                        statusMessage = nil
-                        isEditingEndpoint = true
-                    }
-                } else {
-                    Label("Checking secure storage…", systemImage: "key")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("Destination")
-            } footer: {
-                Text(isEditingEndpoint
-                     ? "HTTPS is required. User info, query strings, and fragments are not accepted in the endpoint."
-                     : "The saved destination is protected by Keychain on this device.")
-            }
-
-            Section {
-                SecureField("API key (not saved)", text: $tokenDraft)
-                    .textContentType(.password)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                Text("This value is kept only in memory and is neither saved to this device nor sent. Keychain-backed credential support will be added before network delivery.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("Authentication")
-            }
-
-            Section {
-                if isEditingEndpoint {
-                    Button("Save endpoint") {
-                        do {
-                            try destinationStore.save(endpoint: endpointDraft)
-                            endpointDraft = ""
-                            isEditingEndpoint = false
-                            statusMessage = "HTTPS endpoint saved securely on this device."
-                        } catch {
-                            statusMessage = error.localizedDescription
-                        }
-                    }
-                    .disabled(!isValidEndpoint)
-
-                    if destinationStore.isConfigured {
-                        Button("Cancel", role: .cancel) {
-                            endpointDraft = ""
-                            isEditingEndpoint = false
-                        }
-                    }
-                }
-
-                Button("Test connection") {}
-                    .disabled(true)
-            } footer: {
-                Text("Connection testing and synchronization will be added after secure credential storage and HTTPS delivery are implemented.")
-            }
+            endpointSection
+            authenticationSection
+            connectionSection
 
             if let storageError = destinationStore.storageError {
                 Section {
                     Label(storageError, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let credentialError = credentialStore.storageError {
+                Section {
+                    Label(credentialError, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -101,15 +43,8 @@ struct DestinationView: View {
 
             if destinationStore.isConfigured {
                 Section {
-                    Button("Remove saved endpoint", role: .destructive) {
-                        do {
-                            try destinationStore.clear()
-                            endpointDraft = ""
-                            isEditingEndpoint = true
-                            statusMessage = "Saved endpoint removed."
-                        } catch {
-                            statusMessage = error.localizedDescription
-                        }
+                    Button("Remove saved destination", role: .destructive) {
+                        removeDestination()
                     }
                 }
             }
@@ -120,6 +55,13 @@ struct DestinationView: View {
         .onChange(of: destinationStore.isLoaded) {
             enterEditingIfUnconfigured()
         }
+        .onChange(of: destinationStore.savedEndpoint) {
+            // The app-level task(id:) reloads credential state; clear any
+            // stale per-endpoint UI on this screen when the endpoint changes.
+            tokenDraft = ""
+            isEditingToken = false
+            connectionResult = nil
+        }
         .onDisappear {
             // Leaving the screen discards the whole editing session — drafts,
             // status text, and edit mode — so returning shows the settled
@@ -128,11 +70,143 @@ struct DestinationView: View {
             tokenDraft = ""
             endpointDraft = ""
             statusMessage = nil
+            connectionResult = nil
             isEditingEndpoint = false
+            isEditingToken = false
         }
         .navigationTitle("Destination")
         .navigationBarTitleDisplayMode(.large)
     }
+
+    // MARK: Sections
+
+    private var endpointSection: some View {
+        Section {
+            Text("Send exports to an HTTPS endpoint you control. The endpoint and its API key are saved separately, each secured in Keychain on this device.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            if isEditingEndpoint {
+                TextField("https://your-server.example/v1/records", text: $endpointDraft)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textContentType(.URL)
+                    .accessibilityLabel("HTTPS destination endpoint")
+
+                Button("Save endpoint") {
+                    saveEndpoint()
+                }
+                .disabled(!isValidEndpoint)
+
+                if destinationStore.isConfigured {
+                    Button("Cancel", role: .cancel) {
+                        endpointDraft = ""
+                        isEditingEndpoint = false
+                    }
+                }
+            } else if destinationStore.isConfigured {
+                Text(destinationStore.savedEndpoint)
+                    .font(.subheadline.weight(.medium))
+                    .textSelection(.enabled)
+                Button("Change endpoint") {
+                    endpointDraft = destinationStore.savedEndpoint
+                    statusMessage = nil
+                    isEditingEndpoint = true
+                }
+            } else if destinationStore.isLoaded {
+                Label("No destination saved yet.", systemImage: "arrow.trianglehead.branch")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Button("Add endpoint") {
+                    statusMessage = nil
+                    isEditingEndpoint = true
+                }
+            } else {
+                Label("Checking secure storage…", systemImage: "key")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Destination")
+        } footer: {
+            Text(isEditingEndpoint
+                 ? "HTTPS is required. User info, query strings, and fragments are not accepted in the endpoint."
+                 : "The saved destination is protected by Keychain on this device.")
+        }
+    }
+
+    private var authenticationSection: some View {
+        Section {
+            if isEditingToken || !credentialStore.hasCredential {
+                SecureField("API key for this destination", text: $tokenDraft)
+                    .textContentType(.password)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                Button(credentialStore.hasCredential ? "Replace API key" : "Save API key") {
+                    saveToken()
+                }
+                .disabled(!canSaveToken)
+
+                if credentialStore.hasCredential {
+                    Button("Cancel", role: .cancel) {
+                        tokenDraft = ""
+                        isEditingToken = false
+                    }
+                }
+            } else if credentialStore.isLoaded {
+                Label("API key saved securely for this destination", systemImage: "checkmark.shield")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Button("Replace API key") {
+                    tokenDraft = ""
+                    statusMessage = nil
+                    isEditingToken = true
+                }
+                Button("Remove API key", role: .destructive) {
+                    removeToken()
+                }
+            } else {
+                Label("Checking secure storage…", systemImage: "key")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Authentication")
+        } footer: {
+            Text("Keys are stored per destination: changing the endpoint removes the previous destination's key instead of reusing it. The key is sent only as an authorization header over HTTPS.")
+        }
+    }
+
+    private var connectionSection: some View {
+        Section {
+            Button {
+                testConnection()
+            } label: {
+                HStack {
+                    if isTestingConnection {
+                        ProgressView()
+                    }
+                    Text("Test connection")
+                }
+            }
+            .disabled(!canTestConnection || isTestingConnection)
+
+            if let connectionResult {
+                Label(connectionResult, systemImage: connectionResultImage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } header: {
+            Text("Connection")
+        } footer: {
+            Text("Checks that the endpoint is reachable over HTTPS and accepts the API key. The test sends no health records.")
+        }
+    }
+
+    // MARK: Actions
 
     /// The saved endpoint loads asynchronously, so the unconfigured check may
     /// only become meaningful after this screen first appears.
@@ -143,7 +217,127 @@ struct DestinationView: View {
         isEditingEndpoint = true
     }
 
+    private func saveEndpoint() {
+        let previousEndpoint = destinationStore.savedEndpoint
+        do {
+            try destinationStore.save(endpoint: endpointDraft)
+            endpointDraft = ""
+            isEditingEndpoint = false
+            statusMessage = "HTTPS endpoint saved securely on this device."
+            if !previousEndpoint.isEmpty && previousEndpoint != destinationStore.savedEndpoint {
+                // Credentials are namespaced per destination: drop the old
+                // destination's key so it is neither reused nor left behind.
+                do {
+                    try credentialStore.removeCredential(for: previousEndpoint)
+                    statusMessage = "HTTPS endpoint saved. The previous destination's API key was removed."
+                } catch {
+                    statusMessage = "HTTPS endpoint saved, but the previous destination's API key could not be removed from secure storage."
+                }
+            }
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func removeDestination() {
+        let endpoint = destinationStore.savedEndpoint
+        do {
+            try destinationStore.clear()
+            try credentialStore.removeCredential(for: endpoint)
+            endpointDraft = ""
+            isEditingEndpoint = true
+            tokenDraft = ""
+            isEditingToken = false
+            connectionResult = nil
+            statusMessage = "Saved destination and its API key were removed."
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func saveToken() {
+        do {
+            try credentialStore.saveCredential(tokenDraft, for: destinationStore.savedEndpoint)
+            tokenDraft = ""
+            isEditingToken = false
+            statusMessage = "API key saved securely for this destination."
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func removeToken() {
+        do {
+            try credentialStore.removeCredential(for: destinationStore.savedEndpoint)
+            isEditingToken = false
+            statusMessage = "API key removed."
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    private func testConnection() {
+        guard let endpoint = URL(string: destinationStore.savedEndpoint), endpoint.scheme == "https" else {
+            connectionResult = "Save a valid HTTPS destination first."
+            return
+        }
+        guard let bearer = resolvedToken() else {
+            connectionResult = "Enter or save an API key before testing."
+            return
+        }
+
+        isTestingConnection = true
+        connectionResult = nil
+        Task {
+            defer { isTestingConnection = false }
+            do {
+                let response = try await connectionClient.testConnection(
+                    to: endpoint,
+                    authorization: DestinationAuthorization(bearerToken: bearer)
+                )
+                connectionResult = "Connection verified — \(response.service) (API v\(response.apiVersion)) acknowledged the key. No health records were sent."
+            } catch is CancellationError {
+                connectionResult = nil
+            } catch {
+                connectionResult = "Connection failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Saved token when present, otherwise the draft the user just typed —
+    /// letting a key be verified before it is committed to Keychain.
+    private func resolvedToken() -> String? {
+        if credentialStore.hasCredential,
+           credentialStore.credentialEndpoint == destinationStore.savedEndpoint,
+           let token = credentialStore.loadedToken {
+            return token
+        }
+        let draft = tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return draft.isEmpty ? nil : draft
+    }
+
+    // MARK: Derived state
+
+    private var canSaveToken: Bool {
+        destinationStore.isConfigured
+            && !tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canTestConnection: Bool {
+        guard destinationStore.isConfigured, !isEditingEndpoint, !isEditingToken else {
+            return false
+        }
+        return credentialStore.hasCredential
+            || !tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private var isValidEndpoint: Bool {
         (try? DestinationConfiguration(endpoint: endpointDraft)) != nil
+    }
+
+    private var connectionResultImage: String {
+        connectionResult?.hasPrefix("Connection verified") == true
+            ? "checkmark.circle"
+            : "exclamationmark.triangle"
     }
 }
