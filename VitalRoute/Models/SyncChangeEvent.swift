@@ -72,9 +72,11 @@ extension SyncChangeEvent: Codable {
         case "delete":
             self = .delete(try container.decode(DeletedRecord.self, forKey: .deleted))
         case let other:
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Unknown change kind \(other)."
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Unknown change kind \(other)."
+                )
             )
         }
     }
