@@ -48,7 +48,7 @@ actor Outbox {
     @discardableResult
     func append(_ events: [SyncChangeEvent]) throws -> Int {
         try ensurePrepared()
-        let existing = allEventIDs()
+        var existing = allEventIDs()
         var written = 0
         for event in events where existing.insert(event.eventID).inserted {
             let data = try encoder.encode(event)
