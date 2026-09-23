@@ -844,8 +844,15 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private(set) var sentChangeBatches: [SentBatch] = []
-    private(set) var testConnectionCount = 0
+    private var storage: [SentBatch] = []
+    private var connections = 0
+    /// Synchronous lock accessors: NSLock must not be touched lexically
+    /// inside async functions (an error under Swift 6 concurrency).
+    private var sentChangeBatches: [SentBatch] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
 
     var healthResponse = ReceiverHealthResponse(
         status: "ok", service: "vitalroute-receiver", apiVersion: 2,
@@ -854,18 +861,21 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
     var nextAcknowledgment: ChangeAcknowledgment?
     var sendGate: AsyncGate?
     private var queuedFailure: DestinationClientError?
+    private var failureForThisSend: DestinationClientError?
 
     func failNextDelivery(with error: DestinationClientError) {
-        lock.lock()
-        queuedFailure = error
-        lock.unlock()
+        performLocked { queuedFailure = error }
     }
 
     /// Clears delivery history without forgetting the queued failure
     /// semantics used across enable/pass boundaries in a test.
     func resetDelivery() {
+        performLocked { storage.removeAll() }
+    }
+
+    private func performLocked(_ body: () -> Void) {
         lock.lock()
-        sentChangeBatches.removeAll()
+        body()
         lock.unlock()
     }
 
@@ -881,9 +891,7 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse {
-        lock.lock()
-        testConnectionCount += 1
-        lock.unlock()
+        performLocked { connections += 1 }
         return healthResponse
     }
 
@@ -893,19 +901,22 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ChangeAcknowledgment {
-        lock.lock()
-        let failure = queuedFailure
-        queuedFailure = nil
-        sentChangeBatches.append(SentBatch(
-            changes: changes, batchID: batchID, endpoint: endpoint, authorization: authorization
-        ))
-        lock.unlock()
+        performLocked {
+            storage.append(SentBatch(
+                changes: changes, batchID: batchID, endpoint: endpoint, authorization: authorization
+            ))
+        }
 
         if let gate = sendGate {
             await gate.enter()
             try Task.checkCancellation()
         }
-        if let failure {
+        performLocked {
+            failureForThisSend = queuedFailure
+            queuedFailure = nil
+        }
+        if let failure = failureForThisSend {
+            failureForThisSend = nil
             throw failure
         }
         if let nextAcknowledgment {
@@ -998,17 +1009,14 @@ private final class AsyncGate: @unchecked Sendable {
     private let lock = NSLock()
     private var opened = false
 
+    private var isOpen: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return opened
+    }
+
     func enter() async {
-        while true {
-            lock.lock()
-            if opened {
-                lock.unlock()
-                return
-            }
-            lock.unlock()
-            if Task.isCancelled {
-                return
-            }
+        while !isOpen && !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
     }

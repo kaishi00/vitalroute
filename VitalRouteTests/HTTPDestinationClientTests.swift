@@ -290,7 +290,7 @@ final class HTTPDestinationClientTests: XCTestCase {
             )
         }
         await assertThrows(.insecureEndpoint) {
-            try await client.testConnection(
+            _ = try await client.testConnection(
                 to: URL(string: "http://health.example.org/v1/records")!,
                 authorization: self.authorization
             )
