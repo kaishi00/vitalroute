@@ -14,6 +14,7 @@ set -euo pipefail
 
 SIM_NAME="${1:-iPhone 17 Pro}"
 PORT="${PORT:-8787}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INTDIR="$(mktemp -d "${TMPDIR:-/tmp}/vitalroute-integration.XXXXXX")"
 trap 'cleanup' EXIT
 
@@ -50,7 +51,6 @@ TOKEN="integration-token-$(openssl rand -hex 12)"
 DB="$INTDIR/records.sqlite3"
 
 echo "--- Starting TLS receiver on 127.0.0.1:$PORT ---"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VITALROUTE_TOKEN="$TOKEN" VITALROUTE_DB="$DB" \
   python3 "$SCRIPT_DIR/receiver.py" --host 127.0.0.1 --port "$PORT" \
   --tls-cert "$INTDIR/cert.pem" --tls-key "$INTDIR/key.pem" \
