@@ -55,6 +55,7 @@ enum AutomaticSyncTrigger: Equatable {
     case observer
     case backgroundTask
     case foregroundCatchUp
+    case manualSyncFinished
     case absorbedCatchUp
 }
 
@@ -500,7 +501,7 @@ final class AutomaticSyncEngine {
                 // are durably recorded: a crash before this line replays
                 // the page (harmlessly — events dedupe).
                 anchorData = page.anchorData
-                await stateStore.save(CategoryCheckpoint(
+                try await stateStore.save(CategoryCheckpoint(
                     scope: scope,
                     anchorData: anchorData,
                     updatedAt: now()
@@ -660,6 +661,8 @@ final class AutomaticSyncEngine {
                 return .actionable(.protocolFailure("the destination acknowledged batches in an unexpected format."))
             case .payloadTooLarge:
                 return .actionable(.protocolFailure("the destination rejected the batch size."))
+            case .tlsValidationFailed:
+                return .actionable(.protocolFailure("the destination's certificate could not be validated."))
             case .requestTimedOut, .connectionFailed, .invalidResponse:
                 return .transient
             case .serverRejected(let status):
@@ -679,9 +682,12 @@ final class AutomaticSyncEngine {
                 return .deferred(healthError.localizedDescription)
             }
         }
-        if let cocoaError = error as? CocoaError,
-           cocoaError.isFileProtectionError {
-            return .deferred("the device is locked and protected storage is unavailable.")
+        if let cocoaError = error as? CocoaError {
+            // Storage failures during a pass are treated as deferred work:
+            // the common cause is file protection while the device is
+            // locked; anything else is retried with backoff and surfaced.
+            _ = cocoaError
+            return .deferred("protected storage is unavailable; the device may be locked.")
         }
         return .transient
     }
@@ -700,17 +706,3 @@ final class AutomaticSyncEngine {
     }
 }
 
-private extension CocoaError {
-    /// File-protection failures (writes refused while the device is locked)
-    /// surface directly or wrapped; both mean deferred work, not an error.
-    var isFileProtectionError: Bool {
-        if code.rawValue == NSFileWriteFileProtectionError {
-            return true
-        }
-        if let underlying = userInfo[NSUnderlyingErrorKey] as? NSError {
-            return underlying.domain == NSCocoaErrorDomain
-                && underlying.code == NSFileWriteFileProtectionError
-        }
-        return false
-    }
-}

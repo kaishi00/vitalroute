@@ -8,7 +8,7 @@ enum BackgroundSyncTasks {
 
     /// Must be called before the app finishes launching.
     static func register(engine: AutomaticSyncEngine) {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: appRefreshIdentifier) { task in
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: appRefreshIdentifier, using: nil) { task in
             guard let refresh = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
                 return
