@@ -356,10 +356,11 @@ final class AutomaticSyncEngine {
 
     /// Bounded wait used by the background-task handler to hold the task
     /// open while the pass finishes; the expiration handler cancels the work
-    /// regardless, so this is best-effort only.
+    /// regardless, so this is best-effort only. Real time, not the injected
+    /// clock, so tests advancing the clock cannot shorten the wait.
     func waitUntilIdle(timeout: TimeInterval = 25) async {
-        let deadline = now() + timeout
-        while isRunning && now() < deadline {
+        let deadline = Date().addingTimeInterval(timeout)
+        while isRunning && Date() < deadline {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
     }
@@ -386,6 +387,9 @@ final class AutomaticSyncEngine {
             needsCatchUp = true
             return
         }
+        // Set synchronously so waiters see the run as soon as the trigger
+        // returns; cleared only when no absorbed catch-up follows.
+        isRunning = true
         let task = Task { [weak self] in
             guard let self else { return }
             await self.performPass(trigger: trigger)
@@ -393,14 +397,14 @@ final class AutomaticSyncEngine {
             if self.needsCatchUp, self.isEnabled {
                 self.needsCatchUp = false
                 self.startPass(trigger: .absorbedCatchUp)
+                return
             }
+            self.isRunning = false
         }
         activeRunTask = task
     }
 
     private func performPass(trigger: AutomaticSyncTrigger) async {
-        isRunning = true
-        defer { isRunning = false }
         do {
             try await workGate.run { @MainActor [weak self] () throws -> Void in
                 try await self?.performPassBody(trigger: trigger)
