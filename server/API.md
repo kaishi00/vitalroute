@@ -60,8 +60,9 @@ configuration to a single URL regardless of where a backend mounts the API.
 ## Version 2: additions and deletions — `schemaVersion: 2`
 
 Contract v2 extends the same endpoint with a change-batch payload. The
-version selects the schema: a v1-only receiver rejects `schemaVersion: 2`
-with `unsupported_schema_version` (its existing behavior), and a v2 receiver
+version selects the schema: a v1-only receiver rejects a v2 body outright
+(with `invalid_payload`, because the shape does not match its contract), and
+a v2 receiver
 never reinterprets a v1 body as v2 or vice versa — `schemaVersion` must match
 the body shape (`records` for v1, `changes` for v2).
 

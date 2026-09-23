@@ -39,6 +39,12 @@ entitlements are declared in `project.yml` and generated into
   background tasks, no network work.
 - **Active**: observers registered for every selected category; observers are
   restored at every supported app launch (app-level, not screen-level).
+  Restoration deliberately trusts the destination that was verified when
+  automatic sync was enabled: it does not re-run the capability check, so a
+  launch without network still arms observation and captures locally. A
+  receiver downgraded in place is then reported at delivery time as an
+  actionable pause — the trade-off taken to keep background capture working
+  offline.
 - **Paused(reason)**: automatic work stops, queued work and checkpoints are
   kept. Reasons: destination or credential missing/changed, receiver
   incompatible (auth/protocol/ack failures), queue at capacity, category
@@ -110,8 +116,10 @@ records — retained only until acknowledged, then deleted.
   checkpoints; delivery drains events in batches. Cancellation or budget
   expiry during delivery leaves events pending.
 - **Backpressure**: when pending events ≥ cap (10,000), query passes stop and
-  the state surfaces pending work. Changes are never discarded by a query
-  pass.
+  the state surfaces pending work. The cap is soft: it is checked before a
+  page and between categories, so one page of additions (plus its deletions)
+  can overshoot it before the next check. Changes are never discarded by a
+  query pass.
 - **Destination binding**: the queue records the destination it was captured
   for, durably. A pass refuses to add to, and delivery refuses to send, a
   queue whose recorded owner differs from the destination in effect —
@@ -186,9 +194,9 @@ time as their interval; the receiver's tombstone stores it for audit.
 
 ## 5. Receiver contract v2 (deletions)
 
-Same endpoint, explicit new payload version — a v1 receiver rejects
-`schemaVersion: 2` with `unsupported_schema_version` (already its behavior),
-so nothing is silently reinterpreted.
+Same endpoint, explicit new payload version. A v1-only receiver rejects a v2
+body outright — with `invalid_payload`, because the shape does not match its
+contract — so nothing is silently reinterpreted.
 
 - **Capability detection**: `GET` the configured endpoint. v2 receivers
   return `"apiVersion": 2` plus `"capabilities": ["additions", "deletions"]`.

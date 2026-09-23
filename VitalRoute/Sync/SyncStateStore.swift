@@ -133,6 +133,12 @@ actor SyncStateStore {
     /// state is written before any checkpoint exists (a purge writes
     /// `.initial`), and writing into an absent directory silently discarded
     /// the schedule instead of persisting it.
+    ///
+    /// Write failures stay swallowed, deliberately: this is advisory
+    /// bookkeeping, not health data. Losing it degrades to retrying on the
+    /// default interval rather than the backed-off one, and any storage
+    /// failure serious enough to matter is surfaced by the checkpoint write
+    /// in the same pass, which does throw.
     func saveRetryState(_ state: DeliveryRetryState) {
         try? ensurePrepared()
         if let data = try? encoder.encode(state) {

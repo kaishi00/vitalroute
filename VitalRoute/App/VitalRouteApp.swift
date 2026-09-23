@@ -92,8 +92,13 @@ struct VitalRouteApp: App {
                 .onChange(of: selectionStore.selectedMetrics) {
                     syncConfigurationWithEngine()
                 }
-                .onChange(of: syncCoordinator.isSyncing) { oldValue, newValue in
-                    if oldValue && !newValue {
+                // `isSyncing` cannot drive this: it is a computed property
+                // over the observation-ignored task handle, so reading it
+                // registers no dependency and its transitions are never
+                // observed. `phase` is observable, and every run — including
+                // one cancelled while queued — ends by returning it to .idle.
+                .onChange(of: syncCoordinator.phase) { oldValue, newValue in
+                    if oldValue != .idle && newValue == .idle {
                         autoSyncEngine.manualSyncFinished()
                     }
                 }

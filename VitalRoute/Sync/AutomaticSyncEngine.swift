@@ -742,7 +742,7 @@ final class AutomaticSyncEngine {
         // was not running. Discard before capturing: nothing may be added to
         // a queue that is no longer addressable, and nothing in it may reach
         // an endpoint the user did not configure for it.
-        if await discardMismatchedQueue() {
+        if await discardMismatchedQueue(generation: generation) {
             guard isCurrent(generation) else { return false }
         }
 
@@ -1078,7 +1078,7 @@ final class AutomaticSyncEngine {
     /// This is the last line of defence for the destination-identity policy:
     /// a queue whose owner no longer matches is never delivered, and never
     /// added to. Absent ownership information fails closed.
-    private func discardMismatchedQueue() async -> Bool {
+    private func discardMismatchedQueue(generation: Int) async -> Bool {
         let pending = (try? await outbox.pendingCount()) ?? 0
         guard pending > 0 else { return false }
         guard await stateStore.loadPendingScope() != destination else { return false }
@@ -1088,7 +1088,13 @@ final class AutomaticSyncEngine {
         await stateStore.saveRetryState(.initial)
         await refreshPendingCount()
         discardedWorkNotice = "\(pending) queued change(s) were discarded because they were captured for a different destination. They will never be sent anywhere else."
-        lastStatusMessage = discardedWorkNotice
+        // The fact is recorded unconditionally — a user must not silently
+        // lose queued health data — but the visible line is only this pass's
+        // to write while it is still the current decision, matching the
+        // destination purge.
+        if isCurrent(generation) {
+            lastStatusMessage = discardedWorkNotice
+        }
         return true
     }
 
