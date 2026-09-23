@@ -121,9 +121,14 @@ struct DestinationView: View {
             enterEditingIfUnconfigured()
         }
         .onDisappear {
+            // Leaving the screen discards the whole editing session — drafts,
+            // status text, and edit mode — so returning shows the settled
+            // saved/unconfigured state; first-time entry is restored by
+            // enterEditingIfUnconfigured() on the next appear.
             tokenDraft = ""
             endpointDraft = ""
             statusMessage = nil
+            isEditingEndpoint = false
         }
         .navigationTitle("Destination")
         .navigationBarTitleDisplayMode(.large)

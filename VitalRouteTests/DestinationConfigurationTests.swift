@@ -113,15 +113,13 @@ final class DestinationConfigurationTests: XCTestCase {
     func testSaveDuringInFlightLoadKeepsSavedState() async throws {
         let secureStore = GatedReadStore()
         let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
+        // Release on every exit path so the gated read can never strand the
+        // loading task, including assertion failures and thrown saves.
+        defer { secureStore.releaseRead() }
 
         async let loadResult = configurationStore.loadSavedEndpoint()
-        // Poll without blocking the main actor so the load task stays free to
-        // reach the gated read; fail fast instead of hanging if it never does.
-        let deadline = ContinuousClock().now + .seconds(5)
-        while !secureStore.isReadEntered {
-            XCTAssertTrue(ContinuousClock().now < deadline, "gated read never started")
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
+        let readEntered = await waitForReadEntry(secureStore, timeout: .seconds(5))
+        XCTAssertTrue(readEntered, "gated read never started")
 
         try configurationStore.save(endpoint: "https://new.example.org/v1/ingest")
 
@@ -132,23 +130,87 @@ final class DestinationConfigurationTests: XCTestCase {
         XCTAssertEqual(secureStore.savedValue, "https://new.example.org/v1/ingest")
         XCTAssertTrue(configurationStore.isConfigured)
         XCTAssertNil(configurationStore.storageError)
+        // The settled-state guard discards the read outcome here, so a missed
+        // release would otherwise hide behind a slow pass.
+        XCTAssertFalse(secureStore.hitFailSafe, "gated read hit its fail-safe deadline")
+    }
+
+    @MainActor
+    func testGatedReadPollExitsAtDeadlineWhenLoadNeverStarts() async throws {
+        let secureStore = GatedReadStore()
+        let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
+        // A settled store makes loadSavedEndpoint() return without reading,
+        // so the poll must exit at its deadline instead of hanging.
+        try configurationStore.save(endpoint: "https://settled.example.org/v1/ingest")
+
+        async let loadResult = configurationStore.loadSavedEndpoint()
+        let readEntered = await waitForReadEntry(secureStore, timeout: .milliseconds(200))
+
+        XCTAssertFalse(readEntered, "load should not perform a read once state is settled")
+        await loadResult
+
+        XCTAssertEqual(configurationStore.savedEndpoint, "https://settled.example.org/v1/ingest")
+        XCTAssertTrue(configurationStore.isLoaded)
+    }
+
+    @MainActor
+    func testFailedSaveDuringInFlightLoadStillCompletesTheLoad() async throws {
+        let secureStore = GatedReadStore()
+        let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
+        defer { secureStore.releaseRead() }
+
+        async let loadResult = configurationStore.loadSavedEndpoint()
+        let readEntered = await waitForReadEntry(secureStore, timeout: .seconds(5))
+        XCTAssertTrue(readEntered)
+
+        // A rejected endpoint throws before any state settles, so the
+        // in-flight read must still commit its result afterwards.
+        XCTAssertThrowsError(try configurationStore.save(endpoint: "not a valid url"))
+
+        secureStore.releaseRead()
+        await loadResult
+
+        XCTAssertEqual(configurationStore.savedEndpoint, "https://old.example.org/v1/ingest")
+        XCTAssertTrue(configurationStore.isLoaded)
+        XCTAssertNil(configurationStore.storageError)
+    }
+
+    @MainActor
+    private func waitForReadEntry(_ secureStore: GatedReadStore, timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock().now + timeout
+        while !secureStore.isReadEntered {
+            if ContinuousClock().now >= deadline {
+                return false
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return true
     }
 }
 
 private struct ThrowingSecureValueStoreError: Error {}
 
 /// Blocks the detached Keychain read until the test releases it, so a
-/// save() can be interleaved while the load is in flight.
+/// save() can be interleaved while the load is in flight. The internal wait
+/// is deadline-bounded as a fail-safe: even a regression in the test flow
+/// cannot spin this thread (and the suite) forever.
 private final class GatedReadStore: SecureValueStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var readEntered = false
     private var released = false
+    private var failSafeTripped = false
     private(set) var savedValue: String?
 
     var isReadEntered: Bool {
         lock.lock()
         defer { lock.unlock() }
         return readEntered
+    }
+
+    var hitFailSafe: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return failSafeTripped
     }
 
     func releaseRead() {
@@ -158,14 +220,24 @@ private final class GatedReadStore: SecureValueStoring, @unchecked Sendable {
     }
 
     func readValue(forKey key: String) throws -> String? {
+        let failSafeDeadline = Date().addingTimeInterval(10)
         lock.lock()
         readEntered = true
-        while !released {
+        while !released && Date() < failSafeDeadline {
             lock.unlock()
             Thread.sleep(forTimeInterval: 0.005)
             lock.lock()
         }
+        let wasReleased = released
+        if !wasReleased {
+            failSafeTripped = true
+        }
         lock.unlock()
+        // The fail-safe must fail the test, not paper over a missed release
+        // by returning data the waiting assertions would accept.
+        guard wasReleased else {
+            throw ThrowingSecureValueStoreError()
+        }
         return "https://old.example.org/v1/ingest"
     }
 

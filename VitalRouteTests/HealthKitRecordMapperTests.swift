@@ -53,6 +53,7 @@ final class HealthKitRecordMapperTests: XCTestCase {
         XCTAssertEqual(record.metadata["sleepStage"], "asleepCore")
     }
 
+    @available(iOS, deprecated: 18.0)
     func testPreservesWorkoutMetadata() throws {
         let date = Date(timeIntervalSince1970: 1_735_689_600)
         let workout = Self.makeWorkout(
@@ -72,6 +73,7 @@ final class HealthKitRecordMapperTests: XCTestCase {
         XCTAssertEqual(record.metadata["distanceMeters"], "5000.0")
     }
 
+    @available(iOS, deprecated: 18.0)
     func testPreservesWorkoutDistanceForNonWalkingActivities() throws {
         let date = Date(timeIntervalSince1970: 1_735_689_600)
         let workout = Self.makeWorkout(
@@ -86,6 +88,69 @@ final class HealthKitRecordMapperTests: XCTestCase {
 
         XCTAssertEqual(record.metadata["distanceMeters"], "15000.0")
         XCTAssertEqual(record.metadata["activeEnergyKcal"], "300.0")
+    }
+
+    func testWorkoutDistanceExportsEachMeasuredDistanceType() throws {
+        let measuredIdentifiers: [HKQuantityTypeIdentifier] = [
+            .distanceWalkingRunning,
+            .distanceCycling,
+            .distanceSwimming,
+            .distanceWheelchair,
+            .distanceDownhillSnowSports,
+            .distanceCrossCountrySkiing,
+            .distancePaddleSports,
+            .distanceRowing,
+            .distanceSkatingSports
+        ]
+        let meters = 1_234.5
+
+        for identifier in measuredIdentifiers {
+            let measuredType = try XCTUnwrap(
+                HKObjectType.quantityType(forIdentifier: identifier),
+                "missing quantity type for \(identifier)"
+            )
+            let distance = HealthKitRecordMapper.workoutDistance { type in
+                type == measuredType ? HKQuantity(unit: .meter(), doubleValue: meters) : nil
+            }
+
+            XCTAssertEqual(
+                distance?.doubleValue(for: .meter()) ?? -1,
+                meters,
+                accuracy: 0.001,
+                "\(identifier.rawValue) statistic was not exported"
+            )
+        }
+    }
+
+    func testWorkoutDistanceSumsMixedDistanceStatistics() throws {
+        let quantitiesByRawIdentifier: [String: Double] = [
+            HKQuantityTypeIdentifier.distanceSwimming.rawValue: 800,
+            HKQuantityTypeIdentifier.distanceCycling.rawValue: 20_000,
+            HKQuantityTypeIdentifier.distanceRowing.rawValue: 5_000,
+            HKQuantityTypeIdentifier.distanceSkatingSports.rawValue: 3_000
+        ]
+
+        let distance = HealthKitRecordMapper.workoutDistance { type in
+            quantitiesByRawIdentifier[type.identifier].map { HKQuantity(unit: .meter(), doubleValue: $0) }
+        }
+
+        XCTAssertEqual(distance?.doubleValue(for: .meter()) ?? -1, 28_800, accuracy: 0.001)
+    }
+
+    func testWorkoutDistanceReturnsNilWhenNoDistanceTypeIsMeasured() {
+        let distance = HealthKitRecordMapper.workoutDistance { _ in nil }
+
+        XCTAssertNil(distance)
+    }
+
+    func testWorkoutDistanceIgnoresStatisticsOutsideTheDistanceTypes() throws {
+        let stepType = try XCTUnwrap(HKObjectType.quantityType(forIdentifier: .stepCount))
+
+        let distance = HealthKitRecordMapper.workoutDistance { type in
+            type == stepType ? HKQuantity(unit: .count(), doubleValue: 5_000) : nil
+        }
+
+        XCTAssertNil(distance)
     }
 
     func testReturnsNilForMismatchedSampleType() throws {
