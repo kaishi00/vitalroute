@@ -90,8 +90,19 @@ final class HTTPDestinationClientTests: XCTestCase {
             )
         }
 
+        // Acknowledgment counts must cover the whole batch; send 15 records
+        // to match the 12 new + 3 duplicates the receiver reports.
+        let records = (0..<15).map { index in
+            HealthRecord(
+                metric: .steps,
+                value: Double(index),
+                unit: "count",
+                startDate: Date(timeIntervalSince1970: 1_735_689_600),
+                endDate: Date(timeIntervalSince1970: 1_735_689_600)
+            )
+        }
         let acknowledgment = try await client.send(
-            samplePayload(),
+            SyncPayload(records: records),
             to: endpoint,
             authorization: authorization
         )
