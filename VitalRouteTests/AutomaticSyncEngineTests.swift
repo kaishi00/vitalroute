@@ -846,6 +846,12 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [SentBatch] = []
     private var connections = 0
+
+    var testConnectionCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return connections
+    }
     /// Synchronous lock accessor: NSLock must not be touched lexically
     /// inside async functions (an error under Swift 6 concurrency).
     var sentChangeBatches: [SentBatch] {
