@@ -57,8 +57,8 @@ final class OutboxAndStateStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.totalPending, 3)
         XCTAssertEqual(snapshot.events.map(\.eventID), [
             SyncChangeEvent.upsert(record(1)).eventID,
-            .upsert(record(2)).eventID,
-            .upsert(record(3)).eventID,
+            SyncChangeEvent.upsert(record(2)).eventID,
+            SyncChangeEvent.upsert(record(3)).eventID,
         ])
     }
 
@@ -121,7 +121,8 @@ final class OutboxAndStateStoreTests: XCTestCase {
         // Drain one batch; below capacity again.
         let batch = try await outbox.nextBatch()
         await outbox.remove(eventIDs: batch.events.map(\.eventID))
-        XCTAssertFalse(try await outbox.isAtCapacity())
+        let drained = try await outbox.isAtCapacity()
+        XCTAssertFalse(drained)
     }
 
     func testCheckpointRoundTripPersistsAcrossStoreInstances() async throws {
