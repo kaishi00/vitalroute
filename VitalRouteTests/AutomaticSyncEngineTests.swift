@@ -236,24 +236,27 @@ final class AutomaticSyncEngineTests: XCTestCase {
 
     func testIncrementalQueriesResumeFromPersistedAnchor() async throws {
         let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [
+                HealthChangePage(additions: [record(1)], deletions: [], anchorData: Data("a1".utf8), isFull: false),
+                HealthChangePage(additions: [], deletions: [deletion(1)], anchorData: Data("a2".utf8), isFull: false),
+            ],
+        ]
         let client = ScriptedSyncClient()
         let engine = makeEngine(provider: provider, client: client)
         _ = await enable(engine)
         await engine.waitUntilIdle()
 
-        provider.script = [
-            .steps: [
-                HealthChangePage(additions: [record(2)], deletions: [], anchorData: Data("a2".utf8), isFull: false),
-                HealthChangePage(additions: [], deletions: [deletion(2)], anchorData: Data("a3".utf8), isFull: false),
-            ],
-        ]
+        // The persisted anchor resumes the stream: the second query starts
+        // from where the first page ended, and the deletion is delivered.
+        provider.resetConsumption()
         client.resetDelivery()
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
 
-        XCTAssertEqual(provider.changeQueries.map(\.anchorData), [Data("a1".utf8), Data("a2".utf8)])
+        XCTAssertEqual(provider.changeQueries.map(\.anchorData), [nil, Data("a1".utf8)])
         XCTAssertEqual(client.sentChangeBatches.count, 1)
-        XCTAssertEqual(client.sentChangeBatches[0].changes, [.delete(deletion(2))])
+        XCTAssertEqual(client.sentChangeBatches[0].changes, [.delete(deletion(1))])
     }
 
     func testPageBudgetStopsMidStreamAndNextPassResumes() async throws {
@@ -276,17 +279,17 @@ final class AutomaticSyncEngineTests: XCTestCase {
         // The pass stops at the page budget; the checkpoint is the anchor of
         // the last completed page.
         XCTAssertEqual(provider.changeQueries.count, BackgroundSyncLimits.pagesPerCategoryPerPass)
+        let budget = BackgroundSyncLimits.pagesPerCategoryPerPass
+        let lastAnchor = Data("a\(budget - 1)".utf8)
         let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
-        XCTAssertEqual(checkpoint?.anchorData, Data("a\(BackgroundSyncLimits.pagesPerCategoryPerPass - 1)".utf8))
+        XCTAssertEqual(checkpoint?.anchorData, lastAnchor)
 
+        // The next pass resumes from the persisted mid-stream anchor.
         client.resetDelivery()
-        provider.pageOffset = BackgroundSyncLimits.pagesPerCategoryPerPass
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
-        XCTAssertEqual(
-            provider.changeQueries.last?.anchorData,
-            Data("a\(BackgroundSyncLimits.pagesPerCategoryPerPass - 1)".utf8)
-        )
+        XCTAssertEqual(provider.changeQueries.count, budget * 2)
+        XCTAssertEqual(provider.changeQueries[budget].anchorData, lastAnchor)
     }
 
     func testScopeMismatchRebootstrapsWithFreshGeneration() async throws {
@@ -424,6 +427,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         provider.script = [
             .steps: [HealthChangePage(additions: [record(1)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
         ]
+        provider.resetConsumption()
         client.resetDelivery()
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
@@ -435,6 +439,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
     }
 
     func testServerCommitWithLostResponseThenRetrySucceeds() async throws {
+        let clock = ClockBox()
         let provider = ScriptedHealthProvider()
         provider.script = [
             .steps: [HealthChangePage(additions: [record(1)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
@@ -442,14 +447,15 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let client = ScriptedSyncClient()
         // The server commits but the response is lost.
         client.failNextDelivery(with: .connectionFailed)
-        let engine = makeEngine(provider: provider, client: client)
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
         _ = await enable(engine)
         await engine.waitUntilIdle()
 
         XCTAssertEqual(engine.pendingCount, 1, "unacknowledged work stays queued")
         XCTAssertNotNil(engine.nextRetryAt, "a retry must be scheduled with backoff")
 
-        // The retry is answered idempotently and the events are removed.
+        // After the backoff elapses, the retry is answered idempotently.
+        clock.advance(by: 61)
         client.resetDelivery()
         client.nextAcknowledgment = ChangeAcknowledgment(
             accepted: 0, duplicates: 1, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0
@@ -516,15 +522,14 @@ final class AutomaticSyncEngineTests: XCTestCase {
             .steps: [HealthChangePage(additions: [record(1), record(2)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
         ]
         let client = ScriptedSyncClient()
-        client.nextAcknowledgment = ChangeAcknowledgment(
-            accepted: 0, duplicates: 0, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0
-        )
+        // The real client reconciles acknowledgment counts and throws
+        // malformedAcknowledgment on a mismatch; the engine must treat that
+        // as an actionable protocol failure, not retry it endlessly.
+        client.failNextDelivery(with: .malformedAcknowledgment)
         let engine = makeEngine(provider: provider, client: client)
         _ = await enable(engine)
         await engine.waitUntilIdle()
 
-        // The client-side reconciliation turns the mismatch into
-        // malformedAcknowledgment; the engine treats it as actionable.
         XCTAssertEqual(engine.mode, .paused(.protocolFailure("the destination acknowledged batches in an unexpected format.")))
         XCTAssertEqual(engine.pendingCount, 2)
     }
@@ -627,8 +632,10 @@ final class AutomaticSyncEngineTests: XCTestCase {
         _ = await enable(engine)
         await engine.waitUntilIdle()
 
-        // A manual sync holds the shared gate.
+        // A manual sync with one record parks inside its send, holding the
+        // shared gate.
         let manualProvider = ManualStubHealthProvider()
+        manualProvider.records = [record(1)]
         let manualClient = ManualStubClient()
         manualClient.sendGate = AsyncGate()
         let manual = ManualSyncCoordinator(
@@ -666,14 +673,20 @@ final class AutomaticSyncEngineTests: XCTestCase {
             .steps: [HealthChangePage(additions: [record(1), record(2)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
         ]
         let client = ScriptedSyncClient()
-        client.sendGate = AsyncGate()
         let engine = makeEngine(provider: provider, client: client)
         _ = await enable(engine)
         await engine.waitUntilIdle()
 
+        // New work arrives; its delivery is parked, then the run is
+        // cancelled mid-delivery.
         client.resetDelivery()
+        client.sendGate = AsyncGate()
+        provider.script = [
+            .steps: [HealthChangePage(additions: [record(3)], deletions: [], anchorData: Data("a3".utf8), isFull: false)],
+        ]
+        provider.resetConsumption()
         engine.foregroundCatchUp()
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await Task.sleep(nanoseconds: 100_000_000)
         engine.cancelActiveWork()
         if let gate = client.sendGate { await gate.openAndWait() }
         await engine.waitUntilIdle()
@@ -741,9 +754,12 @@ private final class ScriptedHealthProvider: HealthDataProviding {
     }
 
     var script: [HealthMetric: [HealthChangePage]] = [:]
-    /// Offset applied when replaying long scripts across passes.
-    var pageOffset = 0
     private var consumed: [HealthMetric: Int] = [:]
+
+    /// Simulates a relaunch replaying the same pages.
+    func resetConsumption() {
+        consumed.removeAll()
+    }
     private(set) var changeQueries: [RecordedQuery] = []
     private(set) var observedMetrics: [Set<HealthMetric>] = []
     private(set) var observationStopCount = 0
@@ -786,11 +802,11 @@ private final class ScriptedHealthProvider: HealthDataProviding {
         }
         changeQueries.append(RecordedQuery(metric: metric, anchorData: anchorData, windowStart: windowStart))
         let pages = script[metric] ?? []
-        let index = (consumed[metric] ?? 0) + pageOffset
+        let index = consumed[metric] ?? 0
+        consumed[metric, default: 0] = index + 1
         guard index < pages.count else {
             return HealthChangePage(additions: [], deletions: [], anchorData: anchorData, isFull: false)
         }
-        consumed[metric, default: 0] += 1
         return pages[index]
     }
 
@@ -901,6 +917,7 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
 
 @MainActor
 private final class ManualStubHealthProvider: HealthDataProviding {
+    var records: [HealthRecord] = []
     var isAvailable: Bool { true }
 
     func requestReadAuthorization(for metrics: Set<HealthMetric>) async throws {}
@@ -918,7 +935,7 @@ private final class ManualStubHealthProvider: HealthDataProviding {
         through endDate: Date,
         metrics: Set<HealthMetric>
     ) async throws -> HealthExportResult {
-        HealthExportResult(records: [], truncatedMetrics: [])
+        HealthExportResult(records: records, truncatedMetrics: [])
     }
 
     func changePage(
@@ -982,6 +999,9 @@ private final class AsyncGate: @unchecked Sendable {
                 return
             }
             lock.unlock()
+            if Task.isCancelled {
+                return
+            }
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
     }

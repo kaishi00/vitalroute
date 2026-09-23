@@ -178,7 +178,8 @@ final class OutboxAndStateStoreTests: XCTestCase {
         XCTAssertEqual(state.consecutiveFailures, 0)
         XCTAssertEqual(state.backoffSeconds(afterFailureCount: 1), 60)
         XCTAssertEqual(state.backoffSeconds(afterFailureCount: 2), 120)
-        XCTAssertEqual(state.backoffSeconds(afterFailureCount: 8), 24 * 3600)
+        XCTAssertEqual(state.backoffSeconds(afterFailureCount: 8), 7680)
+        XCTAssertEqual(state.backoffSeconds(afterFailureCount: 12), 24 * 3600)
         XCTAssertEqual(state.backoffSeconds(afterFailureCount: 30), 24 * 3600)
 
         state.consecutiveFailures = 3
