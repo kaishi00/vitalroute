@@ -134,6 +134,8 @@ actor SyncStateStore {
     }
 
     /// Write-then-rename so a crash mid-write never truncates prior state.
+    /// Overwrites are atomic replaces: a crash leaves either the old or the
+    /// new file, never a partial one.
     private func atomicWrite(_ data: Data, to destination: URL) throws {
         let temporary = destination.deletingLastPathComponent()
             .appendingPathComponent(".tmp-\(UUID().uuidString)")
@@ -142,7 +144,11 @@ actor SyncStateStore {
             [.protectionKey: protection],
             ofItemAtPath: temporary.path
         )
-        try FileManager.default.moveItem(at: temporary, to: destination)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: destination)
+        }
     }
 
     private func excludeFromBackup(_ url: URL) {
