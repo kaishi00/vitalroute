@@ -108,7 +108,7 @@ struct SettingsView: View {
             return "Off"
         case .active:
             return autoSyncEngine.isRunning ? "On · working…" : "On"
-        case .paused(let reason):
+        case .paused:
             return "Paused"
         }
     }

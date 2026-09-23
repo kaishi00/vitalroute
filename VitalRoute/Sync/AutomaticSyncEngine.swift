@@ -552,7 +552,7 @@ final class AutomaticSyncEngine {
             }
 
             do {
-                let acknowledgment = try await client.sendChanges(
+                _ = try await client.sendChanges(
                     snapshot.events,
                     batchID: UUID(),
                     to: endpointURL,

@@ -119,7 +119,7 @@ final class ReceiverIntegrationTests: XCTestCase {
         let keepID = UUID()
         let dropID = UUID()
         let base = Date(timeIntervalSince1970: 1_760_100_000)
-        func upsertEvent(_ id: UUID, offset: TimeInterval) -> SyncChangeEvent {
+        @Sendable func upsertEvent(_ id: UUID, offset: TimeInterval) -> SyncChangeEvent {
             .upsert(HealthRecord(
                 id: id,
                 metric: .steps,
