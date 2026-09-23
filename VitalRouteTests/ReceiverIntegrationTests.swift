@@ -110,7 +110,7 @@ final class ReceiverIntegrationTests: XCTestCase {
 
     private func awaitWithTimeout<T: Sendable>(
         _ operation: @escaping @Sendable () async throws -> T
-    ) throws -> T {
+    ) async throws -> T {
         let box = ResultBox<T>()
         let expectation = expectation(description: "network operation completed")
         Task {
