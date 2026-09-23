@@ -66,7 +66,7 @@ final class DestinationCredentialStore {
         guard generation == loadGeneration else {
             return
         }
-        apply(token: outcome.success ?? nil, endpoint: endpoint, readFailed: outcome.isFailure)
+        apply(token: try? outcome.get(), endpoint: endpoint, readFailed: outcome.isFailure)
     }
 
     func saveCredential(_ token: String, for endpoint: String) throws {
