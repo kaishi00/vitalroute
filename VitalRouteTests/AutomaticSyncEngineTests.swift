@@ -376,6 +376,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
             engine.lastStatusMessage?.contains("discarded") == true,
             "user must see the discard notice: \(engine.lastStatusMessage ?? "")"
         )
+        XCTAssertNil(engine.nextRetryAt, "the discarded queue owned that retry")
         XCTAssertEqual(provider.observationStopCount, 1)
         XCTAssertEqual(client.sentChangeBatches.filter { $0.endpoint.absoluteString == otherEndpoint }.count, 0,
                        "nothing may ever be sent to the new destination from this event")
@@ -566,6 +567,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
 
         XCTAssertEqual(engine.mode, .paused(.protocolFailure("the destination acknowledged batches in an unexpected format.")))
         XCTAssertEqual(engine.pendingCount, 2)
+        XCTAssertNil(engine.nextRetryAt, "an actionable pause schedules no retry")
     }
 
     func testBackpressureStopsQueriesAndKeepsDraining() async throws {

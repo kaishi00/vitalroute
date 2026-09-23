@@ -976,6 +976,10 @@ final class AutomaticSyncEngine {
                     retryState.nextAttemptAt = nil
                     await stateStore.saveRetryState(retryState)
                     mode = .paused(reason)
+                    // Nothing is scheduled any more: showing the retry that
+                    // was armed before would be a promise the engine will
+                    // not keep.
+                    nextRetryAt = nil
                     lastStatusMessage = reason.userMessage
                 case .deferred(let detail):
                     retryState.lastFailureMessage = detail
@@ -1011,6 +1015,7 @@ final class AutomaticSyncEngine {
             retryState.nextAttemptAt = nil
             await stateStore.saveRetryState(retryState)
             mode = .paused(reason)
+            nextRetryAt = nil
             lastStatusMessage = reason.userMessage
         case .deferred(let detail):
             retryState.nextAttemptAt = now().addingTimeInterval(60)
@@ -1084,6 +1089,8 @@ final class AutomaticSyncEngine {
         let discarded = (try? await outbox.pendingCount()) ?? 0
         await outbox.removeAll()
         await refreshPendingCount()
+        // The retry belonged to the queue being discarded.
+        nextRetryAt = nil
         await stateStore.clearAllCheckpoints()
         await stateStore.clearPendingScope()
         await stateStore.saveRetryState(.initial)
