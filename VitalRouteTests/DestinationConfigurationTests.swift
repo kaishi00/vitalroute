@@ -113,11 +113,12 @@ final class DestinationConfigurationTests: XCTestCase {
     func testSaveDuringInFlightLoadKeepsSavedState() async throws {
         let secureStore = GatedReadStore()
         let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
-        // Release on every exit path so the gated read can never strand the
-        // loading task, including assertion failures and thrown saves.
+        async let loadResult = configurationStore.loadSavedEndpoint()
+        // Registered after the child: scope-exit unwinding runs in reverse
+        // registration order, so a throwing exit releases the gate before
+        // the implicit await of the async-let child.
         defer { secureStore.releaseRead() }
 
-        async let loadResult = configurationStore.loadSavedEndpoint()
         let readEntered = await waitForReadEntry(secureStore, timeout: .seconds(5))
         XCTAssertTrue(readEntered, "gated read never started")
 
@@ -157,9 +158,11 @@ final class DestinationConfigurationTests: XCTestCase {
     func testFailedSaveDuringInFlightLoadStillCompletesTheLoad() async throws {
         let secureStore = GatedReadStore()
         let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
+        async let loadResult = configurationStore.loadSavedEndpoint()
+        // Registered after the child so a throwing exit releases the gate
+        // before the implicit await of the async-let child.
         defer { secureStore.releaseRead() }
 
-        async let loadResult = configurationStore.loadSavedEndpoint()
         let readEntered = await waitForReadEntry(secureStore, timeout: .seconds(5))
         XCTAssertTrue(readEntered)
 
@@ -176,6 +179,31 @@ final class DestinationConfigurationTests: XCTestCase {
     }
 
     @MainActor
+    func testThrownErrorDuringGatedLoadReleasesReadBeforeChildAwait() async throws {
+        let secureStore = GatedReadStore()
+        let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
+
+        do {
+            try await performFailingSaveWhileGated(configurationStore, secureStore: secureStore)
+            XCTFail("expected the invalid endpoint save to throw")
+        } catch let error as DestinationConfigurationError {
+            XCTAssertEqual(error, .httpsRequired)
+        }
+
+        // If the deferred release ran only after the implicit child await at
+        // scope exit, the read would have spun to its fail-safe before the
+        // gate opened; the flags distinguish the two orderings without
+        // timing the test.
+        XCTAssertTrue(secureStore.isReadEntered)
+        XCTAssertFalse(secureStore.hitFailSafe, "gate was released only by the fail-safe, not the defer")
+        // The error escaping must not strand the child: with the gate
+        // released during unwinding, the load commits its read.
+        XCTAssertEqual(configurationStore.savedEndpoint, "https://old.example.org/v1/ingest")
+        XCTAssertTrue(configurationStore.isLoaded)
+        XCTAssertNil(configurationStore.storageError)
+    }
+
+    @MainActor
     private func waitForReadEntry(_ secureStore: GatedReadStore, timeout: Duration) async -> Bool {
         let deadline = ContinuousClock().now + timeout
         while !secureStore.isReadEntered {
@@ -185,6 +213,33 @@ final class DestinationConfigurationTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         return true
+    }
+
+    /// Owns the gated async-let child and throws out of the scope while the
+    /// read is still gated, so the caller can observe whether the deferred
+    /// release ran before the child was awaited.
+    @MainActor
+    private func performFailingSaveWhileGated(
+        _ configurationStore: DestinationConfigurationStore,
+        secureStore: GatedReadStore
+    ) async throws {
+        async let loadResult = configurationStore.loadSavedEndpoint()
+        // Registered after the child: scope-exit unwinding runs in reverse
+        // registration order, so the throwing exit releases the gate before
+        // the implicit await of the async-let child.
+        defer { secureStore.releaseRead() }
+
+        let readEntered = await waitForReadEntry(secureStore, timeout: .seconds(5))
+        XCTAssertTrue(readEntered, "gated read never started")
+
+        try configurationStore.save(endpoint: "not a valid url")
+
+        // Unreachable on the exercised path: the save above always throws,
+        // and the deferred release during scope-exit unwinding is the
+        // mechanism under test. This tail only documents the non-throwing
+        // shape.
+        secureStore.releaseRead()
+        await loadResult
     }
 }
 
