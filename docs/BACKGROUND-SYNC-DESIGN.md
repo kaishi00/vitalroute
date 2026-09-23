@@ -112,7 +112,9 @@ records — retained only until acknowledged, then deleted.
     removed.
 
 Deletion notifications are treated as unrecoverable-later: they are captured
-into the outbox at query time and never dropped.
+into the outbox at query time and never dropped. `HKDeletedObject` exposes
+only the sample UUID (not its dates), so deletion events carry the capture
+time as their interval; the receiver's tombstone stores it for audit.
 
 ## 4. Execution model
 

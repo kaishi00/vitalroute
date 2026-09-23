@@ -86,7 +86,9 @@ the body shape (`records` for v1, `changes` for v2).
 - `batchId` is a canonical UUID chosen by the client per batch attempt.
 - `upsert.record` must satisfy every v1 record validation rule.
 - `delete` identifies the deleted sample by its id (the Apple Health sample
-  UUID), with its category and last known interval. Validation rules mirror
+  UUID), with its category and interval. Apple's deleted-object results do
+  not expose the original sample dates, so clients send the capture time;
+  the receiver stores it on the tombstone for audit. Validation rules mirror
   v1 (`unknown_metric`, ISO 8601 dates, `endDate` ≥ `startDate`).
 - Limits and framing match v1 (≤ 500 changes per batch, 10 MiB body,
   Content-Length required, transfer encoding refused).

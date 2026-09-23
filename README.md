@@ -7,9 +7,10 @@ VitalRoute is a native iOS app for routing the Apple Health data a person choose
 - **Explicit export selection** — the seven categories (steps, heart rate, resting heart rate, heart rate variability, sleep, active energy, workouts) are opt-in toggles; nothing is selected by default, and VitalRoute requests HealthKit read access only for the categories you enable.
 - **Secure destination + credential** — the HTTPS endpoint and its API key are stored separately in the device Keychain. Keys are namespaced per destination, so changing endpoints never reuses the previous destination's key. "Test connection" checks reachability, TLS, and the key without sending health records.
 - **Manual sync** — "Sync Now" reads every record in the last seven days for the selected categories (not the dashboard's 20-sample preview), uploads in bounded batches over HTTPS with normal certificate validation and no redirects, and reports acknowledged counts, partial failures, truncation, and cancellation honestly. Retrying is safe: the receiver stores each record once.
-- **Reference receiver** — `server/` contains a dependency-free Python receiver with Bearer-token auth, strict validation, transactional SQLite persistence, and idempotent ingestion. See `server/README.md` and the contract in `server/API.md`.
+- **Automatic background sync** — after you explicitly turn it on (Settings), VitalRoute observes the selected categories with HealthKit observers and background delivery, captures additions **and deletions** incrementally through per-category anchored checkpoints, and delivers them from a durable outbox that survives network failure, suspension, and relaunch. Deletions propagate to tombstones on the receiver so replayed additions can never resurrect deleted samples. iOS throttles background delivery — it is never guaranteed immediate, and stops until the next launch after a force-quit; opening the app catches up right away.
+- **Reference receiver** — `server/` contains a dependency-free Python receiver with Bearer-token auth, strict validation, transactional SQLite persistence, idempotent ingestion, and (contract v2) deletion events with tombstones. See `server/README.md`, the contract in `server/API.md`, and the background-sync design in `docs/BACKGROUND-SYNC-DESIGN.md`.
 
-Nothing syncs automatically: saving configuration, opening the app, or refreshing the dashboard never uploads data. Only tapping Sync Now does.
+Manual sync never runs on its own: saving configuration, opening the app, or refreshing the dashboard never uploads data. Automatic sync only works after an explicit opt-in, and only against a receiver that advertises deletion support (contract v2).
 
 ## Project structure
 
@@ -83,4 +84,4 @@ The iOS workflow validates the repository and shared scheme, builds for the iOS 
 
 ## Roadmap boundaries
 
-Background delivery, anchored incremental synchronization, deletion propagation, and the read-only query/MCP interface for downstream consumers are future milestones; this repository currently delivers foreground manual sync and the reference receiver only.
+Automatic background synchronization (observers, anchored incremental delivery of additions and deletions) is implemented; physical-device validation of HealthKit background delivery is still outstanding (see the checklist in `docs/BACKGROUND-SYNC-DESIGN.md`). The constrained read-only query/MCP interface for downstream consumers remains future work.
