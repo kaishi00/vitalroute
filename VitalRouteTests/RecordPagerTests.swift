@@ -135,11 +135,11 @@ final class RecordPagerTests: XCTestCase {
             }
         }
 
-        while !gate.isEntered {
+        while !(await gate.isEntered) {
             try await Task.sleep(nanoseconds: 2_000_000)
         }
         task.cancel()
-        gate.open()
+        await gate.open()
 
         do {
             _ = try await task.value
@@ -152,31 +152,22 @@ final class RecordPagerTests: XCTestCase {
 
 /// Parks the first page fetch until the test releases it, giving the
 /// cancellation test a deterministic interleave point.
-private final class PageGate: @unchecked Sendable {
-    private let lock = NSLock()
+private actor PageGate {
     private var entered = false
     private var opened = false
 
     var isEntered: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return entered
+        entered
     }
 
     func wait() async {
-        lock.lock()
         entered = true
         while !opened {
-            lock.unlock()
             try? await Task.sleep(nanoseconds: 2_000_000)
-            lock.lock()
         }
-        lock.unlock()
     }
 
     func open() {
-        lock.lock()
         opened = true
-        lock.unlock()
     }
 }

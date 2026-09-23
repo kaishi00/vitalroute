@@ -19,19 +19,22 @@ final class ReceiverIntegrationTests: XCTestCase {
 
     private func integrationConfiguration() throws -> (endpoint: URL, token: String) {
         let environment = ProcessInfo.processInfo.environment
-        guard
-            let rawURL = environment["VITALROUTE_INTEGRATION_URL"],
-            let token = environment["VITALROUTE_INTEGRATION_TOKEN"],
-            !token.isEmpty,
-            let url = URL(string: rawURL),
-            url.scheme == "https"
-        else {
-            throw XCTSkip(
-                "Set VITALROUTE_INTEGRATION_URL and VITALROUTE_INTEGRATION_TOKEN to run the live receiver integration."
-            )
+        let rawURL = environment["VITALROUTE_INTEGRATION_URL"]
+        let token = environment["VITALROUTE_INTEGRATION_TOKEN"]
+        guard let rawURL else {
+            throw XCTSkip(missingEnvironmentMessage)
+        }
+        guard let token, !token.isEmpty else {
+            throw XCTSkip(missingEnvironmentMessage)
+        }
+        guard let url = URL(string: rawURL), url.scheme == "https" else {
+            throw XCTSkip("VITALROUTE_INTEGRATION_URL must be an HTTPS URL.")
         }
         return (url, token)
     }
+
+    private let missingEnvironmentMessage =
+        "Set VITALROUTE_INTEGRATION_URL and VITALROUTE_INTEGRATION_TOKEN to run the live receiver integration."
 
     private func syntheticPayload(count: Int) -> SyncPayload {
         let base = Date(timeIntervalSince1970: 1_760_000_000)

@@ -30,10 +30,30 @@ final class HTTPDestinationClientTests: XCTestCase {
 
     // MARK: Request construction
 
+    /// Thread-safe capture of the request the transport received; the
+    /// transport closure is @Sendable, so a bare captured var would warn
+    /// under Swift 6 concurrency.
+    private final class RequestBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedRequest: URLRequest?
+
+        var request: URLRequest? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedRequest
+        }
+
+        func store(_ request: URLRequest) {
+            lock.lock()
+            storedRequest = request
+            lock.unlock()
+        }
+    }
+
     func testSendBuildsContractRequest() async throws {
-        var captured: URLRequest?
+        let box = RequestBox()
         let client = HTTPDestinationClient { request in
-            captured = request
+            box.store(request)
             return (
                 self.httpData(#"{"status":"accepted","accepted":1,"duplicates":0}"#),
                 self.httpResponse(status: 200, url: request.url!)
@@ -47,7 +67,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         )
 
         XCTAssertEqual(acknowledgment, SyncAcknowledgment(accepted: 1, duplicates: 0))
-        let request = try XCTUnwrap(captured)
+        let request = try XCTUnwrap(box.request)
         XCTAssertEqual(request.url, endpoint)
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token-0123456789")
@@ -61,9 +81,9 @@ final class HTTPDestinationClientTests: XCTestCase {
     }
 
     func testTestConnectionSendsGETWithNoBody() async throws {
-        var captured: URLRequest?
+        let box = RequestBox()
         let client = HTTPDestinationClient { request in
-            captured = request
+            box.store(request)
             return (
                 self.httpData(#"{"status":"ok","service":"vitalroute-receiver","apiVersion":1}"#),
                 self.httpResponse(status: 200, url: request.url!)
@@ -73,7 +93,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         let response = try await client.testConnection(to: endpoint, authorization: authorization)
 
         XCTAssertEqual(response, ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 1))
-        let request = try XCTUnwrap(captured)
+        let request = try XCTUnwrap(box.request)
         XCTAssertEqual(request.httpMethod, "GET")
         XCTAssertNil(request.httpBody)
         XCTAssertNil(request.httpBodyStream)

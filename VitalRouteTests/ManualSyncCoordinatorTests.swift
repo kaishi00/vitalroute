@@ -249,7 +249,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.sleep])
         // Second call is a no-op: still exactly one operation in flight.
 
-        gate.open()
+        await gate.open()
         await waitForCompletion(coordinator)
 
         XCTAssertEqual(client.sentPayloads.count, 1)
@@ -270,7 +270,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         // selection. The underway operation keeps its captured snapshot.
         let otherClient = StubDestinationClient()
         coordinator.startSync(endpoint: "https://other.example.org/v1/records", token: "other", metrics: [.sleep])
-        gate.open()
+        await gate.open()
         await waitForCompletion(coordinator)
 
         XCTAssertEqual(client.sentPayloads.count, 1)
@@ -337,7 +337,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         // task alive long enough for the cancellation to be observable.
         await gate.waitForEntry()
         coordinator.cancelSync()
-        gate.open()
+        await gate.open()
         await waitForCompletion(coordinator)
 
         XCTAssertEqual(coordinator.lastOutcome?.result, .cancelled)
@@ -460,37 +460,28 @@ private final class StubDestinationClient: DestinationClient, @unchecked Sendabl
 }
 
 /// A one-shot gate that lets tests pause an async operation at a known point.
-private final class AsyncGate: @unchecked Sendable {
-    private let lock = NSLock()
+private actor AsyncGate {
     private var entered = false
     private var opened = false
 
     func enter() async {
-        lock.lock()
         entered = true
         while !opened {
-            lock.unlock()
-            try? await Task.sleep(nanoseconds: 2_000_000)
-            lock.lock()
-        }
-        lock.unlock()
-    }
-
-    func waitForEntry() async {
-        while !isEntered {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
     }
 
     var isEntered: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return entered
+        entered
+    }
+
+    func waitForEntry() async {
+        while !entered {
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
     }
 
     func open() {
-        lock.lock()
         opened = true
-        lock.unlock()
     }
 }
