@@ -42,9 +42,8 @@ struct VitalRouteApp: App {
         )
         _autoSyncEngine = State(initialValue: engine)
 
-        // Must happen before the app finishes launching. A registration
-        // failure (identifier not permitted) is logged by the registrar.
-        _ = BackgroundSyncTasks.register(engine: engine)
+        // Must happen before the app finishes launching.
+        BackgroundSyncTasks.register(engine: engine)
     }
 
     nonisolated private static func syncDirectory() -> URL {
