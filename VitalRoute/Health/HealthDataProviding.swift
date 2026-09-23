@@ -27,9 +27,11 @@ protocol HealthDataProviding {
     ) async throws -> [HealthRecord]
 
     /// Full export query for the sync window; pages through every matching
-    /// record instead of stopping at a preview limit.
+    /// record instead of stopping at a preview limit. `through` pins the
+    /// window end so an operation reads a consistent interval.
     func exportRecords(
         since startDate: Date,
+        through endDate: Date,
         metrics: Set<HealthMetric>
     ) async throws -> HealthExportResult
 }

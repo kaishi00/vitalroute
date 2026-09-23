@@ -11,6 +11,7 @@ import pathlib
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 
@@ -449,6 +450,48 @@ class RoutingTests(ReceiverServerTestCase):
         status, _, _ = self.request("DELETE", "/v1/records")
         self.assertEqual(status, 405)
 
+    def test_head_and_options_get_safe_json_errors(self):
+        status, body = self.request("HEAD", "/v1/records")[0:2]
+        self.assertEqual(status, 405)
+        # HEAD responses carry no body; the code is visible via the log line.
+        status, body = self.request("OPTIONS", "/v1/records")[0:2]
+        self.assertEqual(status, 405)
+        self.assertEqual(body["error"]["code"], "method_not_allowed")
+
+    def test_post_to_health_path_is_405(self):
+        status, body = self.post("/v1/health", make_payload([make_record()]))
+        self.assertEqual(status, 405)
+        self.assertEqual(body["error"]["code"], "method_not_allowed")
+        self.assertEqual(self.stored_count(), 0)
+
+    def test_negative_content_length_rejected(self):
+        connection = http.client.HTTPConnection(HOST, self.port, timeout=10)
+        connection.putrequest("POST", "/v1/records")
+        connection.putheader("Authorization", "Bearer " + TOKEN)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", "-5")
+        connection.endheaders()
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 400)
+        self.assertEqual(body["error"]["code"], "invalid_content_length")
+
+    def test_transfer_encoding_rejected_on_ingestion(self):
+        connection = http.client.HTTPConnection(HOST, self.port, timeout=10)
+        connection.putrequest("POST", "/v1/records")
+        connection.putheader("Authorization", "Bearer " + TOKEN)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Transfer-Encoding", "chunked")
+        connection.endheaders()
+        connection.send(b"2\r\n{}\r\n0\r\n\r\n")
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 400)
+        self.assertEqual(body["error"]["code"], "invalid_transfer_encoding")
+        self.assertEqual(self.stored_count(), 0)
+
     def test_error_responses_have_safe_shape(self):
         status, body = self.get("/v1/records", token=None)
         self.assertEqual(set(body.keys()), {"error"})
@@ -465,7 +508,135 @@ class RoutingTests(ReceiverServerTestCase):
         response = connection.getresponse()
         response.read()
         connection.close()
-        self.assertEqual(response.status, 411)
+        self.assertEqual(response.status, 400)
+
+    def test_connection_is_reusable_after_errors_that_did_read_the_body(self):
+        connection = http.client.HTTPConnection(HOST, self.port, timeout=10)
+        try:
+            # 1) A valid request primes the connection.
+            connection.request(
+                "GET", "/v1/records", headers={"Authorization": "Bearer " + TOKEN}
+            )
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 200)
+
+            # 2) An error whose body was fully read must not poison framing.
+            bad = json.dumps(make_payload([make_record(id="not-a-uuid")])).encode("utf-8")
+            connection.request(
+                "POST",
+                "/v1/records",
+                body=bad,
+                headers={
+                    "Authorization": "Bearer " + TOKEN,
+                    "Content-Type": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 400)
+
+            # 3) The same connection still serves the next request.
+            connection.request(
+                "GET", "/v1/records", headers={"Authorization": "Bearer " + TOKEN}
+            )
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 200)
+        finally:
+            connection.close()
+
+    def test_error_before_body_read_closes_the_connection(self):
+        # Unauthorized POST with a body: the server must close the
+        # connection rather than leave the unread body to be parsed as a
+        # subsequent request (request-smuggling framing).
+        connection = http.client.HTTPConnection(HOST, self.port, timeout=10)
+        body = json.dumps(make_payload([make_record()])).encode("utf-8")
+        connection.request(
+            "POST",
+            "/v1/records",
+            body=body,
+            headers={
+                "Authorization": "Bearer wrong-token-aaaaaaaaa",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+        self.assertEqual(response.status, 401)
+        self.assertEqual(response.getheader("Connection"), "close")
+        connection.close()
+
+
+class SlowClientTimeoutTests(unittest.TestCase):
+    """A stalling client must lose its worker to the socket timeout."""
+
+    def test_stalled_body_is_cut_off(self):
+        import socket
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            db_path = os.path.join(tempdir, "records.sqlite3")
+            port = 8879
+            environment = dict(os.environ)
+            environment["VITALROUTE_TOKEN"] = TOKEN
+            environment["VITALROUTE_DB"] = db_path
+            environment["VITALROUTE_SOCKET_TIMEOUT"] = "1"
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "..",
+                        "receiver.py",
+                    ),
+                    "--host",
+                    HOST,
+                    "--port",
+                    str(port),
+                ],
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                # Wait for the listener.
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    try:
+                        probe = socket.create_connection((HOST, port), timeout=1)
+                        probe.close()
+                        break
+                    except OSError:
+                        time.sleep(0.1)
+                else:
+                    self.fail("receiver never started")
+
+                connection = socket.create_connection((HOST, port), timeout=10)
+                headers = (
+                    "POST /v1/records HTTP/1.1\r\n"
+                    "Host: %s:%d\r\n"
+                    "Authorization: Bearer %s\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Content-Length: 100\r\n\r\n"
+                ) % (HOST, port, TOKEN)
+                connection.sendall(headers.encode("utf-8"))
+                # Send part of the body, then stall.
+                connection.sendall(b'{"schemaVersion":1,')
+
+                closed_within_timeout = False
+                stall_deadline = time.time() + 5
+                while time.time() < stall_deadline:
+                    if connection.recv(1) == b"":
+                        closed_within_timeout = True
+                        break
+                connection.close()
+                self.assertTrue(
+                    closed_within_timeout, "server left a stalled client connected"
+                )
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
 
 
 class ValidationUnitTests(unittest.TestCase):

@@ -122,7 +122,8 @@ failure rejects the entire request with a 4xx and nothing is stored.
 |---|---|
 | Valid JSON body required | `invalid_json` |
 | `Content-Type: application/json` required | `invalid_content_type` |
-| `Content-Length` required | `411 length_required` |
+| `Content-Length` required; any `Transfer-Encoding` is refused | `411 length_required` / `invalid_transfer_encoding` |
+| `Content-Length` must be a non-negative integer when present | `invalid_content_length` |
 | Body size ≤ 10 MiB (configurable) | `413 payload_too_large` |
 | ≤ 500 records per batch (configurable) | `too_many_records` |
 | Non-empty `records` array | `empty_batch` |
@@ -181,3 +182,11 @@ schema versions with `unsupported_schema_version` rather than guessing.
   never headers, tokens, or record contents.
 - The reference receiver binds to `127.0.0.1` by default and has no accounts,
   dashboard, query interface, or outbound connections.
+- Paths match exactly: query strings and trailing slashes are not part of the
+  contract and return `404`.
+- Error responses sent before a request body was consumed close the
+  connection (`Connection: close`), so unread body bytes can never be parsed
+  as a following request.
+- Every socket read is bounded (`VITALROUTE_SOCKET_TIMEOUT`, default 30s): a
+  client that stalls mid-request loses its connection rather than pinning a
+  worker.

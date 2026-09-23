@@ -5,6 +5,16 @@ final class ManualSyncCoordinatorTests: XCTestCase {
     private let endpoint = "https://health.example.org/v1/records"
     private let token = "coordinator-test-token-0001"
 
+    private var suites: [(defaults: UserDefaults, name: String)] = []
+
+    override func tearDown() {
+        for suite in suites {
+            suite.defaults.removePersistentDomain(forName: suite.name)
+        }
+        suites.removeAll()
+        super.tearDown()
+    }
+
     private func record(_ index: Int, metric: HealthMetric = .steps, start: TimeInterval = 0) -> HealthRecord {
         HealthRecord(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index))!,
@@ -33,6 +43,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         let name = "sync-coordinator-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defaults.removePersistentDomain(forName: name)
+        suites.append((defaults, name))
         return defaults
     }
 
@@ -128,6 +139,44 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         // Delivered data is still reported, but no success marker is written.
         XCTAssertNil(coordinator.lastSuccessfulSync)
         XCTAssertEqual(coordinator.lastOutcome?.summary.deliveredRecords, 1)
+    }
+
+    @MainActor
+    func testExportWindowIsSnapshotPinned() async throws {
+        let provider = StubHealthDataProvider(export: [record(1)])
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueryWindows.count, 1)
+        let window = provider.exportQueryWindows[0]
+        XCTAssertEqual(window.end, now)
+        // Seven-day window per SyncLimits.
+        XCTAssertEqual(
+            window.start.timeIntervalSince(window.end),
+            -Double(SyncLimits.windowDays * 24 * 3600),
+            accuracy: 1
+        )
+    }
+
+    @MainActor
+    func testEmptyWindowSyncStillCountsAsSuccessful() async throws {
+        // A completed sync that found nothing is a success: it confirms the
+        // selected categories had no records in the window, and updates the
+        // last-success marker with zero counts.
+        let provider = StubHealthDataProvider(export: [])
+        let client = StubDestinationClient()
+        let defaults = makeDefaults()
+        let coordinator = makeCoordinator(provider: provider, client: client, defaults: defaults)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(coordinator.lastSuccessfulSync?.deliveredRecords, 0)
     }
 
     // MARK: Preflight
@@ -328,6 +377,7 @@ private final class StubHealthDataProvider: HealthDataProviding {
     private(set) var authorizationCount = 0
     private(set) var authorizationRequestedMetrics: [HealthMetric] = []
     private(set) var exportedMetrics: [HealthMetric] = []
+    private(set) var exportQueryWindows: [(start: Date, end: Date)] = []
 
     init(
         export records: [HealthRecord],
@@ -359,9 +409,11 @@ private final class StubHealthDataProvider: HealthDataProviding {
 
     func exportRecords(
         since startDate: Date,
+        through endDate: Date,
         metrics: Set<HealthMetric>
     ) async throws -> HealthExportResult {
         exportedMetrics.append(contentsOf: metrics.sorted { $0.rawValue < $1.rawValue })
+        exportQueryWindows.append((startDate, endDate))
         return HealthExportResult(
             records: exportRecords.filter { metrics.contains($0.metric) },
             truncatedMetrics: truncated

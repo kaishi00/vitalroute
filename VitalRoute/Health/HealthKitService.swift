@@ -1,6 +1,45 @@
 import Foundation
 import HealthKit
 
+/// Lets exactly one thread claim a HealthKit callback; later invocations of
+/// a long-running query handler are dropped instead of double-resuming a
+/// continuation.
+private final class ContinuationGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if claimed {
+            return false
+        }
+        claimed = true
+        return true
+    }
+}
+
+/// Holds the query reference so the callback can stop a long-running query
+/// after its first invocation; the callback closure cannot capture the query
+/// it is being constructed into.
+private final class QueryBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedQuery: HKAnchoredObjectQuery?
+
+    var query: HKAnchoredObjectQuery? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedQuery
+        }
+        set {
+            lock.lock()
+            storedQuery = newValue
+            lock.unlock()
+        }
+    }
+}
+
 @MainActor
 final class HealthKitService: HealthDataProviding {
     private let healthStore = HKHealthStore()
@@ -84,6 +123,7 @@ final class HealthKitService: HealthDataProviding {
 
     func exportRecords(
         since startDate: Date,
+        through endDate: Date,
         metrics: Set<HealthMetric>
     ) async throws -> HealthExportResult {
         guard isAvailable else {
@@ -95,7 +135,7 @@ final class HealthKitService: HealthDataProviding {
 
         let predicate = HKQuery.predicateForSamples(
             withStart: startDate,
-            end: Date(),
+            end: endDate,
             options: [.strictStartDate]
         )
         let store = healthStore
@@ -195,6 +235,12 @@ final class HealthKitService: HealthDataProviding {
     /// One anchored page. The anchor advances past exactly the samples it
     /// returned, so paging cannot skip records that share a start date the
     /// way a date-cursor predicate could.
+    ///
+    /// HKAnchoredObjectQuery is long-running: after the initial results the
+    /// handler fires again whenever new matching samples are saved. Only the
+    /// first callback resumes the continuation, and the query is stopped so
+    /// later activity neither double-resumes (a continuation misuse trap)
+    /// nor accumulates as a live observer.
     private nonisolated static func queryAnchorPage(
         for metric: HealthMetric,
         using healthStore: HKHealthStore,
@@ -206,12 +252,18 @@ final class HealthKitService: HealthDataProviding {
             return RecordPager.Page(records: [], nextAnchor: anchor, isFull: false)
         }
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<RecordPager.Page<HKQueryAnchor>, Error>) in
+            let once = ContinuationGuard()
+            let queryBox = QueryBox()
             let query = HKAnchoredObjectQuery(
                 type: sampleType,
                 predicate: predicate,
                 anchor: anchor,
                 limit: limit
             ) { _, samples, _, newAnchor, error in
+                guard once.claim() else { return }
+                if let query = queryBox.query {
+                    healthStore.stop(query)
+                }
                 if let error {
                     continuation.resume(throwing: error)
                     return
@@ -227,6 +279,7 @@ final class HealthKitService: HealthDataProviding {
                     isFull: (samples?.count ?? 0) >= limit
                 ))
             }
+            queryBox.query = query
             healthStore.execute(query)
         }
     }

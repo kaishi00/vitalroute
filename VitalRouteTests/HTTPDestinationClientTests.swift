@@ -243,6 +243,58 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
     }
 
+    // MARK: Fail-closed transport hardening
+
+    func testPlainHTTPEndpointsAreRefused() async {
+        let client = HTTPDestinationClient { _ in
+            XCTFail("transport must not be invoked for a non-HTTPS endpoint")
+            return (Data(), httpResponse(status: 200, url: endpoint))
+        }
+
+        await assertThrows(.insecureEndpoint) {
+            try await client.send(
+                samplePayload(),
+                to: URL(string: "http://health.example.org/v1/records")!,
+                authorization: self.authorization
+            )
+        }
+        await assertThrows(.insecureEndpoint) {
+            try await client.testConnection(
+                to: URL(string: "http://health.example.org/v1/records")!,
+                authorization: self.authorization
+            )
+        }
+    }
+
+    func testAcknowledgmentNotCoveringWholeBatchIsRejected() async {
+        // The contract guarantees accepted + duplicates == batch size; a
+        // receiver that acknowledges fewer records has not confirmed the
+        // batch, even with HTTP 200 and a well-formed body.
+        let client = HTTPDestinationClient { request in
+            (
+                self.httpData(#"{"status":"accepted","accepted":0,"duplicates":0}"#),
+                self.httpResponse(status: 200, url: request.url!)
+            )
+        }
+
+        await assertThrows(.malformedAcknowledgment) {
+            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+        }
+    }
+
+    func testTLSValidationFailureMapsDistinctly() async {
+        let client = HTTPDestinationClient { _ in
+            throw URLError(.serverCertificateUntrusted)
+        }
+
+        await assertThrows(.tlsValidationFailed) {
+            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+        }
+        await assertThrows(.tlsValidationFailed) {
+            try await client.testConnection(to: self.endpoint, authorization: self.authorization)
+        }
+    }
+
     func testConnectionTestRequiresOKStatusBody() async {
         let client = HTTPDestinationClient { request in
             (

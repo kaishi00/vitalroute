@@ -336,7 +336,7 @@ struct OverviewView: View {
             if outcome.summary.recordsFound == 0 {
                 return "Sync finished: no records were found in the window for the selected categories. Nothing was sent."
             }
-            return "Sync finished: \(outcome.summary.deliveredRecords) records acknowledged (\(outcome.summary.acceptedRecords) new, \(outcome.summary.duplicateRecords) already present)."
+            return "Sync finished: \(outcome.summary.deliveredRecords) records acknowledged (\(outcome.summary.acceptedRecords) new, \(outcome.summary.duplicateRecords) already present) — \(outcome.summary.breakdownText)."
         case .truncated(let metrics):
             let names = metrics.map(\.displayName).sorted().joined(separator: ", ")
             return "Sync stopped early: \(outcome.summary.deliveredRecords) records were acknowledged, but the \(names) window was too large to read completely. Narrow the selection or sync again — this was not a complete export."
@@ -355,8 +355,10 @@ struct OverviewView: View {
 
     private var outcomeImageName: String {
         switch syncCoordinator.lastOutcome?.result {
-        case .completed, .cancelled:
+        case .completed:
             "checkmark.circle"
+        case .cancelled:
+            "xmark.circle"
         case .truncated:
             "exclamationmark.triangle"
         case .failed:

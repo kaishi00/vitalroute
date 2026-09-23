@@ -35,7 +35,25 @@ import validation
 logger = logging.getLogger("vitalroute.receiver")
 
 _MIN_TOKEN_LENGTH = 16
-_UNKNOWN_PATH_LOG_SAFE = "<path>"
+
+_KNOWN_PATHS = ("/v1/records", "/v1/health")
+
+
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit("%s must be an integer." % name)
+    if value <= 0:
+        raise SystemExit("%s must be positive." % name)
+    return value
+
+
+class InvalidContentLength(Exception):
+    """Content-Length was present but malformed (non-integer or negative)."""
 
 
 class ReceiverConfig:
@@ -51,6 +69,9 @@ class ReceiverHandler(BaseHTTPRequestHandler):
     server_version = "VitalRouteReceiver/1.0"
     sys_version = ""
     protocol_version = "HTTP/1.1"
+    # Bound every socket read: a client that stalls mid-request cannot pin a
+    # worker thread indefinitely (slowloris).
+    timeout = _env_int("VITALROUTE_SOCKET_TIMEOUT", 30)
 
     # Configuration lives on the server instance (see make_server), so no
     # request handler ever holds mutable state.
@@ -64,23 +85,38 @@ class ReceiverHandler(BaseHTTPRequestHandler):
 
     # ---- plumbing -------------------------------------------------------
 
-    def _send_json(self, status, body, extra_headers=None):
+    def _send_json(self, status, body, extra_headers=None, close=False):
         payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=UTF-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        if close:
+            # Sending the header also flips close_connection, so the socket
+            # is closed after this response.
+            self.send_header("Connection", "close")
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(payload)
+        # HEAD responses keep the declared framing but carry no body.
+        if self.command != "HEAD":
+            self.wfile.write(payload)
 
-    def _send_error_json(self, status, code, message, extra_headers=None):
+    def _send_error_json(self, status, code, message, extra_headers=None, close=False):
         # Log the machine-readable code with the status line: codes are
         # contract identifiers, not sensitive data.
-        logger.info("%s %s -> %d error_code=%s", self.command, self.path.split("?", 1)[0], status, code)
+        logger.info(
+            "%s %s -> %d error_code=%s",
+            self.command,
+            self.path.split("?", 1)[0],
+            status,
+            code,
+        )
         self._send_json(
-            status, {"error": {"code": code, "message": message}}, extra_headers
+            status,
+            {"error": {"code": code, "message": message}},
+            extra_headers,
+            close=close,
         )
 
     def _is_authorized(self):
@@ -97,11 +133,27 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         )
 
     def _reject_unauthorized(self):
+        # The request body (if any) was never consumed; reusing this
+        # connection could parse leftover body bytes as the next request.
         self._send_error_json(
-            401,
-            "unauthorized",
-            "A valid bearer token is required.",
-            {"WWW-Authenticate": "Bearer"},
+            close=True,
+            status=401,
+            code="unauthorized",
+            message="A valid bearer token is required.",
+            extra_headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    def _has_transfer_encoding(self):
+        return "transfer-encoding" in {name.lower() for name in self.headers.keys()}
+
+    def _reject_transfer_encoding(self):
+        # Chunked (or any) transfer encoding is outside the contract; with a
+        # framing we do not consume, the connection cannot be reused.
+        self._send_error_json(
+            close=True,
+            status=400,
+            code="invalid_transfer_encoding",
+            message="Content-Length framed bodies are required.",
         )
 
     def _content_length(self):
@@ -111,22 +163,53 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         try:
             value = int(raw)
         except ValueError:
-            return None
-        return value if value >= 0 else None
+            raise InvalidContentLength(raw)
+        if value < 0:
+            raise InvalidContentLength(raw)
+        return value
+
+    def _reject_invalid_content_length(self):
+        self._send_error_json(
+            close=True,
+            status=400,
+            code="invalid_content_length",
+            message="Content-Length must be a non-negative integer.",
+        )
+
+    def _reject_unknown_path(self):
+        # A POST body on an unknown path is never drained; close so leftover
+        # bytes cannot be parsed as a new request on this connection.
+        self._send_error_json(close=True, status=404, code="not_found", message="Unknown path.")
+
+    def _reject_method_not_allowed(self):
+        if self.path in _KNOWN_PATHS:
+            # The request body (if any) was not consumed.
+            allow = "GET, POST" if self.path == "/v1/records" else "GET"
+            self._send_error_json(
+                close=True,
+                status=405,
+                code="method_not_allowed",
+                message="Method not allowed for this operation.",
+                extra_headers={"Allow": allow},
+            )
+        else:
+            self._reject_unknown_path()
 
     # ---- request routing -------------------------------------------------
 
     def do_GET(self):
-        if self.path in ("/v1/records", "/v1/health"):
+        if self.path in _KNOWN_PATHS:
             self._handle_connection_test()
         else:
-            self._send_error_json(404, "not_found", "Unknown path.")
+            self._reject_unknown_path()
 
     def do_POST(self):
         if self.path == "/v1/records":
             self._handle_ingestion()
+        elif self.path == "/v1/health":
+            self._reject_method_not_allowed()
         else:
-            self._send_error_json(404, "not_found", "Unknown path.")
+            self._reject_unknown_path()
 
     def do_PUT(self):
         self._reject_method_not_allowed()
@@ -137,16 +220,11 @@ class ReceiverHandler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         self._reject_method_not_allowed()
 
-    def _reject_method_not_allowed(self):
-        if self.path in ("/v1/records", "/v1/health"):
-            self._send_error_json(
-                405,
-                "method_not_allowed",
-                "Method not allowed for this operation.",
-                {"Allow": "GET, POST" if self.path == "/v1/records" else "GET"},
-            )
-        else:
-            self._send_error_json(404, "not_found", "Unknown path.")
+    def do_HEAD(self):
+        self._reject_method_not_allowed()
+
+    def do_OPTIONS(self):
+        self._reject_method_not_allowed()
 
     # ---- operations -------------------------------------------------------
 
@@ -154,18 +232,20 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         if not self._is_authorized():
             self._reject_unauthorized()
             return
-        # A connection test must never carry a body: reject rather than ignore,
-        # so a client bug cannot smuggle records into a test operation.
-        if self._content_length() is None:
-            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
-                self.close_connection = True
-                self._send_error_json(
-                    411, "length_required", "Content-Length is required."
-                )
-                return
+        if self._has_transfer_encoding():
+            self._reject_transfer_encoding()
+            return
+        try:
+            content_length = self._content_length()
+        except InvalidContentLength:
+            self._reject_invalid_content_length()
+            return
+        # A connection test must never carry a body: reject rather than
+        # ignore, so a client bug cannot smuggle records into a test op.
+        if content_length is None:
             body_length = 0
         else:
-            body_length = self._content_length()
+            body_length = content_length
         if body_length > 0:
             self._drain_body(body_length)
             self.close_connection = True
@@ -189,29 +269,44 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         if not self._is_authorized():
             self._reject_unauthorized()
             return
+        if self._has_transfer_encoding():
+            self._reject_transfer_encoding()
+            return
+        try:
+            content_length = self._content_length()
+        except InvalidContentLength:
+            self._reject_invalid_content_length()
+            return
 
         content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
+            # The body was not read; the connection cannot be reused safely.
             self._send_error_json(
-                400, "invalid_content_type", "Content-Type must be application/json."
+                close=True,
+                status=400,
+                code="invalid_content_type",
+                message="Content-Type must be application/json.",
             )
             return
 
-        content_length = self._content_length()
         if content_length is None:
             # The request body (if any) was sent with a framing we do not
             # consume, so the connection can no longer be reused safely.
-            self.close_connection = True
             self._send_error_json(
-                411, "length_required", "Content-Length is required."
+                close=True,
+                status=411,
+                code="length_required",
+                message="Content-Length is required.",
             )
             return
 
         config = self.receiver_config
         if content_length > config.max_body_bytes:
-            self.close_connection = True
             self._send_error_json(
-                413, "payload_too_large", "The request body exceeds the size limit."
+                close=True,
+                status=413,
+                code="payload_too_large",
+                message="The request body exceeds the size limit.",
             )
             return
 
@@ -262,18 +357,23 @@ class ReceiverHandler(BaseHTTPRequestHandler):
         # Minimal operational logging: method, path (never the query string),
         # status, counts. Never headers, tokens, or record data.
         suffix = " records=%d" % records if records is not None else ""
+        try:
+            content_length = self._content_length() or 0
+        except InvalidContentLength:
+            content_length = 0
         logger.info(
             "%s %s -> %d (%d bytes in%s)",
             self.command,
             self.path.split("?", 1)[0],
             status,
-            self._content_length() or 0,
+            content_length,
             suffix,
         )
 
     def log_message(self, format, *args):  # noqa: A002 - stdlib signature
-        # Route the base class's logging through our minimal logger.
-        logger.debug(format, *args)
+        # Suppress the base class's request-line logging entirely: it can
+        # include query strings, which this server deliberately never logs.
+        pass
 
 
 class ReceiverServer(ThreadingHTTPServer):
@@ -281,10 +381,11 @@ class ReceiverServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 32
 
     def handle_error(self, request, client_address):
-        # Client disconnects and resets are routine; log one line, no
-        # traceback, and never any request content.
+        # Client disconnects, resets, and read timeouts are routine; log one
+        # line, no traceback, and never any request content.
         logger.warning("Connection error with a client; request rejected.")
 
 
@@ -325,18 +426,6 @@ def make_server(
 
     return server
 
-
-def _env_int(name, default):
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        raise SystemExit("%s must be an integer." % name)
-    if value <= 0:
-        raise SystemExit("%s must be positive." % name)
-    return value
 
 
 def _load_token(args):

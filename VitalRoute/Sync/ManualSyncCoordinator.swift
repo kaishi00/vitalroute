@@ -35,6 +35,13 @@ struct SyncSummary: Equatable {
     var deliveredRecords: Int {
         acceptedRecords + duplicateRecords
     }
+
+    /// Per-category counts for outcome copy, in catalog order.
+    var breakdownText: String {
+        HealthMetric.allCases
+            .compactMap { metric in recordsByMetric[metric].map { "\(metric.displayName) \($0)" } }
+            .joined(separator: " · ")
+    }
 }
 
 enum SyncResult: Equatable {
@@ -177,6 +184,7 @@ final class ManualSyncCoordinator {
             phase = .readingHealthData
             let export = try await healthData.exportRecords(
                 since: plan.windowStart,
+                through: plan.windowEnd,
                 metrics: Set(plan.metrics)
             )
             summary.recordsFound = export.records.count

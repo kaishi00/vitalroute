@@ -40,7 +40,14 @@ fi
 
 echo "--- Issuing localhost certificate ---"
 CAROOT=$(mkcert -CAROOT)
-if [ ! -f "$CAROOT/rootCA.pem" ]; then mkcert -install >/dev/null; fi
+if [ ! -f "$CAROOT/rootCA.pem" ]; then
+  # Never modify the host trust store from a script: ask the developer to
+  # run mkcert -install themselves if they want a host-wide local CA. This
+  # script only needs an existing CA to issue the leaf certificate.
+  echo "No mkcert CA found at $CAROOT."
+  echo "Run 'mkcert -install' manually (installs a local CA into the macOS system trust store), then re-run."
+  exit 1
+fi
 cd "$INTDIR"
 mkcert -cert-file cert.pem -key-file key.pem localhost 127.0.0.1 ::1 >/dev/null 2>&1
 

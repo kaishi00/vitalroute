@@ -243,16 +243,21 @@ struct DestinationView: View {
         let endpoint = destinationStore.savedEndpoint
         do {
             try destinationStore.clear()
-            try credentialStore.removeCredential(for: endpoint)
-            endpointDraft = ""
-            isEditingEndpoint = true
-            tokenDraft = ""
-            isEditingToken = false
-            connectionResult = nil
-            statusMessage = "Saved destination and its API key were removed."
         } catch {
             statusMessage = error.localizedDescription
+            return
         }
+        do {
+            try credentialStore.removeCredential(for: endpoint)
+            statusMessage = "Saved destination and its API key were removed."
+        } catch {
+            statusMessage = "Saved destination removed, but its API key could not be deleted from secure storage."
+        }
+        endpointDraft = ""
+        isEditingEndpoint = true
+        tokenDraft = ""
+        isEditingToken = false
+        connectionResult = nil
     }
 
     private func saveToken() {

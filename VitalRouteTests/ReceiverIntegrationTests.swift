@@ -128,6 +128,8 @@ final class ReceiverIntegrationTests: XCTestCase {
 
 /// Thread-safe result handoff from the network task back to the test body.
 private final class ResultBox<T>: @unchecked Sendable {
+    private struct TimeoutError: Error {}
+
     private let lock = NSLock()
     private var result: Result<T, Error>?
 
@@ -141,7 +143,9 @@ private final class ResultBox<T>: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard let result else {
-            return .failure(XCTSkip("operation never completed"))
+            // A live-receiver operation that never completed must fail the
+            // test, not silently skip it.
+            return .failure(TimeoutError())
         }
         return result
     }

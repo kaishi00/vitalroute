@@ -136,6 +136,7 @@ private final class StubHealthDataProvider: HealthDataProviding {
 
     func exportRecords(
         since startDate: Date,
+        through endDate: Date,
         metrics: Set<HealthMetric>
     ) async throws -> HealthExportResult {
         HealthExportResult(
