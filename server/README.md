@@ -139,6 +139,21 @@ temporary database and synthetic records only. It covers authentication,
 connection-test semantics, validation, atomicity, idempotency, limits, error
 safety, and concurrency.
 
+## Simulator integration (macOS with Xcode)
+
+`run_simulator_integration.sh` runs the full XCTest suite — including the
+otherwise-skipped `ReceiverIntegrationTests` — against a real receiver serving
+TLS on loopback, with synthetic records only. It issues a localhost
+certificate with [mkcert](https://github.com/FiloSottile/mkcert), trusts the
+CA **inside the simulator's own keychain** via `xcrun simctl keychain`
+(a per-simulator testing facility; the app's production TLS validation is
+never weakened), verifies persisted rows in SQLite, and resets the simulator
+keychain afterwards:
+
+```sh
+server/run_simulator_integration.sh "iPhone 17 Pro"
+```
+
 ## Privacy notes
 
 - Operational logs contain method, path, status, duration, and byte counts —
