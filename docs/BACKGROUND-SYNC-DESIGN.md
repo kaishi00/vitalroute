@@ -10,7 +10,14 @@ Sources followed: Apple's `HKAnchoredObjectQuery` documentation (the anchor
 corresponds to the last sample **or deleted object received by that query**;
 pass it back to get subsequent changes), `HKObserverQuery` +
 `enableBackgroundDelivery(for:frequency:)` (the only background-update
-mechanism; iOS throttles wake-ups and never guarantees immediacy).
+mechanism; iOS throttles wake-ups and never guarantees immediacy), and
+Apple's observer-processing contract (the observer's completion handler must
+be called when the app has finished the work the notification triggered).
+Background delivery additionally requires the
+`com.apple.developer.healthkit.background-delivery` entitlement: on iOS 15
+and later `enableBackgroundDelivery` fails without it. Both HealthKit
+entitlements are declared in `project.yml` and generated into
+`VitalRoute/VitalRoute.entitlements`.
 
 ## 1. State model
 
@@ -47,10 +54,12 @@ mechanism; iOS throttles wake-ups and never guarantees immediacy).
 | Event | Behavior |
 |---|---|
 | Destination changed / removed | Automatic sync **disables**; pending events and checkpoints bound to the previous destination identity are discarded with a visible notice. Nothing is ever re-pointed to a different recipient. |
-| Credential replaced (same destination) | State kept; pending work stays; the next attempt uses the new credential. |
+| Credential replaced (same destination) | State kept; pending work stays; the next attempt uses the new credential (the credential store publishes a nonsecret revision so a same-endpoint replacement reaches the engine). |
 | Category disabled | That category's observers stop, its queued events are removed (never uploaded), and its checkpoint is cleared. Other categories continue. |
 | Category re-enabled | A **new scope generation** is minted: fresh 7-day bootstrap (never silently lifetime history, never a silent gap). |
 | Queue at capacity | Query passes stop (backpressure); state surfaces pending work; delivery resumes draining first. |
+| Destination changed while automatic sync is **off** | The queue bound to the previous destination is discarded with a visible notice — queued health data must never become deliverable to an endpoint it was not captured for. |
+| Configuration (destination, credential, or selection) changes while an operation is suspended | The newer decision wins. A generation counter is claimed before the first suspension of every user decision; a resumed enable, registration, or restore finds itself superseded, unwinds, and mutates nothing. |
 
 ## 2. Scopes, checkpoints, and query invariants
 
@@ -87,7 +96,8 @@ order, so a crash always produces replay, never loss.
 
 Location: `Application Support/VitalRouteSync/` containing per-event files
 (`evt-<id>.json`), per-category checkpoint files (`chk-<category>.json`), and
-retry state (`retry.json`). Writes are temp-file + rename (atomic); the
+retry state (`retry.json`), and the queue's owner (`pending-scope.json` —
+the destination identity the queued changes were captured for). Writes are temp-file + rename (atomic); the
 directory uses `.completeUntilFirstUserAuthentication` file protection
 (available for background delivery after first unlock; still encrypted at
 rest otherwise) and `isExcludedFromBackup = true`. Contents are health
@@ -102,6 +112,14 @@ records — retained only until acknowledged, then deleted.
 - **Backpressure**: when pending events ≥ cap (10,000), query passes stop and
   the state surfaces pending work. Changes are never discarded by a query
   pass.
+- **Destination binding**: the queue records the destination it was captured
+  for, durably. A pass refuses to add to, and delivery refuses to send, a
+  queue whose recorded owner differs from the destination in effect —
+  discarding it with a visible notice instead. Absent ownership information
+  fails closed. This covers a destination change made while the app was not
+  running, where no in-session purge could have seen it. A discard notice
+  survives later successful deliveries: dropping health data the user chose
+  to send is not a transient hiccup.
 - **Recovery boundaries** (all tested):
   - crash after event files, before checkpoint → re-query returns the same
     changes → dedupe → exactly one upload;
@@ -121,12 +139,28 @@ time as their interval; the receiver's tombstone stores it for audit.
 - **One serialization boundary**: an actor (`SyncWorkGate`) guards all sync
   work. The manual coordinator and the background engine acquire it, so
   manual and automatic work can never run concurrently or race checkpoints.
-- **Observer callback**: returns immediately after starting a bounded Task;
-  the Task does (1) a bounded incremental query pass (page budget, page size
-  500, ≤ 20 pages per pass), (2) outbox commit + checkpoint advance, (3) a
-  bounded delivery attempt. The observer callback never waits on network
-  success. Changes arriving during an active run are handled by the next
-  pass (observer re-fires; foreground catch-up; BG task).
+- **Ownership by generation**: every asynchronous operation captures the
+  configuration generation it belongs to and checks it before mutating the
+  mode, arming observers, scheduling successor work, or starting an upload.
+  A stale completion unwinds instead of applying, so a cancelled pass can
+  never resurrect a pause over a purge, and an enable suspended in the
+  authorization prompt or capability check can never activate an endpoint or
+  selection the user has already replaced.
+- **Observer callback**: the callback returns immediately, but HealthKit's
+  completion handler is held until the triggered work is *durable* — the
+  capture pass has appended its events and advanced its checkpoints — and is
+  released exactly once. Delivery is never allowed to hold it: a parked
+  upload must not delay the answer, and a stalled receiver must not look like
+  a stalled app. If a capture cannot finish inside the coordinator's deadline
+  (25 s) the completion is released anyway, and the next pass resumes from
+  the persisted checkpoint — only the notification is lost, never the data.
+  Overlapping notifications all share the capture that answers them, and a
+  notification that arrives after teardown is still answered.
+- **Transactional observer lifecycle**: registration is all-or-nothing (a
+  partial `enableBackgroundDelivery` failure unwinds what it armed), and
+  registration and teardown are serialized and generation-fenced, so a
+  registration suspended mid-flight cannot install observers after a stop,
+  and a stale teardown cannot remove the registration that replaced it.
 - **HealthKit continuations are cancellation-safe** before registration and
   against late callbacks (claim-once guard, as in the existing pager).
 - **Background budget**: `BGTaskScheduler` app-refresh task
@@ -181,8 +215,12 @@ so nothing is silently reinterpreted.
 
 Deterministic iOS tests use injected stores (real file-based outbox/state in
 temp directories for crash-window recovery), stubbed health providers and
-clients. Receiver tests are real-HTTP against ephemeral ports. The TLS
+clients, and a controllable HealthKit observer backend (the live store cannot
+be made to fail a second type's enablement, suspend a registration, or
+deliver a late callback on demand). Race regressions wait for the state that
+must appear rather than sleeping. Receiver tests are real-HTTP against ephemeral ports. The TLS
 integration runner gains: addition → retry (idempotency) → deletion → old
 addition replay (tombstone prevents resurrection) → final database
 inspection. Physical-device validation for real background delivery is a
-separate checklist (simulator cannot prove background wakes).
+separate checklist: a simulator cannot prove background wakes, and simulator
+builds strip the device-only HealthKit entitlements.
