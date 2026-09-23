@@ -10,6 +10,7 @@
 		1C742BB156BA1C9D13A87C47 /* DestinationConfigurationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EC2C1065C0877FBEE1659AB /* DestinationConfigurationStore.swift */; };
 		3764D99AFB5EC1848AFC1AF8 /* VitalRouteModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 711E1DD1FC2624EA1E6E61DA /* VitalRouteModel.swift */; };
 		455CFE7448618721CD3C731B /* SyncPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */; };
+		459D3293B03D01AD0B0246C0 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DBB21975C9F05A1352B6ADE3 /* Assets.xcassets */; };
 		475A17FA563DBBC2A932511D /* OverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF0B77CA424E9FB356524D3B /* OverviewView.swift */; };
 		4D4BCA61CC398A1E3B16E185 /* HealthMetric.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCF0F120103661DDE2DB95CA /* HealthMetric.swift */; };
 		52D4DA3AE945A7FC71B7BD66 /* DestinationConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 253F1897B82767544D465728 /* DestinationConfiguration.swift */; };
@@ -26,6 +27,7 @@
 		C8F33F484488C940B6676DE7 /* HealthKitRecordMapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE0112885358C8CED8930D04 /* HealthKitRecordMapperTests.swift */; };
 		CDE20B962DE63B29863105FE /* HealthMetricTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */; };
 		D47D0CB96AFF64D45C6812E9 /* DestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB6E1A524629690F037A76D /* DestinationView.swift */; };
+		EB3AAEDD0A0570A3D137C907 /* HealthKitServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E643F41109A59136822965 /* HealthKitServiceTests.swift */; };
 		EF523D7479DDEC47947B8576 /* DestinationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 688DE9D09497671C7F7A1321 /* DestinationClient.swift */; };
 		FB5CB25EF9EF364A44BFB33E /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C2ECF345888AF47CAD8FD2 /* SettingsView.swift */; };
 /* End PBXBuildFile section */
@@ -63,7 +65,9 @@
 		BF0B77CA424E9FB356524D3B /* OverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewView.swift; sourceTree = "<group>"; };
 		D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthMetricTests.swift; sourceTree = "<group>"; };
 		D54B37CCD5BA917FB54C8B85 /* VitalRoute.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VitalRoute.entitlements; sourceTree = "<group>"; };
+		DBB21975C9F05A1352B6ADE3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DCF0F120103661DDE2DB95CA /* HealthMetric.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthMetric.swift; sourceTree = "<group>"; };
+		F1E643F41109A59136822965 /* HealthKitServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitServiceTests.swift; sourceTree = "<group>"; };
 		F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPayloadTests.swift; sourceTree = "<group>"; };
 		F91B0740C51996005F797DAE /* VitalRoute.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VitalRoute.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -127,6 +131,7 @@
 		8B5581564CA18168D8B90B17 /* VitalRoute */ = {
 			isa = PBXGroup;
 			children = (
+				DBB21975C9F05A1352B6ADE3 /* Assets.xcassets */,
 				65FE661EF803A7FA195EA8C9 /* Info.plist */,
 				D54B37CCD5BA917FB54C8B85 /* VitalRoute.entitlements */,
 				C098FDEBF8A5F339F341B727 /* App */,
@@ -197,6 +202,7 @@
 			children = (
 				4008320A95D4EFD02B848CE8 /* DestinationConfigurationTests.swift */,
 				BE0112885358C8CED8930D04 /* HealthKitRecordMapperTests.swift */,
+				F1E643F41109A59136822965 /* HealthKitServiceTests.swift */,
 				D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */,
 				F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */,
 				33CDAA387B2A9A9D8665794F /* VitalRouteModelTests.swift */,
@@ -230,6 +236,7 @@
 			buildConfigurationList = 232764D652C5E7A485DA99EA /* Build configuration list for PBXNativeTarget "VitalRoute" */;
 			buildPhases = (
 				51B5ABAEB7AF6E53EA158AD4 /* Sources */,
+				111B9F1F290BD0243D8CAA81 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -273,6 +280,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		111B9F1F290BD0243D8CAA81 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				459D3293B03D01AD0B0246C0 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		51B5ABAEB7AF6E53EA158AD4 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -303,6 +321,7 @@
 			files = (
 				7581D6EA5F72BF5A9E52B9B9 /* DestinationConfigurationTests.swift in Sources */,
 				C8F33F484488C940B6676DE7 /* HealthKitRecordMapperTests.swift in Sources */,
+				EB3AAEDD0A0570A3D137C907 /* HealthKitServiceTests.swift in Sources */,
 				CDE20B962DE63B29863105FE /* HealthMetricTests.swift in Sources */,
 				455CFE7448618721CD3C731B /* SyncPayloadTests.swift in Sources */,
 				876E427E9EDA2567BB1AF393 /* VitalRouteModelTests.swift in Sources */,

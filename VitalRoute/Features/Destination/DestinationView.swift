@@ -27,6 +27,7 @@ struct DestinationView: View {
                         .foregroundStyle(.secondary)
                     Button("Change endpoint") {
                         endpointDraft = destinationStore.savedEndpoint
+                        statusMessage = nil
                         isEditingEndpoint = true
                     }
                 }
@@ -110,15 +111,27 @@ struct DestinationView: View {
             }
         }
         .onAppear {
-            if !destinationStore.isConfigured {
-                isEditingEndpoint = true
-            }
+            enterEditingIfUnconfigured()
+        }
+        .onChange(of: destinationStore.isLoaded) {
+            enterEditingIfUnconfigured()
         }
         .onDisappear {
             tokenDraft = ""
+            endpointDraft = ""
+            statusMessage = nil
         }
         .navigationTitle("Destination")
         .navigationBarTitleDisplayMode(.large)
+    }
+
+    /// The saved endpoint loads asynchronously, so the unconfigured check may
+    /// only become meaningful after this screen first appears.
+    private func enterEditingIfUnconfigured() {
+        guard destinationStore.isLoaded, !destinationStore.isConfigured, !isEditingEndpoint else {
+            return
+        }
+        isEditingEndpoint = true
     }
 
     private var isValidEndpoint: Bool {

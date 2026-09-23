@@ -55,14 +55,12 @@ final class HealthKitRecordMapperTests: XCTestCase {
 
     func testPreservesWorkoutMetadata() throws {
         let date = Date(timeIntervalSince1970: 1_735_689_600)
-        let workout = HKWorkout(
+        let workout = Self.makeWorkout(
             activityType: .running,
             start: date,
-            end: date.addingTimeInterval(30 * 60),
-            workoutEvents: nil,
-            totalEnergyBurned: HKQuantity(unit: .kilocalorie(), doubleValue: 210),
-            totalDistance: HKQuantity(unit: .meter(), doubleValue: 5000),
-            metadata: nil
+            duration: 30 * 60,
+            energyKcal: 210,
+            distanceMeters: 5_000
         )
 
         let record = try XCTUnwrap(HealthKitRecordMapper.makeRecord(from: workout, metric: .workouts))
@@ -72,6 +70,22 @@ final class HealthKitRecordMapperTests: XCTestCase {
         XCTAssertEqual(record.metadata["activityTypeCode"], String(HKWorkoutActivityType.running.rawValue))
         XCTAssertEqual(record.metadata["activeEnergyKcal"], "210.0")
         XCTAssertEqual(record.metadata["distanceMeters"], "5000.0")
+    }
+
+    func testPreservesWorkoutDistanceForNonWalkingActivities() throws {
+        let date = Date(timeIntervalSince1970: 1_735_689_600)
+        let workout = Self.makeWorkout(
+            activityType: .cycling,
+            start: date,
+            duration: 45 * 60,
+            energyKcal: 300,
+            distanceMeters: 15_000
+        )
+
+        let record = try XCTUnwrap(HealthKitRecordMapper.makeRecord(from: workout, metric: .workouts))
+
+        XCTAssertEqual(record.metadata["distanceMeters"], "15000.0")
+        XCTAssertEqual(record.metadata["activeEnergyKcal"], "300.0")
     }
 
     func testReturnsNilForMismatchedSampleType() throws {
@@ -85,5 +99,28 @@ final class HealthKitRecordMapperTests: XCTestCase {
         )
 
         XCTAssertNil(HealthKitRecordMapper.makeRecord(from: sample, metric: .sleep))
+    }
+
+    /// The deprecated convenience initializer is the only way to construct an
+    /// HKWorkout carrying energy/distance statistics without a live
+    /// HKHealthStore; marking this fixture deprecated silences the warning
+    /// at the use sites inside it.
+    @available(iOS, deprecated: 18.0)
+    private static func makeWorkout(
+        activityType: HKWorkoutActivityType,
+        start: Date,
+        duration: TimeInterval,
+        energyKcal: Double,
+        distanceMeters: Double
+    ) -> HKWorkout {
+        HKWorkout(
+            activityType: activityType,
+            start: start,
+            end: start.addingTimeInterval(duration),
+            workoutEvents: nil,
+            totalEnergyBurned: HKQuantity(unit: .kilocalorie(), doubleValue: energyKcal),
+            totalDistance: HKQuantity(unit: .meter(), doubleValue: distanceMeters),
+            metadata: nil
+        )
     }
 }

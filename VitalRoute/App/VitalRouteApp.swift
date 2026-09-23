@@ -15,6 +15,7 @@ struct VitalRouteApp: App {
             RootTabView()
                 .environment(appModel)
                 .environment(destinationStore)
+                .task { await destinationStore.loadSavedEndpoint() }
         }
     }
 }

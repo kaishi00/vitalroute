@@ -54,12 +54,11 @@ enum HealthKitRecordMapper {
             unit = "s"
             metadata["activityTypeCode"] = String(workout.workoutActivityType.rawValue)
             if let energyType = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned) {
-                let energy = workout.statistics(for: energyType)?.sumQuantity() ?? workout.totalEnergyBurned
-                if let energy {
+                if let energy = workout.statistics(for: energyType)?.sumQuantity() {
                     metadata["activeEnergyKcal"] = String(energy.doubleValue(for: .kilocalorie()))
                 }
             }
-            if let distance = workout.totalDistance {
+            if let distance = workoutDistance(for: workout) {
                 metadata["distanceMeters"] = String(distance.doubleValue(for: .meter()))
             }
         }
@@ -75,6 +74,30 @@ enum HealthKitRecordMapper {
             deviceName: sample.device?.name,
             metadata: metadata
         )
+    }
+
+    /// Workouts record distance under activity-specific quantity types.
+    /// Scanning the candidates — walking/running first, matching the legacy
+    /// totalDistance behavior — keeps distance for activities without a
+    /// dedicated mapping. statistics(for:) returns nil for types a workout
+    /// does not measure, so the first hit is the primary distance.
+    private static func workoutDistance(for workout: HKWorkout) -> HKQuantity? {
+        let distanceIdentifiers: [HKQuantityTypeIdentifier] = [
+            .distanceWalkingRunning,
+            .distanceCycling,
+            .distanceSwimming,
+            .distanceWheelchair,
+            .distanceDownhillSnowSports
+        ]
+        for identifier in distanceIdentifiers {
+            guard let type = HKObjectType.quantityType(forIdentifier: identifier) else {
+                continue
+            }
+            if let quantity = workout.statistics(for: type)?.sumQuantity() {
+                return quantity
+            }
+        }
+        return nil
     }
 
     private static func sleepStage(for rawValue: Int) -> String {

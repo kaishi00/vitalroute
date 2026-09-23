@@ -47,6 +47,7 @@ struct OverviewView: View {
                     .foregroundStyle(model.isHealthAvailable ? .pink : .secondary)
                     .frame(width: 42, height: 42)
                     .background(.pink.opacity(0.10), in: RoundedRectangle(cornerRadius: 13))
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Apple Health")
@@ -97,14 +98,15 @@ struct OverviewView: View {
                 .foregroundStyle(.indigo)
                 .frame(width: 42, height: 42)
                 .background(.indigo.opacity(0.10), in: RoundedRectangle(cornerRadius: 13))
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Your destination")
                     .font(.headline)
-                Text(destinationStore.isConfigured ? "Configured · HTTPS" : "Not configured")
+                Text(destinationStatusText)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Text(destinationStore.isConfigured ? "Saved securely in Keychain" : "Add an endpoint you control.")
+                Text(destinationDetailText)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -179,6 +181,7 @@ struct OverviewView: View {
                             .foregroundStyle(.teal)
                             .frame(width: 34, height: 34)
                             .background(.teal.opacity(0.10), in: RoundedRectangle(cornerRadius: 11))
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(record.metric.displayName)
                                 .font(.subheadline.weight(.medium))
@@ -204,5 +207,19 @@ struct OverviewView: View {
             return "Not available on this device"
         }
         return model.authorizationRequestCompleted ? "Access request completed" : "Ready to review access"
+    }
+
+    private var destinationStatusText: String {
+        guard destinationStore.isLoaded else {
+            return "Checking secure storage…"
+        }
+        return destinationStore.isConfigured ? "Configured · HTTPS" : "Not configured"
+    }
+
+    private var destinationDetailText: String {
+        guard destinationStore.isLoaded else {
+            return "The saved destination will appear here."
+        }
+        return destinationStore.isConfigured ? "Saved securely in Keychain" : "Add an endpoint you control."
     }
 }

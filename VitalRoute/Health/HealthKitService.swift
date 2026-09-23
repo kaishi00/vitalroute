@@ -19,9 +19,9 @@ final class HealthKitService: HealthDataProviding {
         })
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            healthStore.requestAuthorization(toShare: Set<HKSampleType>(), read: types) { _, error in
-                if let error {
-                    continuation.resume(throwing: error)
+            healthStore.requestAuthorization(toShare: Set<HKSampleType>(), read: types) { granted, error in
+                if let failure = HealthKitServiceError.authorizationError(granted: granted, error: error) {
+                    continuation.resume(throwing: failure)
                 } else {
                     continuation.resume()
                 }
@@ -41,26 +41,49 @@ final class HealthKitService: HealthDataProviding {
             options: [.strictStartDate]
         )
 
+        // One HealthKit query per metric; the queries overlap on HealthKit's
+        // own queues, and concurrency is bounded by the fixed metric count.
+        let store = healthStore
+        let recordsByMetric = try await withThrowingTaskGroup(of: (HealthMetric, [HealthRecord]).self) { group in
+            for metric in HealthMetric.allCases {
+                group.addTask {
+                    (metric, try await Self.queryRecords(
+                        for: metric,
+                        using: store,
+                        predicate: predicate,
+                        limit: limit
+                    ))
+                }
+            }
+            var results: [HealthMetric: [HealthRecord]] = [:]
+            for try await (metric, records) in group {
+                results[metric] = records
+            }
+            return results
+        }
+
+        // Assemble in HealthMetric.allCases order so the merged output stays
+        // deterministic regardless of query completion order.
         var records: [HealthRecord] = []
         for metric in HealthMetric.allCases {
-            guard let type = HealthKitRecordMapper.sampleType(for: metric) else {
-                continue
-            }
-            let samples = try await querySamples(of: type, predicate: predicate, limit: limit)
-            records.append(contentsOf: samples.compactMap {
-                HealthKitRecordMapper.makeRecord(from: $0, metric: metric)
-            })
+            records.append(contentsOf: recordsByMetric[metric] ?? [])
         }
 
         return records.sorted { $0.startDate > $1.startDate }
     }
 
-    private func querySamples(
-        of sampleType: HKSampleType,
+    /// Nonisolated so the task-group children neither hop through the main
+    /// actor nor capture the isolated service; HKHealthStore is thread-safe.
+    private nonisolated static func queryRecords(
+        for metric: HealthMetric,
+        using healthStore: HKHealthStore,
         predicate: NSPredicate,
         limit: Int
-    ) async throws -> [HKSample] {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HKSample], Error>) in
+    ) async throws -> [HealthRecord] {
+        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
+            return []
+        }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HealthRecord], Error>) in
             let query = HKSampleQuery(
                 sampleType: sampleType,
                 predicate: predicate,
@@ -72,7 +95,13 @@ final class HealthKitService: HealthDataProviding {
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
-                    continuation.resume(returning: samples ?? [])
+                    // HKSample is not Sendable: convert to the app-owned
+                    // HealthRecord value type on HealthKit's callback thread
+                    // so only Sendable values cross the continuation.
+                    let records = (samples ?? []).compactMap {
+                        HealthKitRecordMapper.makeRecord(from: $0, metric: metric)
+                    }
+                    continuation.resume(returning: records)
                 }
             }
             healthStore.execute(query)
@@ -80,10 +109,25 @@ final class HealthKitService: HealthDataProviding {
     }
 }
 
-private enum HealthKitServiceError: LocalizedError {
+enum HealthKitServiceError: LocalizedError, Equatable {
     case unavailable
+    case authorizationFailed
 
     var errorDescription: String? {
-        "Apple Health data is not available on this device."
+        switch self {
+        case .unavailable:
+            "Apple Health data is not available on this device."
+        case .authorizationFailed:
+            "Apple Health authorization could not be completed. Grant access in Settings > Health and try again."
+        }
+    }
+
+    /// Maps HealthKit's (granted, error) authorization callback to a thrown
+    /// error. `granted == false` with no error must not be read as success.
+    static func authorizationError(granted: Bool, error: Error?) -> Error? {
+        if let error {
+            return error
+        }
+        return granted ? nil : HealthKitServiceError.authorizationFailed
     }
 }

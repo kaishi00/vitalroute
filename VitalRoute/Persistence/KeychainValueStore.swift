@@ -1,14 +1,15 @@
 import Foundation
 import Security
 
-@MainActor
-protocol SecureValueStoring {
+// The SecItem API family is thread-safe and the conformers hold no mutable
+// state, so reads can safely run off the main actor (Sendable). The store
+// keeps app-facing observable state; this layer only moves values.
+protocol SecureValueStoring: Sendable {
     func readValue(forKey key: String) throws -> String?
     func saveValue(_ value: String, forKey key: String) throws
     func removeValue(forKey key: String) throws
 }
 
-@MainActor
 final class KeychainValueStore: SecureValueStoring {
     private let service = Bundle.main.bundleIdentifier ?? "com.milim.vitalroute"
 
