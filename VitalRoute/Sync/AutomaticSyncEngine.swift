@@ -1235,11 +1235,10 @@ final class AutomaticSyncEngine {
                 return .deferred(healthError.localizedDescription)
             }
         }
-        if let cocoaError = error as? CocoaError {
+        if error is CocoaError {
             // Storage failures during a pass are treated as deferred work:
             // the common cause is file protection while the device is
             // locked; anything else is retried with backoff and surfaced.
-            _ = cocoaError
             return .deferred("protected storage is unavailable; the device may be locked.")
         }
         return .transient

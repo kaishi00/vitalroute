@@ -61,7 +61,7 @@ entitlements are declared in `project.yml` and generated into
 |---|---|
 | Destination changed / removed | Automatic sync **disables**; pending events and checkpoints bound to the previous destination identity are discarded with a visible notice. Nothing is ever re-pointed to a different recipient. |
 | Credential replaced (same destination) | State kept; pending work stays; the next attempt uses the new credential (the credential store publishes a nonsecret revision so a same-endpoint replacement reaches the engine). |
-| Category disabled | That category's observers stop, its queued events are removed (never uploaded), and its checkpoint is cleared. Other categories continue. |
+| Category disabled | That category's observers stop, the in-flight pass is cancelled and awaited, its queued events are removed and its checkpoint cleared; other categories continue. A batch already committed to the wire cannot be recalled, so — as with the destination purge — what is *not* uploaded is the queued work that had not yet been sent. |
 | Category re-enabled | A **new scope generation** is minted: fresh 7-day bootstrap (never silently lifetime history, never a silent gap). |
 | Queue at capacity | Query passes stop (backpressure); state surfaces pending work; delivery resumes draining first. |
 | Destination changed while automatic sync is **off** | The queue bound to the previous destination is discarded with a visible notice — queued health data must never become deliverable to an endpoint it was not captured for. |

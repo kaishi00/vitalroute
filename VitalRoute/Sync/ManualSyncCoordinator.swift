@@ -112,9 +112,14 @@ final class ManualSyncCoordinator {
         lastSuccessfulSync = Self.loadLastSync(from: defaults)
     }
 
-    var isSyncing: Bool {
-        syncTask != nil
-    }
+    /// Observable in-flight state.
+    ///
+    /// `syncTask` is observation-ignored, so a computed `isSyncing` over it
+    /// registers no Observation dependency and a view reading it never
+    /// updates. That matters now that a manual sync can wait behind an
+    /// automatic pass: the wait is real, and the screen has to show it and
+    /// offer the cancel.
+    private(set) var isSyncing = false
 
     /// Starts a sync from the current configuration. All inputs are captured
     /// into the plan immediately; overlapping calls are ignored while a sync
@@ -168,6 +173,7 @@ final class ManualSyncCoordinator {
             // "syncing" state that also blocks every later start.
             defer {
                 self.syncTask = nil
+                self.isSyncing = false
                 self.phase = .idle
             }
             // Serialized with automatic sync: the whole manual operation
@@ -193,6 +199,7 @@ final class ManualSyncCoordinator {
             }
         }
         syncTask = task
+        isSyncing = true
     }
 
     func cancelSync() {

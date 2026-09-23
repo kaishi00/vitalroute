@@ -18,9 +18,13 @@ struct VitalRouteApp: App {
 
         let stateStore = SyncStateStore(directory: syncDirectory)
         let outbox = Outbox(directory: syncDirectory)
+        // One transport for manual and automatic work: the client owns a
+        // URLSession, and two of them means two sessions and two
+        // redirect-rejecting delegates for the same destination.
+        let destinationClient = HTTPDestinationClient()
         let engine = AutomaticSyncEngine(
             healthData: healthKitService,
-            client: HTTPDestinationClient(),
+            client: destinationClient,
             stateStore: stateStore,
             outbox: outbox,
             workGate: sharedGate
@@ -36,7 +40,7 @@ struct VitalRouteApp: App {
         _syncCoordinator = State(
             initialValue: ManualSyncCoordinator(
                 healthData: healthKitService,
-                client: HTTPDestinationClient(),
+                client: destinationClient,
                 workGate: sharedGate
             )
         )

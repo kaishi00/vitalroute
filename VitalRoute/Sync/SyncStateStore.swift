@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Everything a category checkpoint is bound to: destination identity,
 /// category, a generation minted on (re)bootstrap, and the fixed window
@@ -133,17 +134,24 @@ actor SyncStateStore {
     /// `.initial`), and writing into an absent directory silently discarded
     /// the schedule instead of persisting it.
     ///
-    /// Write failures stay swallowed, deliberately: this is advisory
-    /// bookkeeping, not health data. Losing it degrades to retrying on the
-    /// default interval rather than the backed-off one, and in the capture
-    /// path any storage failure serious enough to matter is surfaced by the
-    /// throwing checkpoint write alongside it.
+    /// Write failures do not throw: this is advisory bookkeeping, not health
+    /// data, and losing it degrades to retrying on the default interval
+    /// rather than the backed-off one. They are logged rather than dropped
+    /// silently, and in the capture path a storage failure that matters is
+    /// also surfaced by the throwing checkpoint write alongside this one.
     func saveRetryState(_ state: DeliveryRetryState) {
-        try? ensurePrepared()
-        if let data = try? encoder.encode(state) {
-            try? atomicWrite(data, to: retryURL)
+        do {
+            try ensurePrepared()
+            let data = try encoder.encode(state)
+            try atomicWrite(data, to: retryURL)
+        } catch {
+            // Counts and timestamps only: nothing payload-bearing, and the
+            // reason alone.
+            Self.logger.info("Retry state not persisted: \(String(describing: error), privacy: .public)")
         }
     }
+
+    private static let logger = Logger(subsystem: "com.milim.vitalroute", category: "sync-state")
 
     // MARK: - Pending-work scope
 

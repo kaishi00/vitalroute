@@ -97,11 +97,20 @@ struct SettingsView: View {
             )
         }
         if let message = autoSyncEngine.lastStatusMessage {
-            Label(message, systemImage: "exclamationmark.circle")
+            // Only a pause is an error state; the off notice and the
+            // post-hoc notices read as information, not as a failure.
+            Label(message, systemImage: statusSymbol)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var statusSymbol: String {
+        if case .paused = autoSyncEngine.mode {
+            return "exclamationmark.circle"
+        }
+        return "info.circle"
     }
 
     private var modeDescription: String {
