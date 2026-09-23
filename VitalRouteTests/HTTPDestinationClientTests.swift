@@ -200,7 +200,7 @@ final class HTTPDestinationClientTests: XCTestCase {
             try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
         await assertThrows(.redirected) {
-            try await client.testConnection(to: self.endpoint, authorization: self.authorization)
+            _ = try await client.testConnection(to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -358,7 +358,7 @@ final class HTTPDestinationClientTests: XCTestCase {
             try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
         await assertThrows(.tlsValidationFailed) {
-            try await client.testConnection(to: self.endpoint, authorization: self.authorization)
+            _ = try await client.testConnection(to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -371,7 +371,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.malformedAcknowledgment) {
-            try await client.testConnection(to: self.endpoint, authorization: self.authorization)
+            _ = try await client.testConnection(to: self.endpoint, authorization: self.authorization)
         }
     }
 
