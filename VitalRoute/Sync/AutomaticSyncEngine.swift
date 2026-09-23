@@ -161,17 +161,23 @@ final class AutomaticSyncEngine {
             return .failed(message: "Automatic sync is already on.")
         }
         guard !metrics.isEmpty else {
-            return .failed(message: AutomaticSyncPauseReason.selectionEmpty.userMessage)
+            let message = AutomaticSyncPauseReason.selectionEmpty.userMessage
+            lastStatusMessage = message
+            return .failed(message: message)
         }
         let trimmedToken = bearerToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmedToken.isEmpty else {
-            return .failed(message: AutomaticSyncPauseReason.credentialMissing.userMessage)
+            let message = AutomaticSyncPauseReason.credentialMissing.userMessage
+            lastStatusMessage = message
+            return .failed(message: message)
         }
         let configuration: DestinationConfiguration
         do {
             configuration = try DestinationConfiguration(endpoint: endpoint)
         } catch {
-            return .failed(message: "The saved destination is not usable: \(error.localizedDescription)")
+            let message = "The saved destination is not usable: \(error.localizedDescription)"
+            lastStatusMessage = message
+            return .failed(message: message)
         }
 
         // Foreground HealthKit authorization: background work must never
@@ -179,6 +185,7 @@ final class AutomaticSyncEngine {
         do {
             try await healthData.requestReadAuthorization(for: metrics)
         } catch {
+            lastStatusMessage = error.localizedDescription
             return .failed(message: error.localizedDescription)
         }
 
@@ -189,12 +196,14 @@ final class AutomaticSyncEngine {
                 authorization: DestinationAuthorization(bearerToken: trimmedToken)
             )
             guard health.supportsDeletions else {
-                return .failed(
-                    message: "The destination receiver does not support deletions (contract v2). Update it to a v2 receiver, then try again. Manual sync keeps working."
-                )
+                let message = "The destination receiver does not support deletions (contract v2). Update it to a v2 receiver, then try again. Manual sync keeps working."
+                lastStatusMessage = message
+                return .failed(message: message)
             }
         } catch {
-            return .failed(message: "Could not verify the destination: \(error.localizedDescription)")
+            let message = "Could not verify the destination: \(error.localizedDescription)"
+            lastStatusMessage = message
+            return .failed(message: message)
         }
 
         destination = configuration.endpoint.absoluteString
@@ -205,17 +214,34 @@ final class AutomaticSyncEngine {
         lastStatusMessage = nil
 
         do {
-            try await healthData.observeChanges(for: metrics) { [weak self] in
-                guard let self else { return }
-                Task { @MainActor in self.observerFired() }
-            }
+            try await registerObservers(for: metrics)
         } catch {
-            mode = .paused(.deferred("observers could not be registered: \(error.localizedDescription)"))
+            // Enabling failed at the last step: roll the flag back so the
+            // persisted state matches reality, visibly.
+            mode = .disabled
+            defaults.set(false, forKey: Self.enabledFlagKey)
+            let message = "Automatic sync could not start: observers could not be registered (\(error.localizedDescription))."
+            lastStatusMessage = message
+            return .failed(message: message)
         }
 
         startPass(trigger: .enablement)
         return .enabled
     }
+
+    @discardableResult
+    private func registerObservers(for metrics: Set<HealthMetric>) async throws -> Bool {
+        try await healthData.observeChanges(for: metrics) { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in self.observerFired() }
+        }
+        observersRegistered = true
+        return true
+    }
+
+    /// Whether observers are currently registered; a pass that finds this
+    /// false re-registers them (e.g. recovering from a deferred pause).
+    @ObservationIgnored private var observersRegistered = false
 
     /// Disables automatic sync. Work stops; queued events and checkpoints
     /// are kept so re-enabling resumes where it left off (nothing is ever
@@ -223,6 +249,7 @@ final class AutomaticSyncEngine {
     func disable() {
         guard mode != .disabled else { return }
         activeRunTask?.cancel()
+        observersRegistered = false
         Task { await healthData.stopObservingChanges() }
         defaults.set(false, forKey: Self.enabledFlagKey)
         mode = .disabled
@@ -237,7 +264,7 @@ final class AutomaticSyncEngine {
         metrics: Set<HealthMetric>
     ) async {
         guard mode != .disabled else { return }
-        destination = endpoint
+        destination = Self.normalizedDestination(endpoint)
         token = bearerToken
         selectedMetrics = metrics
         if let reason = unsatisfiedPrerequisite() {
@@ -245,11 +272,9 @@ final class AutomaticSyncEngine {
             return
         }
         do {
-            try await healthData.observeChanges(for: metrics) { [weak self] in
-                guard let self else { return }
-                Task { @MainActor in self.observerFired() }
-            }
+            try await registerObservers(for: metrics)
         } catch {
+            observersRegistered = false
             mode = .paused(.deferred("observers could not be registered: \(error.localizedDescription)"))
             return
         }
@@ -261,12 +286,13 @@ final class AutomaticSyncEngine {
     /// recipient; a destination change disables automatic sync and discards
     /// the previous destination's pending work with a visible notice.
     func configurationChanged(
-        destination newDestination: String,
+        destination newDestinationRaw: String,
         token newToken: String?,
         metrics newMetrics: Set<HealthMetric>
     ) async {
         let previousDestination = destination
         let previousMetrics = selectedMetrics
+        let newDestination = Self.normalizedDestination(newDestinationRaw)
 
         if mode == .disabled {
             // Track configuration so the first post-enable snapshot is
@@ -280,14 +306,21 @@ final class AutomaticSyncEngine {
 
         if destinationChanged || newDestination.isEmpty {
             let discarded = (try? await outbox.pendingCount()) ?? 0
-            await healthDataStopObserving()
+            // Cancel the in-flight pass and wait for it to leave the gate
+            // before mutating durable state, so a page captured for the old
+            // destination can never be appended after the discard below.
             activeRunTask?.cancel()
+            if let task = activeRunTask {
+                _ = await task.value
+            }
+            activeRunTask = nil
+            isRunning = false
+            await healthDataStopObserving()
+            observersRegistered = false
             await outbox.removeAll()
             await refreshPendingCount()
             await stateStore.clearAllCheckpoints()
-            var retry = await stateStore.loadRetryState()
-            retry = .initial
-            await stateStore.saveRetryState(retry)
+            await stateStore.saveRetryState(.initial)
             defaults.set(false, forKey: Self.enabledFlagKey)
             mode = .disabled
             lastStatusMessage = discarded > 0
@@ -301,6 +334,16 @@ final class AutomaticSyncEngine {
         selectedMetrics = newMetrics
 
         // Categories that were disabled must never upload their queued data.
+        // A pass re-appending that category's events mid-flight is drained
+        // first so the purge is authoritative.
+        if !previousMetrics.subtracting(newMetrics).isEmpty {
+            activeRunTask?.cancel()
+            if let task = activeRunTask {
+                _ = await task.value
+            }
+            activeRunTask = nil
+            isRunning = false
+        }
         for removed in previousMetrics where !newMetrics.contains(removed) {
             await outbox.removeCategory(removed)
             await stateStore.clearCheckpoint(for: removed)
@@ -320,11 +363,9 @@ final class AutomaticSyncEngine {
         // re-enable gets a fresh scope generation on its next query because
         // its checkpoint was cleared above.
         do {
-            try await healthData.observeChanges(for: newMetrics) { [weak self] in
-                guard let self else { return }
-                Task { @MainActor in self.observerFired() }
-            }
+            try await registerObservers(for: newMetrics)
         } catch {
+            observersRegistered = false
             mode = .paused(.deferred("observers could not be registered: \(error.localizedDescription)"))
             return
         }
@@ -332,6 +373,12 @@ final class AutomaticSyncEngine {
             mode = .active
         }
         startPass(trigger: .foregroundCatchUp)
+    }
+
+    /// Canonical destination identity: identical spellings must compare
+    /// equal no matter which entry point stored them.
+    private static func normalizedDestination(_ raw: String) -> String {
+        (try? DestinationConfiguration(endpoint: raw).endpoint.absoluteString) ?? raw
     }
 
     private func healthDataStopObserving() async {
@@ -363,6 +410,9 @@ final class AutomaticSyncEngine {
     func waitUntilIdle(timeout: TimeInterval = 25) async {
         let deadline = Date().addingTimeInterval(timeout)
         while isRunning && Date() < deadline {
+            if Task.isCancelled {
+                return
+            }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
     }
@@ -442,6 +492,17 @@ final class AutomaticSyncEngine {
             return
         }
 
+        // Observers lost to a deferred pause (or a fresh enable whose pass
+        // has not run yet) are re-armed before any work in this pass.
+        if !observersRegistered {
+            do {
+                try await registerObservers(for: selectedMetrics)
+            } catch {
+                mode = .paused(.deferred("observers could not be registered: \(error.localizedDescription)"))
+                return
+            }
+        }
+
         let atCapacity = (try? await outbox.isAtCapacity()) ?? false
         if atCapacity {
             // Backpressure: stop capturing, keep draining. The pause is
@@ -492,12 +553,23 @@ final class AutomaticSyncEngine {
 
             for _ in 0..<BackgroundSyncLimits.pagesPerCategoryPerPass {
                 try Task.checkCancellation()
-                let page = try await healthData.changePage(
-                    for: metric,
-                    since: anchorData,
-                    windowStart: scope.windowStart,
-                    limit: BackgroundSyncLimits.changePageSize
-                )
+                let page: HealthChangePage
+                do {
+                    page = try await healthData.changePage(
+                        for: metric,
+                        since: anchorData,
+                        windowStart: scope.windowStart,
+                        limit: BackgroundSyncLimits.changePageSize
+                    )
+                } catch let error as HealthKitServiceError where error == .corruptedAnchor {
+                    // Drop only the unreadable cursor; the next pass
+                    // bootstraps a fresh scope (replay dedupes safely).
+                    await stateStore.clearCheckpoint(for: metric)
+                    throw error
+                }
+                // A page captured while a destination change or category
+                // disable began must not be committed after that purge.
+                try Task.checkCancellation()
                 var events: [SyncChangeEvent] = page.additions.map { .upsert($0) }
                 events.append(contentsOf: page.deletions.map { .delete($0) })
                 if !events.isEmpty {
@@ -639,6 +711,11 @@ final class AutomaticSyncEngine {
 
     private func scheduleRetryIfNeeded() async {
         guard mode != .disabled, pendingCount > 0 else { return }
+        if case .paused(let reason) = mode, !reason.isAutoRecoverable {
+            // Actionable pauses need the user; a wakeup would burn budget
+            // and accomplish nothing.
+            return
+        }
         let retryState = await stateStore.loadRetryState()
         let delay: TimeInterval
         if let next = retryState.nextAttemptAt {
@@ -672,7 +749,12 @@ final class AutomaticSyncEngine {
             case .requestTimedOut, .connectionFailed, .invalidResponse:
                 return .transient
             case .serverRejected(let status):
-                return status >= 500 ? .transient : .actionable(.protocolFailure("the destination returned HTTP \(status)."))
+                // Rate limiting is transient by nature; other 4xx responses
+                // need the user to fix the destination.
+                if status >= 500 || status == 429 {
+                    return .transient
+                }
+                return .actionable(.protocolFailure("the destination returned HTTP \(status)."))
             case .emptyBatch:
                 return .actionable(.protocolFailure("an empty batch was about to be sent."))
             }

@@ -380,14 +380,31 @@ final class HealthKitService: HealthDataProviding {
         stopObservingChanges()
 
         let store = healthStore
-        var registered: [HKObserverQuery] = []
-        for metric in HealthMetric.allCases where metrics.contains(metric) {
-            guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
-                continue
+        let sampleTypes = HealthMetric.allCases
+            .filter { metrics.contains($0) }
+            .compactMap { HealthKitRecordMapper.sampleType(for: $0) }
+
+        // Enable background delivery first: if it fails partway, nothing is
+        // left registered (a thrown error leaves enablement to be unwound by
+        // the next stopObservingChanges).
+        for sampleType in sampleTypes {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                store.enableBackgroundDelivery(for: sampleType, frequency: .immediate) { success, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else if success {
+                        continuation.resume()
+                    } else {
+                        continuation.resume(throwing: HealthKitServiceError.authorizationFailed)
+                    }
+                }
             }
+        }
+        var registered: [HKObserverQuery] = []
+        for sampleType in sampleTypes {
+            // The observer callback must complete exactly once, promptly:
+            // signal the trigger, let the engine do bounded async work.
             let observer = HKObserverQuery(sampleType: sampleType, predicate: nil) { _, completionHandler, _ in
-                // The observer callback must complete exactly once, promptly:
-                // signal the trigger, let the engine do bounded async work.
                 handler()
                 completionHandler()
             }
@@ -395,27 +412,7 @@ final class HealthKitService: HealthDataProviding {
             registered.append(observer)
         }
         activeObservers = registered
-        if !registered.isEmpty {
-            // Enables background delivery for each observed type; the system
-            // throttles wake-ups and never guarantees immediacy.
-            for metric in HealthMetric.allCases where metrics.contains(metric) {
-                guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
-                    continue
-                }
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    store.enableBackgroundDelivery(for: sampleType, frequency: .immediate) { success, error in
-                        if let error {
-                            continuation.resume(throwing: error)
-                        } else if success {
-                            continuation.resume()
-                        } else {
-                            continuation.resume(throwing: HealthKitServiceError.authorizationFailed)
-                        }
-                    }
-                }
-            }
-            hasEnabledBackgroundDelivery = true
-        }
+        hasEnabledBackgroundDelivery = !sampleTypes.isEmpty
     }
 
     func stopObservingChanges() {

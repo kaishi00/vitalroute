@@ -800,6 +800,23 @@ class ChangeBatchTests(ReceiverServerTestCase):
         self.assertEqual(body["error"]["code"], "invalid_record")
 
 
+    def test_v1_batch_cannot_resurrect_tombstoned_sample(self):
+        # A stale manual-sync (v1) batch containing an id deleted through
+        # the v2 stream must not re-insert it; the ack still reconciles by
+        # counting the suppressed row as a duplicate.
+        record = make_record()
+        delete = make_delete(record_id=record["id"], metric=record["metric"])
+        status, _ = self.post("/v1/records", make_change_payload([delete]))
+        self.assertEqual(status, 200)
+
+        status, body = self.post("/v1/records", make_payload([record]))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["accepted"], 0)
+        self.assertEqual(body["duplicates"], 1)
+        self.assertEqual(self.stored_count(), 0)
+        self.assertIn(record["id"].lower(), self.tombstones())
+
+
 class MigrationTests(unittest.TestCase):
     def test_v1_database_migrates_additively(self):
         with tempfile.TemporaryDirectory() as tempdir:

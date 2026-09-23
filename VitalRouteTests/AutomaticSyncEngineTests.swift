@@ -625,6 +625,103 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertEqual(engine.pendingCount, 0)
     }
 
+    func testCorruptedAnchorClearsCheckpointAndRebootstraps() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(additions: [record(1)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        let firstScope = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)?.scope
+
+        // The stored anchor becomes unreadable (e.g. OS format change).
+        let store = SyncStateStore(directory: tempDirectory)
+        try await store.prepare()
+        try await store.save(CategoryCheckpoint(
+            scope: firstScope!,
+            anchorData: Data("garbage".utf8),
+            updatedAt: Date()
+        ))
+
+        provider.changePageError = HealthKitServiceError.corruptedAnchor
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+        let cleared = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertNil(cleared, "the unreadable checkpoint must be dropped")
+
+        // The next pass bootstraps fresh: nil anchor, new generation.
+        provider.changePageError = nil
+        provider.resetConsumption()
+        client.resetDelivery()
+        provider.script = [
+            .steps: [HealthChangePage(additions: [record(2)], deletions: [], anchorData: Data("b1".utf8), isFull: false)],
+        ]
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+        let newScope = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)?.scope
+        XCTAssertNotEqual(newScope?.generation, firstScope?.generation)
+        XCTAssertEqual(client.sentChangeBatches.count, 1)
+    }
+
+    func testDestinationChangeDuringParkedDeliveryNeverLeaksToNewDestination() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(additions: [record(1), record(2)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
+        ]
+        let client = ScriptedSyncClient()
+        client.sendGate = AsyncGate()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        // The enable pass parks inside delivery with the old destination's
+        // events captured and the checkpoint already advanced.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(engine.isRunning)
+
+        // The user changes the destination mid-flight.
+        await engine.configurationChanged(destination: otherEndpoint, token: token, metrics: [.steps])
+        if let gate = client.sendGate { await gate.openAndWait() }
+        await engine.waitUntilIdle()
+
+        XCTAssertFalse(engine.isEnabled)
+        let outbox = Outbox(directory: tempDirectory)
+        let pending = try await outbox.pendingCount()
+        XCTAssertEqual(pending, 0, "old-destination events must be discarded, never re-pointed")
+        // Nothing was ever sent anywhere for this run: the parked send was
+        // cancelled before its ack could remove anything.
+        let delivered = client.sentChangeBatches
+        XCTAssertEqual(delivered.filter { $0.endpoint.absoluteString == otherEndpoint }.count, 0)
+    }
+
+    func testHTTP429IsTransientNotActionable() {
+        let classification = AutomaticSyncEngine.classify(
+            DestinationClientError.serverRejected(status: 429)
+        )
+        XCTAssertEqual(classification, .transient)
+        let actionable = AutomaticSyncEngine.classify(
+            DestinationClientError.serverRejected(status: 400)
+        )
+        XCTAssertEqual(actionable, .actionable(.protocolFailure("the destination returned HTTP 400.")))
+    }
+
+    func testEnableFailsVisiblyWhenObserversCannotBeRegistered() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.observeError = HealthKitServiceError.unavailable
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+
+        let result = await enable(engine)
+
+        guard case .failed(let message) = result else {
+            return XCTFail("expected failure")
+        }
+        XCTAssertTrue(message.contains("observers could not be registered"))
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertNotNil(engine.lastStatusMessage)
+        XCTAssertEqual(client.sentChangeBatches.count, 0, "no pass may run without observers")
+    }
+
     func testManualAndAutomaticWorkSerializeThroughTheGate() async throws {
         let gate = SyncWorkGate()
         let provider = ScriptedHealthProvider()
@@ -772,6 +869,10 @@ private final class ScriptedHealthProvider: HealthDataProviding {
     private(set) var authorizationRequests = 0
     /// When set, change queries throw this instead of paging.
     var storageWriteError: Error?
+    /// When set, change queries throw this before recording.
+    var changePageError: Error?
+    /// When set, observeChanges throws.
+    var observeError: Error?
 
     private var observerHandler: (@Sendable () -> Void)?
 
@@ -803,6 +904,9 @@ private final class ScriptedHealthProvider: HealthDataProviding {
         windowStart: Date,
         limit: Int
     ) async throws -> HealthChangePage {
+        if let changePageError {
+            throw changePageError
+        }
         if let storageWriteError {
             throw storageWriteError
         }
@@ -820,6 +924,9 @@ private final class ScriptedHealthProvider: HealthDataProviding {
         for metrics: Set<HealthMetric>,
         handler: @escaping @Sendable () -> Void
     ) async throws {
+        if let observeError {
+            throw observeError
+        }
         observedMetrics.append(metrics)
         observerHandler = handler
     }

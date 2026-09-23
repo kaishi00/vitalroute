@@ -76,6 +76,11 @@ actor SyncStateStore {
             attributes: [.protectionKey: protection]
         )
         excludeFromBackup(directory)
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) {
+            for name in names where name.hasPrefix(".tmp-") {
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+            }
+        }
     }
 
     func loadCheckpoint(for metric: HealthMetric) -> CategoryCheckpoint? {

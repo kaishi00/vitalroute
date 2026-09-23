@@ -14,6 +14,9 @@ actor Outbox {
     struct PendingSnapshot: Equatable {
         let events: [SyncChangeEvent]
         let totalPending: Int
+        /// Files moved to quarantine by this read; surfaced so the user can
+        /// learn that some captured changes were undeliverable.
+        var quarantinedCount: Int = 0
     }
 
     static let capacityLimit = 10_000
@@ -39,8 +42,20 @@ actor Outbox {
             attributes: [.protectionKey: protection]
         )
         excludeFromBackup(directory)
+        sweepTemporaryFiles()
         nextSequence = (try? currentMaxSequence()) ?? 0
         loaded = true
+    }
+
+    /// Removes temp files left by writes that crashed between write and
+    /// rename; they are never valid events.
+    private func sweepTemporaryFiles() {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else {
+            return
+        }
+        for name in names where name.hasPrefix(".tmp-") {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
     }
 
     /// Appends events, deduplicating against files already present. Returns
@@ -61,18 +76,44 @@ actor Outbox {
     }
 
     /// The next delivery batch plus the total number of pending events.
+    /// Undecodable event files are quarantined (moved to `quarantine/`) so
+    /// one corrupt file cannot stall delivery forever; the count is
+    /// reported for surfacing.
     func nextBatch() throws -> PendingSnapshot {
         try ensurePrepared()
-        let files = try sortedEventFiles()
+        var files = try sortedEventFiles()
         var events: [SyncChangeEvent] = []
+        var quarantined = 0
         for file in files {
             guard events.count < Self.deliveryBatchSize else { break }
             if let data = try? Data(contentsOf: file.url),
                let event = try? decoder.decode(SyncChangeEvent.self, from: data) {
                 events.append(event)
+            } else {
+                quarantine(file.url)
+                quarantined += 1
             }
         }
-        return PendingSnapshot(events: events, totalPending: files.count)
+        if quarantined > 0 {
+            files = try sortedEventFiles()
+        }
+        return PendingSnapshot(events: events, totalPending: files.count, quarantinedCount: quarantined)
+    }
+
+    /// Keeps a corrupt file for inspection without letting it block the
+    /// queue. Contents are health data: same protection, same directory
+    /// tree, still excluded from backups.
+    private func quarantine(_ url: URL) {
+        let directory = self.directory.appendingPathComponent("quarantine", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: protection]
+        )
+        try? FileManager.default.moveItem(
+            at: url,
+            to: directory.appendingPathComponent(url.lastPathComponent)
+        )
     }
 
     func pendingCount() throws -> Int {
@@ -146,6 +187,7 @@ actor Outbox {
         return names
             .compactMap { name -> EventFile? in
                 guard name.hasPrefix("evt-") else { return nil }
+                // Subdirectories never match the file pattern above.
                 let url = directory.appendingPathComponent(name)
                 let sequence = sequence(fromFileName: name)
                 return EventFile(sequence: sequence, url: url)
