@@ -75,6 +75,8 @@ final class RecordPagerTests: XCTestCase {
             (_: String?) -> RecordPager.Page<String> in
             fetchCount += 1
             // A source that keeps returning the same anchor and a full page.
+            // The first fetch (against nil) "advances" to "stuck"; the second
+            // fetch detects the anchor did not move and stops.
             return RecordPager.Page(
                 records: [self.record("00000000-0000-0000-0000-000000000009")],
                 nextAnchor: "stuck",
@@ -82,7 +84,7 @@ final class RecordPagerTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(fetchCount, 1)
+        XCTAssertEqual(fetchCount, 2)
         XCTAssertEqual(outcome.records.count, 1)
         XCTAssertTrue(outcome.truncated)
     }
@@ -120,25 +122,61 @@ final class RecordPagerTests: XCTestCase {
     }
 
     func testCancellationBetweenPagesThrowsCancellationError() async throws {
-        let expectation = expectation(description: "page fetched")
+        // The first page parks inside the gate so the test can cancel while
+        // the pager is deterministically between its checkCancellation point
+        // and the next page.
+        let gate = PageGate()
+        let record = self.record("00000000-0000-0000-0000-000000000004")
         let task = Task {
             try await RecordPager.collect(maxPages: 10) {
-                (anchor: String?) -> RecordPager.Page<String> in
-                expectation.fulfill()
-                return RecordPager.Page(
-                    records: [self.record("00000000-0000-0000-0000-000000000004")],
-                    nextAnchor: "next",
-                    isFull: true
-                )
+                (_: String?) -> RecordPager.Page<String> in
+                await gate.wait()
+                return RecordPager.Page(records: [record], nextAnchor: "next", isFull: true)
             }
         }
-        await fulfillment(of: [expectation])
+
+        while !gate.isEntered {
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
         task.cancel()
+        gate.open()
+
         do {
             _ = try await task.value
             XCTFail("expected cancellation")
         } catch is CancellationError {
             // Expected: the loop checks cancellation before each page.
         }
+    }
+}
+
+/// Parks the first page fetch until the test releases it, giving the
+/// cancellation test a deterministic interleave point.
+private final class PageGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entered = false
+    private var opened = false
+
+    var isEntered: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return entered
+    }
+
+    func wait() async {
+        lock.lock()
+        entered = true
+        while !opened {
+            lock.unlock()
+            try? await Task.sleep(nanoseconds: 2_000_000)
+            lock.lock()
+        }
+        lock.unlock()
+    }
+
+    func open() {
+        lock.lock()
+        opened = true
+        lock.unlock()
     }
 }
