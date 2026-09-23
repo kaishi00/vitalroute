@@ -61,6 +61,7 @@ actor SyncStateStore {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let protection: FileProtectionType
+    private var prepared = false
 
     init(directory: URL, protection: FileProtectionType = .completeUntilFirstUserAuthentication) {
         self.directory = directory.appendingPathComponent("state", isDirectory: true)
@@ -87,8 +88,16 @@ actor SyncStateStore {
     /// Persists a checkpoint. Call only after the changes it covers are
     /// durably recorded in the outbox or already acknowledged.
     func save(_ checkpoint: CategoryCheckpoint) throws {
+        try ensurePrepared()
         let data = try encoder.encode(checkpoint)
         try atomicWrite(data, to: url(for: checkpoint.scope.metric))
+    }
+
+    private func ensurePrepared() throws {
+        if !prepared {
+            try prepare()
+            prepared = true
+        }
     }
 
     func clearCheckpoint(for metric: HealthMetric) {

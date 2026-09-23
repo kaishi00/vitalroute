@@ -283,6 +283,7 @@ final class AutomaticSyncEngine {
             await healthDataStopObserving()
             activeRunTask?.cancel()
             await outbox.removeAll()
+            await refreshPendingCount()
             await stateStore.clearAllCheckpoints()
             var retry = await stateStore.loadRetryState()
             retry = .initial
@@ -304,6 +305,7 @@ final class AutomaticSyncEngine {
             await outbox.removeCategory(removed)
             await stateStore.clearCheckpoint(for: removed)
         }
+        await refreshPendingCount()
 
         if let reason = unsatisfiedPrerequisite() {
             if case .paused(let current) = mode, !current.isAutoRecoverable {
