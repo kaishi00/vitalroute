@@ -343,12 +343,15 @@ final class HealthKitService: HealthDataProviding {
                 let additions = (samples ?? []).compactMap {
                     HealthKitRecordMapper.makeRecord(from: $0, metric: metric)
                 }
+                // HKDeletedObject exposes only the UUID; the deletion event
+                // carries the capture time as its interval.
+                let capturedAt = Date()
                 let deletions = (deletedObjects ?? []).map { deleted in
                     DeletedRecord(
                         id: deleted.uuid,
                         metric: metric,
-                        startDate: deleted.startDate,
-                        endDate: deleted.endDate
+                        startDate: capturedAt,
+                        endDate: capturedAt
                     )
                 }
                 continuation.resume(returning: HealthChangePage(
@@ -432,7 +435,7 @@ final class HealthKitService: HealthDataProviding {
 
     // MARK: - Anchor serialization
 
-    private static func serialize(_ anchor: HKQueryAnchor?) -> Data? {
+    private nonisolated static func serialize(_ anchor: HKQueryAnchor?) -> Data? {
         guard let anchor else { return nil }
         return try? NSKeyedArchiver.archivedData(
             withRootObject: anchor,
@@ -440,7 +443,7 @@ final class HealthKitService: HealthDataProviding {
         )
     }
 
-    private static func deserialize(_ data: Data?) throws -> HKQueryAnchor? {
+    private nonisolated static func deserialize(_ data: Data?) throws -> HKQueryAnchor? {
         guard let data else { return nil }
         guard let anchor = try? NSKeyedUnarchiver.unarchivedObject(
             ofClass: HKQueryAnchor.self,
