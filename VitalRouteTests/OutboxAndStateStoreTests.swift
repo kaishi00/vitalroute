@@ -125,6 +125,46 @@ final class OutboxAndStateStoreTests: XCTestCase {
         XCTAssertFalse(drained)
     }
 
+    func testCorruptEventFileIsQuarantinedNotStalling() async throws {
+        let outbox = makeOutbox()
+        try await outbox.prepare()
+        _ = try await outbox.append([.upsert(record(1)), .upsert(record(2))])
+
+        // Corrupt the first event file in insertion order.
+        let files = try FileManager.default.contentsOfDirectory(atPath: tempDirectory.appendingPathComponent("outbox").path)
+        let sorted = files.filter { $0.hasPrefix("evt-") }.sorted()
+        let corrupt = tempDirectory.appendingPathComponent("outbox").appendingPathComponent(sorted[0])
+        try Data("not json".utf8).write(to: corrupt)
+
+        let snapshot = try await outbox.nextBatch()
+        XCTAssertEqual(snapshot.quarantinedCount, 1, "the corrupt file is quarantined on read")
+        XCTAssertEqual(snapshot.events.count, 1, "delivery continues past the corrupt file")
+        XCTAssertEqual(snapshot.totalPending, 1)
+
+        // The quarantine directory holds the corrupt file, excluded from
+        // pending counts but preserved for inspection.
+        let quarantineDir = tempDirectory.appendingPathComponent("outbox/quarantine")
+        let quarantinedFiles = try FileManager.default.contentsOfDirectory(atPath: quarantineDir.path)
+        XCTAssertEqual(quarantinedFiles.count, 1)
+    }
+
+    func testRemoveAllPurgesQuarantineToo() async throws {
+        let outbox = makeOutbox()
+        try await outbox.prepare()
+        _ = try await outbox.append([.upsert(record(1))])
+        let outboxDir = tempDirectory.appendingPathComponent("outbox")
+        let files = try FileManager.default.contentsOfDirectory(atPath: outboxDir.path)
+        let target = files.first { $0.hasPrefix("evt-") }!
+        try Data("garbage".utf8).write(to: outboxDir.appendingPathComponent(target))
+        _ = try await outbox.nextBatch() // triggers quarantine
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outboxDir.appendingPathComponent("quarantine").path).count, 1)
+
+        await outbox.removeAll()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outboxDir.appendingPathComponent("quarantine").path))
+        let pending = try await outbox.pendingCount()
+        XCTAssertEqual(pending, 0)
+    }
+
     func testCheckpointRoundTripPersistsAcrossStoreInstances() async throws {
         let scope = CategoryScope(
             destination: "https://health.example.org/v1/records",

@@ -306,6 +306,14 @@ final class AutomaticSyncEngine {
 
         if destinationChanged || newDestination.isEmpty {
             let discarded = (try? await outbox.pendingCount()) ?? 0
+            // Flip the guards synchronously BEFORE the first await: any
+            // trigger arriving during the purge awaits must find the engine
+            // disabled and the destination cleared, so no fresh pass can
+            // start against the old destination mid-purge.
+            mode = .disabled
+            defaults.set(false, forKey: Self.enabledFlagKey)
+            destination = ""
+            token = nil
             // Cancel the in-flight pass and wait for it to leave the gate
             // before mutating durable state, so a page captured for the old
             // destination can never be appended after the discard below.
@@ -322,8 +330,6 @@ final class AutomaticSyncEngine {
             await refreshPendingCount()
             await stateStore.clearAllCheckpoints()
             await stateStore.saveRetryState(.initial)
-            defaults.set(false, forKey: Self.enabledFlagKey)
-            mode = .disabled
             lastStatusMessage = discarded > 0
                 ? "Automatic sync turned off because the destination changed. \(discarded) pending change(s) for the previous destination were discarded — they were never sent anywhere else."
                 : "Automatic sync turned off because the destination changed."
