@@ -186,6 +186,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         engine.foregroundCatchUp()
         try await Task.sleep(nanoseconds: 50_000_000)
         engine.disable()
+        try await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertEqual(provider.observationStopCount, 1)
         XCTAssertFalse(engine.isEnabled)
@@ -225,6 +226,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
                 isFull: false
             )],
         ]
+        provider.resetConsumption()
         client.resetDelivery()
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
@@ -249,7 +251,6 @@ final class AutomaticSyncEngineTests: XCTestCase {
 
         // The persisted anchor resumes the stream: the second query starts
         // from where the first page ended, and the deletion is delivered.
-        provider.resetConsumption()
         client.resetDelivery()
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
@@ -404,15 +405,16 @@ final class AutomaticSyncEngineTests: XCTestCase {
     // MARK: Failure recovery
 
     func testCrashReplayAfterAppendBeforeCheckpointDeduplicates() async throws {
-        // First engine: appends events but "crashes" before the checkpoint
-        // is written (simulated by a state store whose save fails).
+        let clock = ClockBox()
+        // First engine: appends events, then delivery fails and the
+        // checkpoint "crash window" is simulated.
         let provider = ScriptedHealthProvider()
         provider.script = [
             .steps: [HealthChangePage(additions: [record(1)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
         ]
         let client = ScriptedSyncClient()
         client.failNextDelivery(with: .connectionFailed)
-        let engine = makeEngine(provider: provider, client: client)
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
         _ = await enable(engine)
         await engine.waitUntilIdle()
         XCTAssertEqual(engine.pendingCount, 1)
@@ -429,6 +431,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         ]
         provider.resetConsumption()
         client.resetDelivery()
+        clock.advance(by: 61)
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
 
@@ -601,9 +604,10 @@ final class AutomaticSyncEngineTests: XCTestCase {
         provider.script = [
             .steps: [HealthChangePage(additions: [record(1)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
         ]
+        provider.resetConsumption()
         client.resetDelivery()
         engine.foregroundCatchUp()
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertTrue(engine.isRunning)
 
         // Changes arrive mid-run: two observer fires are absorbed.
@@ -652,6 +656,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         provider.script = [
             .steps: [HealthChangePage(additions: [record(2)], deletions: [], anchorData: Data("a2".utf8), isFull: false)],
         ]
+        provider.resetConsumption()
         client.resetDelivery()
         engine.foregroundCatchUp()
         try await Task.sleep(nanoseconds: 200_000_000)
@@ -682,7 +687,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         client.resetDelivery()
         client.sendGate = AsyncGate()
         provider.script = [
-            .steps: [HealthChangePage(additions: [record(3)], deletions: [], anchorData: Data("a3".utf8), isFull: false)],
+            .steps: [HealthChangePage(additions: [record(3), record(4)], deletions: [], anchorData: Data("a3".utf8), isFull: false)],
         ]
         provider.resetConsumption()
         engine.foregroundCatchUp()
@@ -709,6 +714,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         provider.script = [
             .steps: [HealthChangePage(additions: [record(1)], deletions: [], anchorData: Data("a9".utf8), isFull: false)],
         ]
+        provider.resetConsumption()
         client.resetDelivery()
 
         // The observer callback returns immediately even with the network
@@ -897,6 +903,7 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
 
         if let gate = sendGate {
             await gate.enter()
+            try Task.checkCancellation()
         }
         if let failure {
             throw failure
