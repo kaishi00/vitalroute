@@ -8,7 +8,12 @@ struct SyncAcknowledgment: Equatable {
     let duplicates: Int
 
     /// Total records the receiver took responsibility for in this batch.
-    var delivered: Int { accepted + duplicates }
+    /// Nil when the receiver's counts overflow: the numbers are
+    /// receiver-controlled, and `accepted + duplicates` must not trap.
+    var delivered: Int? {
+        let (total, overflow) = accepted.addingReportingOverflow(duplicates)
+        return overflow ? nil : total
+    }
 }
 
 /// Receiver response for the connection test. Contains no health data.

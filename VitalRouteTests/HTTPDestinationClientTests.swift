@@ -16,6 +16,16 @@ final class HTTPDestinationClientTests: XCTestCase {
         HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
     }
 
+    private func sampleRecord() -> HealthRecord {
+        HealthRecord(
+            metric: .steps,
+            value: 100,
+            unit: "count",
+            startDate: Date(timeIntervalSince1970: 1_735_689_600),
+            endDate: Date(timeIntervalSince1970: 1_735_689_600)
+        )
+    }
+
     private func samplePayload() -> SyncPayload {
         SyncPayload(records: [
             HealthRecord(
@@ -346,6 +356,58 @@ final class HTTPDestinationClientTests: XCTestCase {
 
         await assertThrows(.malformedAcknowledgment) {
             _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+        }
+    }
+
+    func testOverflowingChangeAcknowledgmentIsRejectedWithoutTrapping() async {
+        // accepted + duplicates + superseded overflows Int; the counts decode
+        // fine and must be rejected as malformed, leaving the batch
+        // unconfirmed (and therefore still queued).
+        let client = HTTPDestinationClient { request in
+            (
+                self.httpData(#"{"status":"accepted","accepted":9223372036854775807,"duplicates":1,"superseded":0,"appliedDeletions":0,"duplicateDeletions":0}"#),
+                self.httpResponse(status: 200, url: request.url!)
+            )
+        }
+
+        await assertThrows(.malformedAcknowledgment) {
+            _ = try await client.sendChanges(
+                [.upsert(self.sampleRecord())],
+                batchID: UUID(),
+                to: self.endpoint,
+                authorization: self.authorization
+            )
+        }
+    }
+
+    func testOverflowingDeletionAcknowledgmentIsRejectedWithoutTrapping() async {
+        let client = HTTPDestinationClient { request in
+            (
+                self.httpData(#"{"status":"accepted","accepted":0,"duplicates":0,"superseded":0,"appliedDeletions":9223372036854775807,"duplicateDeletions":1}"#),
+                self.httpResponse(status: 200, url: request.url!)
+            )
+        }
+
+        await assertThrows(.malformedAcknowledgment) {
+            _ = try await client.sendChanges(
+                [.delete(DeletedRecord(id: UUID(), metric: .steps, startDate: Date(), endDate: Date()))],
+                batchID: UUID(),
+                to: self.endpoint,
+                authorization: self.authorization
+            )
+        }
+    }
+
+    func testOverflowingV1AcknowledgmentIsRejectedWithoutTrapping() async {
+        let client = HTTPDestinationClient { request in
+            (
+                self.httpData(#"{"status":"accepted","accepted":9223372036854775807,"duplicates":1}"#),
+                self.httpResponse(status: 200, url: request.url!)
+            )
+        }
+
+        await assertThrows(.malformedAcknowledgment) {
+            _ = try await client.send(self.samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 

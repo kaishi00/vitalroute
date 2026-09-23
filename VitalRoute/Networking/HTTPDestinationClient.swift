@@ -110,7 +110,8 @@ final class HTTPDestinationClient: DestinationClient {
         // The contract guarantees accepted + duplicates equals the batch
         // size; a receiver that acknowledges fewer records than it was given
         // has not confirmed the whole batch, so treat it as undelivered.
-        guard acknowledgment.delivered == payload.records.count else {
+        guard let delivered = acknowledgment.delivered,
+              delivered == payload.records.count else {
             throw DestinationClientError.malformedAcknowledgment
         }
         return acknowledgment

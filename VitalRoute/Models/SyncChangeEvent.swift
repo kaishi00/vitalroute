@@ -139,10 +139,31 @@ struct ChangeAcknowledgment: Equatable {
 
     /// The contract guarantees the receiver took responsibility for every
     /// change in the batch.
+    ///
+    /// Every count here is receiver-controlled, so each total is summed with
+    /// overflow checks: `accepted = Int.max, duplicates = 1` decodes as valid
+    /// JSON and must fail reconciliation, not trap.
     func reconciles(upsertsSent: Int, deletesSent: Int) -> Bool {
-        let upsertsAccounted = accepted + duplicates + superseded
-        let deletesAccounted = appliedDeletions + duplicateDeletions
+        guard let upsertsAccounted = Self.checkedSum([accepted, duplicates, superseded]),
+              let deletesAccounted = Self.checkedSum([appliedDeletions, duplicateDeletions])
+        else {
+            return false
+        }
         return upsertsAccounted == upsertsSent && deletesAccounted == deletesSent
+    }
+
+    /// Sum with overflow detection: nil means the receiver's arithmetic left
+    /// the representable range, which cannot match any real batch.
+    static func checkedSum(_ values: [Int]) -> Int? {
+        var total = 0
+        for value in values {
+            let (sum, overflow) = total.addingReportingOverflow(value)
+            if overflow {
+                return nil
+            }
+            total = sum
+        }
+        return total
     }
 }
 
