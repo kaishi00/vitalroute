@@ -116,10 +116,11 @@ records — retained only until acknowledged, then deleted.
   checkpoints; delivery drains events in batches. Cancellation or budget
   expiry during delivery leaves events pending.
 - **Backpressure**: when pending events ≥ cap (10,000), query passes stop and
-  the state surfaces pending work. The cap is soft: it is checked before a
-  page and between categories, so one page of additions (plus its deletions)
-  can overshoot it before the next check. Changes are never discarded by a
-  query pass.
+  the state surfaces pending work. The cap is soft: it is checked once before
+  the query pass and again between categories, not before each page within a
+  category, so one category's whole page budget for that pass (up to 20 pages
+  of additions, plus their deletions) can overshoot it before the next check.
+  Changes are never discarded by a query pass.
 - **Destination binding**: the queue records the destination it was captured
   for, durably. A pass refuses to add to, and delivery refuses to send, a
   queue whose recorded owner differs from the destination in effect —

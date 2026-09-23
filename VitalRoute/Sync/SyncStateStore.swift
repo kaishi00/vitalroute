@@ -136,9 +136,9 @@ actor SyncStateStore {
     ///
     /// Write failures stay swallowed, deliberately: this is advisory
     /// bookkeeping, not health data. Losing it degrades to retrying on the
-    /// default interval rather than the backed-off one, and any storage
-    /// failure serious enough to matter is surfaced by the checkpoint write
-    /// in the same pass, which does throw.
+    /// default interval rather than the backed-off one, and in the capture
+    /// path any storage failure serious enough to matter is surfaced by the
+    /// throwing checkpoint write alongside it.
     func saveRetryState(_ state: DeliveryRetryState) {
         try? ensurePrepared()
         if let data = try? encoder.encode(state) {

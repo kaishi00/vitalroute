@@ -95,8 +95,11 @@ struct VitalRouteApp: App {
                 // `isSyncing` cannot drive this: it is a computed property
                 // over the observation-ignored task handle, so reading it
                 // registers no dependency and its transitions are never
-                // observed. `phase` is observable, and every run — including
-                // one cancelled while queued — ends by returning it to .idle.
+                // observed. `phase` is observable, and every run that enters
+                // `runSync` returns it to .idle. A run cancelled while still
+                // queued never leaves .idle, so no transition fires — and
+                // none is needed: that run held no work and changed nothing
+                // for the engine to catch up on.
                 .onChange(of: syncCoordinator.phase) { oldValue, newValue in
                     if oldValue != .idle && newValue == .idle {
                         autoSyncEngine.manualSyncFinished()

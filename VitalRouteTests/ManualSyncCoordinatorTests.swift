@@ -343,6 +343,9 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.lastOutcome?.result, .cancelled)
         XCTAssertLessThanOrEqual(coordinator.lastOutcome!.summary.batchesDelivered, 1)
         XCTAssertNil(coordinator.lastSuccessfulSync)
+        // The engine's manual-sync hook observes phase returning to .idle;
+        // pin it on the cancellation path too, not just on success.
+        XCTAssertEqual(coordinator.phase, .idle)
     }
 
     @MainActor
