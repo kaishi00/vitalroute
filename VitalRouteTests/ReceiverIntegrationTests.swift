@@ -38,27 +38,31 @@ final class ReceiverIntegrationTests: XCTestCase {
 
     private func syntheticPayload(count: Int) -> SyncPayload {
         let base = Date(timeIntervalSince1970: 1_760_000_000)
-        let records = (0..<count).map { index in
-            HealthRecord(
+        var records: [HealthRecord] = []
+        records.reserveCapacity(count)
+        for index in 0..<count {
+            let isSteps = index % 2 == 0
+            let offsetMinutes = Double(index) * 60
+            let record = HealthRecord(
                 id: UUID(),
-                metric: index % 2 == 0 ? .steps : .heartRate,
+                metric: isSteps ? .steps : .heartRate,
                 value: Double(60 + index),
-                unit: index % 2 == 0 ? "count" : "count/min",
-                startDate: base.addingTimeInterval(Double(index) * 60),
-                endDate: base.addingTimeInterval(Double(index) * 60 + 30)
+                unit: isSteps ? "count" : "count/min",
+                startDate: base.addingTimeInterval(offsetMinutes),
+                endDate: base.addingTimeInterval(offsetMinutes + 30)
             )
+            records.append(record)
         }
         return SyncPayload(records: records)
     }
 
     func testConnectionTestAgainstLiveReceiver() async throws {
         let configuration = try integrationConfiguration()
+        let authorization = DestinationAuthorization(bearerToken: configuration.token)
+        let client = self.client
 
         let response = try await awaitWithTimeout {
-            try await self.client.testConnection(
-                to: configuration.endpoint,
-                authorization: DestinationAuthorization(bearerToken: configuration.token)
-            )
+            try await client.testConnection(to: configuration.endpoint, authorization: authorization)
         }
 
         XCTAssertEqual(response.status, "ok")
@@ -67,25 +71,20 @@ final class ReceiverIntegrationTests: XCTestCase {
 
     func testIngestionRetryIsIdempotentAgainstLiveReceiver() async throws {
         let configuration = try integrationConfiguration()
+        let authorization = DestinationAuthorization(bearerToken: configuration.token)
+        let client = self.client
+        let endpoint = configuration.endpoint
         let payload = syntheticPayload(count: 6)
 
         let first = try await awaitWithTimeout {
-            try await self.client.send(
-                payload,
-                to: configuration.endpoint,
-                authorization: DestinationAuthorization(bearerToken: configuration.token)
-            )
+            try await client.send(payload, to: endpoint, authorization: authorization)
         }
         XCTAssertEqual(first.accepted, 6)
         XCTAssertEqual(first.duplicates, 0)
 
         // Retrying the identical batch must not duplicate records.
         let retry = try await awaitWithTimeout {
-            try await self.client.send(
-                payload,
-                to: configuration.endpoint,
-                authorization: DestinationAuthorization(bearerToken: configuration.token)
-            )
+            try await client.send(payload, to: endpoint, authorization: authorization)
         }
         XCTAssertEqual(retry.accepted, 0)
         XCTAssertEqual(retry.duplicates, 6)
@@ -93,15 +92,13 @@ final class ReceiverIntegrationTests: XCTestCase {
 
     func testWrongTokenIsRejectedByLiveReceiver() async throws {
         let configuration = try integrationConfiguration()
+        let authorization = DestinationAuthorization(bearerToken: "wrong-token-0123456789")
+        let client = self.client
         let payload = syntheticPayload(count: 2)
 
         do {
             _ = try await awaitWithTimeout {
-                try await self.client.send(
-                    payload,
-                    to: configuration.endpoint,
-                    authorization: DestinationAuthorization(bearerToken: "wrong-token-0123456789")
-                )
+                try await client.send(payload, to: configuration.endpoint, authorization: authorization)
             }
             XCTFail("expected authentication failure")
         } catch let error as DestinationClientError {
