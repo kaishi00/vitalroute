@@ -2,11 +2,21 @@ import XCTest
 @testable import VitalRoute
 
 final class ExportSelectionStoreTests: XCTestCase {
+    private var suiteNames: [String] = []
+
+    override func tearDown() {
+        for name in suiteNames {
+            UserDefaults.removePersistentDomain(forName: name)
+        }
+        suiteNames.removeAll()
+        super.tearDown()
+    }
+
     private func makeDefaults() throws -> UserDefaults {
         let name = "export-selection-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
-        defaults.removePersistentDomain(forName: name)
-        addCleanup { defaults.removePersistentDomain(forName: name) }
+        UserDefaults.removePersistentDomain(forName: name)
+        suiteNames.append(name)
         return defaults
     }
 

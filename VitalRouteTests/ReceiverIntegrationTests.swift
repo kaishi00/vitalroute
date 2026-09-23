@@ -122,7 +122,7 @@ final class ReceiverIntegrationTests: XCTestCase {
             expectation.fulfill()
         }
         await fulfillment(of: [expectation], timeout: 30)
-        return try box.result().get()
+        return try box.storedResult().get()
     }
 }
 
@@ -137,7 +137,7 @@ private final class ResultBox<T>: @unchecked Sendable {
         lock.unlock()
     }
 
-    func result() throws -> Result<T, Error> {
+    func storedResult() throws -> Result<T, Error> {
         lock.lock()
         defer { lock.unlock() }
         guard let result else {

@@ -91,7 +91,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
     @MainActor
     func testRecordsAreBatchedAtTheConfiguredSize() async throws {
-        let records = (0..<SyncLimits.recordsPerUploadBatch + 50).map(record)
+        let records = (0..<SyncLimits.recordsPerUploadBatch + 50).map { record($0) }
         let provider = StubHealthDataProvider(export: records)
         let client = StubDestinationClient()
         let coordinator = makeCoordinator(provider: provider, client: client)
@@ -235,7 +235,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
     @MainActor
     func testMidBatchFailureReportsPartialProgressNotSuccess() async throws {
-        let records = (0..<450).map(record) // 3 batches at 200/200/50
+        let records = (0..<450).map { record($0) } // 3 batches at 200/200/50
         let provider = StubHealthDataProvider(export: records)
         let client = StubDestinationClient()
         client.failOnBatchNumber = 2
@@ -276,7 +276,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
     @MainActor
     func testCancellationBetweenBatchesReportsCancelledWithPartialCounts() async throws {
-        let records = (0..<450).map(record)
+        let records = (0..<450).map { record($0) }
         let provider = StubHealthDataProvider(export: records)
         let gate = AsyncGate()
         let client = StubDestinationClient()

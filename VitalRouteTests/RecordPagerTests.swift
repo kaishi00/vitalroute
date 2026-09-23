@@ -14,9 +14,14 @@ final class RecordPagerTests: XCTestCase {
     }
 
     func testSingleShortPageCompletesWithoutTruncation() async throws {
-        let outcome = try await RecordPager.collect(maxPages: 5) { anchor in
+        let outcome = try await RecordPager.collect(maxPages: 5) {
+            (anchor: String?) -> RecordPager.Page<String> in
             XCTAssertNil(anchor)
-            return RecordPager.Page(records: [self.record("00000000-0000-0000-0000-000000000001")], nextAnchor: "a1", isFull: false)
+            return RecordPager.Page(
+                records: [self.record("00000000-0000-0000-0000-000000000001")],
+                nextAnchor: "a1",
+                isFull: false
+            )
         }
 
         XCTAssertEqual(outcome.records.count, 1)
@@ -30,7 +35,8 @@ final class RecordPagerTests: XCTestCase {
         ]
         var fetchedAnchors: [String?] = []
 
-        let outcome = try await RecordPager.collect(maxPages: 5) { anchor in
+        let outcome = try await RecordPager.collect(maxPages: 5) {
+            (anchor: String?) -> RecordPager.Page<String> in
             fetchedAnchors.append(anchor)
             let index = fetchedAnchors.count - 1
             let isFull = index < pages.count - 1
@@ -48,7 +54,8 @@ final class RecordPagerTests: XCTestCase {
 
     func testExhaustedPageBudgetIsReportedAsTruncated() async throws {
         var fetchCount = 0
-        let outcome = try await RecordPager.collect(maxPages: 3) { anchor in
+        let outcome = try await RecordPager.collect(maxPages: 3) {
+            (anchor: String?) -> RecordPager.Page<String> in
             fetchCount += 1
             return RecordPager.Page(
                 records: [self.record(String(format: "00000000-0000-0000-0000-%012d", fetchCount))],
@@ -64,7 +71,8 @@ final class RecordPagerTests: XCTestCase {
 
     func testNonAdvancingAnchorStopsAndReportsTruncation() async throws {
         var fetchCount = 0
-        let outcome = try await RecordPager.collect(maxPages: 10) { anchor in
+        let outcome = try await RecordPager.collect(maxPages: 10) {
+            (_: String?) -> RecordPager.Page<String> in
             fetchCount += 1
             // A source that keeps returning the same anchor and a full page.
             return RecordPager.Page(
@@ -80,8 +88,13 @@ final class RecordPagerTests: XCTestCase {
     }
 
     func testNilAnchorOnAFullPageStopsAndReportsTruncation() async throws {
-        let outcome = try await RecordPager.collect(maxPages: 10) { _ in
-            RecordPager.Page(records: [self.record("00000000-0000-0000-0000-000000000002")], nextAnchor: nil, isFull: true)
+        let outcome = try await RecordPager.collect(maxPages: 10) {
+            (_: String?) -> RecordPager.Page<String> in
+            RecordPager.Page(
+                records: [self.record("00000000-0000-0000-0000-000000000002")],
+                nextAnchor: nil,
+                isFull: true
+            )
         }
 
         XCTAssertEqual(outcome.records.count, 1)
@@ -91,7 +104,8 @@ final class RecordPagerTests: XCTestCase {
     func testDuplicateRecordsAcrossPagesAreDeduplicated() async throws {
         let duplicate = record("00000000-0000-0000-0000-000000000003")
         var fetchCount = 0
-        let outcome = try await RecordPager.collect(maxPages: 10) { anchor in
+        let outcome = try await RecordPager.collect(maxPages: 10) {
+            (_: String?) -> RecordPager.Page<String> in
             fetchCount += 1
             let isFull = fetchCount <= 2
             return RecordPager.Page(
@@ -108,9 +122,14 @@ final class RecordPagerTests: XCTestCase {
     func testCancellationBetweenPagesThrowsCancellationError() async throws {
         let expectation = expectation(description: "page fetched")
         let task = Task {
-            try await RecordPager.collect(maxPages: 10) { anchor in
+            try await RecordPager.collect(maxPages: 10) {
+                (anchor: String?) -> RecordPager.Page<String> in
                 expectation.fulfill()
-                return RecordPager.Page(records: [self.record("00000000-0000-0000-0000-000000000004")], nextAnchor: "next", isFull: true)
+                return RecordPager.Page(
+                    records: [self.record("00000000-0000-0000-0000-000000000004")],
+                    nextAnchor: "next",
+                    isFull: true
+                )
             }
         }
         await fulfillment(of: [expectation])
