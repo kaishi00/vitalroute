@@ -189,4 +189,4 @@ schema versions with `unsupported_schema_version` rather than guessing.
   as a following request.
 - Every socket read is bounded (`VITALROUTE_SOCKET_TIMEOUT`, default 30s): a
   client that stalls mid-request loses its connection rather than pinning a
-  worker.
+  worker. Idle keep-alive connections are reaped by the same timeout.

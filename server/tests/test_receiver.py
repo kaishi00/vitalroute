@@ -577,7 +577,11 @@ class SlowClientTimeoutTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tempdir:
             db_path = os.path.join(tempdir, "records.sqlite3")
-            port = 8879
+            # Pick a free port instead of hardcoding one.
+            probe_listener = socket.socket()
+            probe_listener.bind((HOST, 0))
+            port = probe_listener.getsockname()[1]
+            probe_listener.close()
             environment = dict(os.environ)
             environment["VITALROUTE_TOKEN"] = TOKEN
             environment["VITALROUTE_DB"] = db_path

@@ -2,6 +2,7 @@ import Foundation
 
 enum DestinationClientError: Error, Equatable, LocalizedError {
     case insecureEndpoint
+    case emptyBatch
     case authenticationFailed
     case payloadTooLarge
     case redirected
@@ -16,6 +17,8 @@ enum DestinationClientError: Error, Equatable, LocalizedError {
         switch self {
         case .insecureEndpoint:
             "The destination must use HTTPS."
+        case .emptyBatch:
+            "Cannot send an empty batch."
         case .authenticationFailed:
             "The destination rejected the API key. Check the key saved for this destination."
         case .payloadTooLarge:
@@ -89,6 +92,11 @@ final class HTTPDestinationClient: DestinationClient {
         authorization: DestinationAuthorization
     ) async throws -> SyncAcknowledgment {
         try Self.requireHTTPS(endpoint)
+        // The contract rejects empty batches; an empty payload here is a
+        // caller bug that must not be reported as a successful delivery.
+        guard !payload.records.isEmpty else {
+            throw DestinationClientError.emptyBatch
+        }
         let body = try SyncPayloadEncoder.encode(payload)
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -152,9 +160,17 @@ final class HTTPDestinationClient: DestinationClient {
     }
 
     /// The transport fails closed: credentials and health records must never
-    /// be sent over a non-HTTPS scheme, whatever a caller passes in.
+    /// be sent over a non-HTTPS scheme or leak through URL components the
+    /// destination configuration rejects, whatever a caller passes in.
     private static func requireHTTPS(_ endpoint: URL) throws {
-        guard endpoint.scheme?.lowercased() == "https", endpoint.host != nil else {
+        guard let components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.host != nil,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil
+        else {
             throw DestinationClientError.insecureEndpoint
         }
     }

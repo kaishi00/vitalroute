@@ -10,6 +10,7 @@ struct DestinationView: View {
     @State private var statusMessage: String?
     @State private var isTestingConnection = false
     @State private var connectionResult: String?
+    @State private var connectionSucceeded: Bool?
     @State private var connectionClient = HTTPDestinationClient()
 
     var body: some View {
@@ -61,6 +62,7 @@ struct DestinationView: View {
             tokenDraft = ""
             isEditingToken = false
             connectionResult = nil
+            connectionSucceeded = nil
         }
         .onDisappear {
             // Leaving the screen discards the whole editing session — drafts,
@@ -71,6 +73,7 @@ struct DestinationView: View {
             endpointDraft = ""
             statusMessage = nil
             connectionResult = nil
+            connectionSucceeded = nil
             isEditingEndpoint = false
             isEditingToken = false
         }
@@ -194,10 +197,13 @@ struct DestinationView: View {
             .disabled(!canTestConnection || isTestingConnection)
 
             if let connectionResult {
-                Label(connectionResult, systemImage: connectionResultImage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Label(
+                    connectionResult,
+                    systemImage: connectionSucceeded == true ? "checkmark.circle" : "exclamationmark.triangle"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
         } header: {
             Text("Connection")
@@ -293,6 +299,7 @@ struct DestinationView: View {
 
         isTestingConnection = true
         connectionResult = nil
+        connectionSucceeded = nil
         Task {
             defer { isTestingConnection = false }
             do {
@@ -300,10 +307,13 @@ struct DestinationView: View {
                     to: endpoint,
                     authorization: DestinationAuthorization(bearerToken: bearer)
                 )
+                connectionSucceeded = true
                 connectionResult = "Connection verified — \(response.service) (API v\(response.apiVersion)) acknowledged the key. No health records were sent."
             } catch is CancellationError {
                 connectionResult = nil
+                connectionSucceeded = nil
             } catch {
+                connectionSucceeded = false
                 connectionResult = "Connection failed: \(error.localizedDescription)"
             }
         }
@@ -340,9 +350,4 @@ struct DestinationView: View {
         (try? DestinationConfiguration(endpoint: endpointDraft)) != nil
     }
 
-    private var connectionResultImage: String {
-        connectionResult?.hasPrefix("Connection verified") == true
-            ? "checkmark.circle"
-            : "exclamationmark.triangle"
-    }
 }

@@ -30,7 +30,7 @@ cleanup() {
 }
 
 echo "--- Locating simulator: $SIM_NAME ---"
-UDID=$(xcrun simctl list devices | grep "$SIM_NAME (" | grep -oE "[0-9A-F-]{36}" | head -1)
+UDID=$(xcrun simctl list devices | grep "$SIM_NAME (" | grep -oE "[0-9A-F-]{36}" | head -1 || true)
 [ -n "$UDID" ] || { echo "Simulator not found: $SIM_NAME"; exit 1; }
 xcrun simctl bootstatus "$UDID" -b >/dev/null
 

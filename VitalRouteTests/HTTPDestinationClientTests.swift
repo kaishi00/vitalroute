@@ -277,6 +277,42 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
     }
 
+    func testEndpointsWithUserinfoQueryOrFragmentAreRefused() async {
+        let client = HTTPDestinationClient { _ in
+            XCTFail("transport must not be invoked for a rejected endpoint")
+            return (Data(), self.httpResponse(status: 200, url: self.endpoint))
+        }
+
+        for raw in [
+            "https://user:pass@health.example.org/v1/records",
+            "https://health.example.org/v1/records?token=x",
+            "https://health.example.org/v1/records#section",
+        ] {
+            await assertThrows(.insecureEndpoint) {
+                try await client.send(
+                    samplePayload(),
+                    to: URL(string: raw)!,
+                    authorization: self.authorization
+                )
+            }
+        }
+    }
+
+    func testEmptyBatchIsRefusedBeforeSending() async {
+        let client = HTTPDestinationClient { _ in
+            XCTFail("transport must not be invoked for an empty batch")
+            return (Data(), self.httpResponse(status: 200, url: self.endpoint))
+        }
+
+        await assertThrows(.emptyBatch) {
+            try await client.send(
+                SyncPayload(records: []),
+                to: self.endpoint,
+                authorization: self.authorization
+            )
+        }
+    }
+
     func testAcknowledgmentNotCoveringWholeBatchIsRejected() async {
         // The contract guarantees accepted + duplicates == batch size; a
         // receiver that acknowledges fewer records has not confirmed the

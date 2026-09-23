@@ -226,6 +226,12 @@ class ReceiverHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self._reject_method_not_allowed()
 
+    def do_TRACE(self):
+        self._reject_method_not_allowed()
+
+    def do_CONNECT(self):
+        self._reject_method_not_allowed()
+
     # ---- operations -------------------------------------------------------
 
     def _handle_connection_test(self):
@@ -248,11 +254,11 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             body_length = content_length
         if body_length > 0:
             self._drain_body(body_length)
-            self.close_connection = True
             self._send_error_json(
-                400,
-                "connection_test_body_not_allowed",
-                "The connection test accepts no request body.",
+                status=400,
+                code="connection_test_body_not_allowed",
+                message="The connection test accepts no request body.",
+                close=True,
             )
             return
         self._send_json(

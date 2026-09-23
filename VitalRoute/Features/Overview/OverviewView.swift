@@ -294,6 +294,9 @@ struct OverviewView: View {
         model.isHealthAvailable
             && destinationStore.isConfigured
             && credentialStore.hasCredential
+            // The credential must belong to the endpoint being synced — the
+            // same invariant the connection test enforces.
+            && credentialStore.credentialEndpoint == destinationStore.savedEndpoint
             && selectionStore.hasSelection
             && !syncCoordinator.isSyncing
     }
