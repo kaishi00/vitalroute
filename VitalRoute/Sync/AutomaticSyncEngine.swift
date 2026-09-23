@@ -298,6 +298,8 @@ final class AutomaticSyncEngine {
     }
 
     private func registerObservers(for metrics: Set<HealthMetric>, generation: Int) async throws {
+        registrationAttempts += 1
+        let attempt = registrationAttempts
         try await healthData.observeChanges(for: metrics) { [weak self] completion in
             guard let self else {
                 // Nothing is left to capture into: answering is the only
@@ -309,13 +311,25 @@ final class AutomaticSyncEngine {
             Task { @MainActor in self.observerFired(completion: completion) }
         }
         // Registration that finished after a stop or a newer configuration
-        // belongs to neither: the coordinator has already unwound it (or
-        // unwinds it next) and the engine must not record it as armed.
+        // belongs to neither, and the engine must not record it as armed.
         guard isCurrent(generation) else {
+            // The newer decision owns observation now: it either replaced
+            // this registration (a newer start) or tore it down (a stop), and
+            // a stop issued from here could tear down what it installed. The
+            // exception is a decision that superseded this enablement without
+            // touching observation — the engine is off and no newer attempt
+            // is coming, so these observers would stay armed with no owner.
+            if attempt == registrationAttempts, mode == .disabled {
+                await healthData.stopObservingChanges()
+            }
             throw AutomaticSyncEngineError.configurationSuperseded
         }
         observersRegistered = true
     }
+
+    /// Counts registration attempts so a superseded one can tell whether a
+    /// newer attempt already took over observation.
+    @ObservationIgnored private var registrationAttempts = 0
 
     /// Whether observers are currently registered; a pass that finds this
     /// false re-registers them (e.g. recovering from a deferred pause).
@@ -413,9 +427,14 @@ final class AutomaticSyncEngine {
 
         if mode == .disabled {
             // Track configuration so the first post-enable snapshot is
-            // consistent. A destination change still has to discard: work
+            // consistent, and keep the snapshot current so a later
+            // comparison never has to reason about how long it has been
+            // stale. A destination change still has to discard: work
             // captured for the previous endpoint must never become
             // deliverable to the new one once sync is turned back on.
+            destination = newDestination
+            token = newToken
+            selectedMetrics = newMetrics
             if destinationChanged {
                 await discardPendingWork(generation: generation, notice: .destinationChangedWhileOff)
             }
@@ -607,11 +626,14 @@ final class AutomaticSyncEngine {
             guard let self else { return }
             await self.performPass(trigger: trigger, generation: generation)
             self.activeRunTask = nil
-            // A cancelled run must never spawn a successor: configuration
-            // purges (destination change, category disable) cancel-and-await
-            // this task, and an absorbed catch-up here would run uncancelled
-            // against already-purged state.
-            if self.needsCatchUp, self.isEnabled, !Task.isCancelled, self.isCurrent(generation) {
+            // A cancelled run must never spawn a successor against purged
+            // state. That is enforced by `isEnabled` together with the purge
+            // paths clearing `needsCatchUp` synchronously before their first
+            // suspension, so a surviving flag was set by a trigger arriving
+            // for the configuration in effect now — and dropping it would
+            // defer that work to the next unrelated trigger (a credential
+            // replacement during a pass is the common case).
+            if self.needsCatchUp, self.isEnabled {
                 self.needsCatchUp = false
                 self.startPass(trigger: .absorbedCatchUp)
                 return
@@ -726,8 +748,10 @@ final class AutomaticSyncEngine {
         guard !selectedMetrics.isEmpty else { return }
         // Record the queue's owner before anything is added to it: if the
         // app dies before the first append, a stale marker is refused by
-        // the mismatch check, which is the safe direction.
-        await stateStore.savePendingScope(destination)
+        // the mismatch check, which is the safe direction. A marker that
+        // cannot be written fails the capture — otherwise the next pass
+        // would read a correctly-attributed queue as foreign and discard it.
+        try await stateStore.savePendingScope(destination)
 
         let capacity = Outbox.capacityLimit
         for metric in HealthMetric.allCases where selectedMetrics.contains(metric) {
@@ -964,22 +988,25 @@ final class AutomaticSyncEngine {
         case destinationChanged(passWasRunning: Bool)
         case destinationChangedWhileOff
 
-        /// `discarded` is reported so the user learns how much was dropped.
+        /// `discarded` is reported so the user learns how much was dropped;
+        /// with nothing queued the notice says only what actually happened.
         func message(discarded: Int) -> String {
-            let count = discarded > 0
-                ? "\(discarded) pending change(s) for the previous destination were discarded"
-                : "Pending changes for the previous destination were discarded"
-            switch self {
-            case .destinationChanged(let passWasRunning):
+            let base = switch self {
+            case .destinationChanged:
+                "Automatic sync turned off because the destination changed."
+            case .destinationChangedWhileOff:
+                "The destination changed while automatic sync was off."
+            }
+            guard discarded > 0 else { return base }
+            let inFlight: String
+            if case .destinationChanged(let passWasRunning) = self, passWasRunning {
                 // A request already on the wire cannot be recalled; saying so
                 // is the honest account of what may have left the device.
-                let inFlight = passWasRunning
-                    ? " A batch already in flight may still have reached it."
-                    : ""
-                return "Automatic sync turned off because the destination changed. \(count) — they will never be sent anywhere else.\(inFlight)"
-            case .destinationChangedWhileOff:
-                return "Queued changes were discarded because the destination changed. \(count) — they will never be sent anywhere else."
+                inFlight = " A batch already in flight may still have reached it."
+            } else {
+                inFlight = ""
             }
+            return base + " \(discarded) pending change(s) for the previous destination were discarded — they will never be sent anywhere else.\(inFlight)"
         }
     }
 
@@ -992,9 +1019,15 @@ final class AutomaticSyncEngine {
         await stateStore.clearAllCheckpoints()
         await stateStore.clearPendingScope()
         await stateStore.saveRetryState(.initial)
-        guard isCurrent(generation) else { return }
+        // The discard happened whatever the generation now says, so the fact
+        // is recorded unconditionally — a user must not silently lose queued
+        // health data. Only the visible line is yielded to a newer decision
+        // that has its own message; the notice resurfaces on the next
+        // successful delivery otherwise.
         discardedWorkNotice = notice.message(discarded: discarded)
-        lastStatusMessage = discardedWorkNotice
+        if isCurrent(generation) {
+            lastStatusMessage = discardedWorkNotice
+        }
     }
 
     /// True when the queued changes were captured for a different

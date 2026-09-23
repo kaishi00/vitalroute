@@ -177,6 +177,14 @@ final class HealthObserverCoordinator {
     /// Held only until the capture that the notification triggered is
     /// durable, and never past the deadline: HealthKit must not be left
     /// waiting on a notification forever, whatever the engine is doing.
+    ///
+    /// The timer task is deliberately not cancelled when the completion is
+    /// released early. It holds only the token for one deadline at most, and
+    /// background notifications are throttled by iOS, so the cost is a
+    /// sleeping task per notification for the deadline window; cancelling it
+    /// would require the token to hold the task, which is a retain cycle for
+    /// no measurable gain. `ObserverCompletion.complete()` stays a no-op
+    /// afterwards either way.
     private nonisolated static func armDeadline(
         for completion: ObserverCompletion,
         after deadline: TimeInterval
@@ -193,6 +201,12 @@ final class HealthObserverCoordinator {
     /// A registration and a teardown must not interleave: the backend has a
     /// single global delivery switch, so a stale unwind running inside a
     /// newer registration would silently disarm it.
+    ///
+    /// The bookkeeping is a plain flag and waiter list rather than a lock
+    /// because it is only ever touched from this type's main actor, which
+    /// serializes every read-modify-write here; the suspension points are the
+    /// continuations, and resuming every waiter on release is what keeps a
+    /// handoff from being lost.
     private func acquire() async {
         while isBusy {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in

@@ -280,8 +280,8 @@ def validate_change_payload(payload, max_changes):
     if schema_version != SUPPORTED_SCHEMA_VERSION_MAX:
         raise ValidationError(
             "unsupported_schema_version",
-            "Unsupported schemaVersion %s; this receiver supports %d and %d."
-            % (schema_version, SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSION_MAX),
+            "Unsupported schemaVersion %s; a change batch requires schemaVersion %d."
+            % (schema_version, SUPPORTED_SCHEMA_VERSION_MAX),
         )
 
     batch_created_at = parse_timestamp(payload["createdAt"], "createdAt")

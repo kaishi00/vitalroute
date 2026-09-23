@@ -231,6 +231,50 @@ final class OutboxAndStateStoreTests: XCTestCase {
         XCTAssertEqual(loaded.consecutiveFailures, 3)
         XCTAssertEqual(loaded.nextAttemptAt, Date(timeIntervalSince1970: 1_800_000_000))
     }
+
+    func testUnwritablePendingScopeMarkerIsReportedNotSwallowed() async throws {
+        // A path that cannot become a directory: a regular file. The store
+        // cannot prepare, so the marker cannot be written — which must fail
+        // loudly rather than leave a queue whose owner is unknown (the next
+        // pass would read it as foreign and discard it).
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        let blocker = tempDirectory.appendingPathComponent("blocker")
+        try Data("not a directory".utf8).write(to: blocker)
+        let store = SyncStateStore(directory: blocker)
+
+        do {
+            try await store.savePendingScope("https://health.example.org/v1/records")
+            XCTFail("an unwritable ownership marker must not be reported as written")
+        } catch {
+            // expected
+        }
+    }
+
+    func testPendingScopeRoundTripsAndClears() async throws {
+        let store = makeStateStore()
+        let endpoint = "https://health.example.org/v1/records"
+
+        let initiallyUnset = await store.loadPendingScope()
+        XCTAssertNil(initiallyUnset)
+
+        try await store.savePendingScope(endpoint)
+        let saved = await store.loadPendingScope()
+        XCTAssertEqual(saved, endpoint)
+
+        // A rewrite of the same value is a no-op; a different value lands.
+        try await store.savePendingScope(endpoint)
+        let rewritten = await store.loadPendingScope()
+        XCTAssertEqual(rewritten, endpoint)
+
+        let other = "https://other.example.org/v1/records"
+        try await store.savePendingScope(other)
+        let replaced = await store.loadPendingScope()
+        XCTAssertEqual(replaced, other)
+
+        await store.clearPendingScope()
+        let cleared = await store.loadPendingScope()
+        XCTAssertNil(cleared)
+    }
 }
 
 final class SyncChangeEventTests: XCTestCase {

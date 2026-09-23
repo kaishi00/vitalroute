@@ -587,7 +587,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         // Queued changes carry the identity of the destination they were
         // captured for; a real queue is always written by a capture that
         // recorded it first.
-        await SyncStateStore(directory: tempDirectory).savePendingScope(endpoint)
+        try await SyncStateStore(directory: tempDirectory).savePendingScope(endpoint)
 
         let queriesBefore = provider.changeQueries.count
         client.resetDelivery()
@@ -1212,6 +1212,77 @@ final class AutomaticSyncEngineTests: XCTestCase {
 
         XCTAssertTrue(engine.isEnabled)
         XCTAssertEqual(provider.observedMetrics.count, 2, "the re-enable installed one observer set")
+    }
+
+    func testSupersededRegistrationDoesNotLeaveObserversArmed() async throws {
+        // The regression: a registration that resumed after being superseded
+        // left HealthKit armed with nothing owning it, so the app could be
+        // woken while automatic sync was off.
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+
+        provider.registrationGate = AsyncGate()
+        let enabling = Task { await engine.enable(destination: endpoint, token: token, metrics: [.steps]) }
+        await waitFor("registration to start") { provider.registrationAttempts == 1 }
+
+        // The selection changes while registration is still suspended. The
+        // engine is off and no newer registration is coming, so the observers
+        // this attempt armed must be unwound.
+        await engine.configurationChanged(destination: endpoint, token: token, metrics: [.sleep])
+        provider.registrationGate?.open()
+        let result = await enabling.value
+
+        guard case .failed = result else {
+            return XCTFail("a superseded enable must not report success")
+        }
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(provider.observationStopCount, 1,
+                       "observers armed by a superseded registration must not stay armed")
+        XCTAssertFalse(defaults.bool(forKey: "automaticSync.enabled"))
+        XCTAssertTrue(provider.changeQueries.isEmpty)
+    }
+
+    func testAbsorbedCatchUpAfterCredentialReplacementUsesTheNewCredential() async throws {
+        // The regression: a trigger absorbed during a pass was dropped when
+        // the configuration had moved on, deferring the work to the next
+        // unrelated trigger.
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(1)], anchor: "m1")]]
+        let client = ScriptedSyncClient()
+        client.sendGate = AsyncGate()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await waitFor("the enable pass to park in delivery") { client.sentChangeBatches.count == 1 }
+
+        // More data arrives while the upload is parked, and the user replaces
+        // the API key for the same destination.
+        provider.script = [.steps: [page(additions: [record(2)], anchor: "m2")]]
+        provider.resetConsumption()
+        await engine.configurationChanged(destination: endpoint, token: "replaced-token-0003", metrics: [.steps])
+
+        client.sendGate?.open()
+        await engine.waitUntilIdle()
+        await engine.waitUntilIdle()
+
+        XCTAssertTrue(
+            client.sentChangeBatches.contains { $0.authorization.bearerToken == "replaced-token-0003" },
+            "the absorbed catch-up must run for the current configuration"
+        )
+        XCTAssertEqual(engine.pendingCount, 0)
+    }
+
+    func testDestinationChangeWhileOffWithNothingQueuedClaimsNoDiscard() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+
+        await engine.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await engine.configurationChanged(destination: otherEndpoint, token: token, metrics: [.steps])
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.lastStatusMessage, "The destination changed while automatic sync was off.",
+                       "nothing was queued, so the notice must not claim a discard")
     }
 
     // MARK: Destination-bound queue

@@ -156,12 +156,15 @@ actor SyncStateStore {
         return try? decoder.decode(String.self, from: data)
     }
 
-    func savePendingScope(_ destination: String) {
+    /// Throws rather than swallowing a write failure: an unwritten marker
+    /// would make the next pass read a correctly-attributed queue as foreign
+    /// and discard it, so failing the capture is the honest outcome. The
+    /// cache is only advanced after a write that succeeded.
+    func savePendingScope(_ destination: String) throws {
         guard destination != cachedPendingScope else { return }
-        try? ensurePrepared()
-        if let data = try? encoder.encode(destination) {
-            try? atomicWrite(data, to: pendingScopeURL)
-        }
+        try ensurePrepared()
+        let data = try encoder.encode(destination)
+        try atomicWrite(data, to: pendingScopeURL)
         cachedPendingScope = destination
     }
 

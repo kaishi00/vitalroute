@@ -154,8 +154,11 @@ time as their interval; the receiver's tombstone stores it for audit.
   a stalled app. If a capture cannot finish inside the coordinator's deadline
   (25 s) the completion is released anyway, and the next pass resumes from
   the persisted checkpoint — only the notification is lost, never the data.
-  Overlapping notifications all share the capture that answers them, and a
-  notification that arrives after teardown is still answered.
+  Overlapping notifications that arrive during capture share the capture
+  that answers them; one that arrives while the pass is delivering is
+  answered when the pass settles, and the changes it signalled are captured
+  by the next pass from the persisted checkpoint. A notification that
+  arrives after teardown is still answered.
 - **Transactional observer lifecycle**: registration is all-or-nothing (a
   partial `enableBackgroundDelivery` failure unwinds what it armed), and
   registration and teardown are serialized and generation-fenced, so a
