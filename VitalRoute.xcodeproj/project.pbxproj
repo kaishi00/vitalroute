@@ -10,6 +10,7 @@
 		04F133BDA725690BF5E7B4D3 /* BackgroundSyncTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91A5DBE27503555D4CB71DD9 /* BackgroundSyncTasks.swift */; };
 		0C67AFD1CBADACB1A0FF8075 /* SyncWorkGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3294DCD4D709D28C9D343ADD /* SyncWorkGate.swift */; };
 		165DEBBA3DDD258077035B79 /* DestinationCredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51A5216F48B81FFFE4804F1E /* DestinationCredentialStoreTests.swift */; };
+		16D24E041FACA08280E47D48 /* HealthObserverCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5F466F6BA29E9C78322417C /* HealthObserverCoordinatorTests.swift */; };
 		1C742BB156BA1C9D13A87C47 /* DestinationConfigurationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EC2C1065C0877FBEE1659AB /* DestinationConfigurationStore.swift */; };
 		2148028360D86F2731CCE1CD /* ExportSelectionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC2042C15CF56303A636F4B9 /* ExportSelectionStoreTests.swift */; };
 		21B9087824E6EE929687EAB5 /* RecordPager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C83042FFA762A22B446B6F75 /* RecordPager.swift */; };
@@ -22,6 +23,7 @@
 		4D4BCA61CC398A1E3B16E185 /* HealthMetric.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCF0F120103661DDE2DB95CA /* HealthMetric.swift */; };
 		52D4DA3AE945A7FC71B7BD66 /* DestinationConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 253F1897B82767544D465728 /* DestinationConfiguration.swift */; };
 		667525009F2A8E402A9BC18C /* HTTPDestinationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33AE9A971F73A02DCB92334D /* HTTPDestinationClient.swift */; };
+		66980C60D5D894F9052700C2 /* ObserverCompletion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 828B3FDAB2FD3EC54A2D7135 /* ObserverCompletion.swift */; };
 		716183D76BC33A673A83EE97 /* SyncPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CBAF875332D415C9CF4E581 /* SyncPayload.swift */; };
 		7581D6EA5F72BF5A9E52B9B9 /* DestinationConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4008320A95D4EFD02B848CE8 /* DestinationConfigurationTests.swift */; };
 		76F11A4B044C1C44C91DDD8D /* KeychainValueStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81221D020CA14E57185AB7F7 /* KeychainValueStore.swift */; };
@@ -42,7 +44,9 @@
 		C2BF1EF915A4A58369614D13 /* HealthKitRecordMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CC3628A6EAD92F6AC450B95 /* HealthKitRecordMapper.swift */; };
 		C8F33F484488C940B6676DE7 /* HealthKitRecordMapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE0112885358C8CED8930D04 /* HealthKitRecordMapperTests.swift */; };
 		CDE20B962DE63B29863105FE /* HealthMetricTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */; };
+		CEFB04E33380CCDDF025A028 /* HealthObserverBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D81123EF8716B80DD719F19 /* HealthObserverBackend.swift */; };
 		D090DCDCDAB54ED48548850C /* ManualSyncCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D43A57F7EF0A32938F96F1A9 /* ManualSyncCoordinatorTests.swift */; };
+		D2B5006C32A7E60614892FBB /* HealthObserverCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09F4B3379E19F7B8F52AFD93 /* HealthObserverCoordinator.swift */; };
 		D47D0CB96AFF64D45C6812E9 /* DestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB6E1A524629690F037A76D /* DestinationView.swift */; };
 		DC9E825A1042CA70C14FC6CE /* HTTPDestinationClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E3CEFFC3A301A61654A9EC4 /* HTTPDestinationClientTests.swift */; };
 		EA69876ACBF388BF44F0DD09 /* Outbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01DB13088BFA2FDDE9EB674B /* Outbox.swift */; };
@@ -65,6 +69,7 @@
 /* Begin PBXFileReference section */
 		01DB13088BFA2FDDE9EB674B /* Outbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Outbox.swift; sourceTree = "<group>"; };
 		08B7BA635E61AD44B5356799 /* OutboxAndStateStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboxAndStateStoreTests.swift; sourceTree = "<group>"; };
+		09F4B3379E19F7B8F52AFD93 /* HealthObserverCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthObserverCoordinator.swift; sourceTree = "<group>"; };
 		1867D25051C387367F3761B0 /* SyncAcknowledgment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncAcknowledgment.swift; sourceTree = "<group>"; };
 		1D244659BE71C0EC41544089 /* VitalRouteTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = VitalRouteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		253F1897B82767544D465728 /* DestinationConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfiguration.swift; sourceTree = "<group>"; };
@@ -77,6 +82,7 @@
 		3EC2C1065C0877FBEE1659AB /* DestinationConfigurationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfigurationStore.swift; sourceTree = "<group>"; };
 		4008320A95D4EFD02B848CE8 /* DestinationConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfigurationTests.swift; sourceTree = "<group>"; };
 		41D146C98D4771728A2EB763 /* HealthDataProviding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataProviding.swift; sourceTree = "<group>"; };
+		4D81123EF8716B80DD719F19 /* HealthObserverBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthObserverBackend.swift; sourceTree = "<group>"; };
 		4DB6E1A524629690F037A76D /* DestinationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationView.swift; sourceTree = "<group>"; };
 		51A5216F48B81FFFE4804F1E /* DestinationCredentialStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationCredentialStoreTests.swift; sourceTree = "<group>"; };
 		5CC3628A6EAD92F6AC450B95 /* HealthKitRecordMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitRecordMapper.swift; sourceTree = "<group>"; };
@@ -89,6 +95,7 @@
 		72BF4C6C3FA72DA4F352AE01 /* ExportSelectionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportSelectionStore.swift; sourceTree = "<group>"; };
 		72C40C84194F8D920E7D0A3B /* HealthKitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitService.swift; sourceTree = "<group>"; };
 		81221D020CA14E57185AB7F7 /* KeychainValueStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainValueStore.swift; sourceTree = "<group>"; };
+		828B3FDAB2FD3EC54A2D7135 /* ObserverCompletion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObserverCompletion.swift; sourceTree = "<group>"; };
 		91A5DBE27503555D4CB71DD9 /* BackgroundSyncTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundSyncTasks.swift; sourceTree = "<group>"; };
 		9C3CC9CC03A4A57281C7B761 /* VitalRouteApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VitalRouteApp.swift; sourceTree = "<group>"; };
 		A9C2ECF345888AF47CAD8FD2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -107,6 +114,7 @@
 		E5DEE3382F095688AA2155C7 /* AutomaticSyncEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomaticSyncEngine.swift; sourceTree = "<group>"; };
 		F1E643F41109A59136822965 /* HealthKitServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitServiceTests.swift; sourceTree = "<group>"; };
 		F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPayloadTests.swift; sourceTree = "<group>"; };
+		F5F466F6BA29E9C78322417C /* HealthObserverCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthObserverCoordinatorTests.swift; sourceTree = "<group>"; };
 		F64AFE0A3CBFA24AE20998D8 /* ManualSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualSyncCoordinator.swift; sourceTree = "<group>"; };
 		F91B0740C51996005F797DAE /* VitalRoute.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VitalRoute.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FD0FE789EA58F7F78F6913BE /* SyncChangeEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncChangeEvent.swift; sourceTree = "<group>"; };
@@ -127,6 +135,9 @@
 				41D146C98D4771728A2EB763 /* HealthDataProviding.swift */,
 				5CC3628A6EAD92F6AC450B95 /* HealthKitRecordMapper.swift */,
 				72C40C84194F8D920E7D0A3B /* HealthKitService.swift */,
+				4D81123EF8716B80DD719F19 /* HealthObserverBackend.swift */,
+				09F4B3379E19F7B8F52AFD93 /* HealthObserverCoordinator.swift */,
+				828B3FDAB2FD3EC54A2D7135 /* ObserverCompletion.swift */,
 				C83042FFA762A22B446B6F75 /* RecordPager.swift */,
 			);
 			path = Health;
@@ -267,6 +278,7 @@
 				BE0112885358C8CED8930D04 /* HealthKitRecordMapperTests.swift */,
 				F1E643F41109A59136822965 /* HealthKitServiceTests.swift */,
 				D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */,
+				F5F466F6BA29E9C78322417C /* HealthObserverCoordinatorTests.swift */,
 				6E3CEFFC3A301A61654A9EC4 /* HTTPDestinationClientTests.swift */,
 				D43A57F7EF0A32938F96F1A9 /* ManualSyncCoordinatorTests.swift */,
 				08B7BA635E61AD44B5356799 /* OutboxAndStateStoreTests.swift */,
@@ -378,9 +390,12 @@
 				C2BF1EF915A4A58369614D13 /* HealthKitRecordMapper.swift in Sources */,
 				8D2774DFB08F3B8FDA2F413E /* HealthKitService.swift in Sources */,
 				4D4BCA61CC398A1E3B16E185 /* HealthMetric.swift in Sources */,
+				CEFB04E33380CCDDF025A028 /* HealthObserverBackend.swift in Sources */,
+				D2B5006C32A7E60614892FBB /* HealthObserverCoordinator.swift in Sources */,
 				A952F88D913704440572EBF7 /* HealthRecord.swift in Sources */,
 				76F11A4B044C1C44C91DDD8D /* KeychainValueStore.swift in Sources */,
 				AE53B503C2D093A7113A8D14 /* ManualSyncCoordinator.swift in Sources */,
+				66980C60D5D894F9052700C2 /* ObserverCompletion.swift in Sources */,
 				EA69876ACBF388BF44F0DD09 /* Outbox.swift in Sources */,
 				475A17FA563DBBC2A932511D /* OverviewView.swift in Sources */,
 				21B9087824E6EE929687EAB5 /* RecordPager.swift in Sources */,
@@ -407,6 +422,7 @@
 				C8F33F484488C940B6676DE7 /* HealthKitRecordMapperTests.swift in Sources */,
 				EB3AAEDD0A0570A3D137C907 /* HealthKitServiceTests.swift in Sources */,
 				CDE20B962DE63B29863105FE /* HealthMetricTests.swift in Sources */,
+				16D24E041FACA08280E47D48 /* HealthObserverCoordinatorTests.swift in Sources */,
 				D090DCDCDAB54ED48548850C /* ManualSyncCoordinatorTests.swift in Sources */,
 				BCF027AF9A0C63CB272F32CE /* OutboxAndStateStoreTests.swift in Sources */,
 				B5D717EE2076416171A0BA75 /* ReceiverIntegrationTests.swift in Sources */,

@@ -43,6 +43,20 @@ private final class QueryBox: @unchecked Sendable {
 @MainActor
 final class HealthKitService: HealthDataProviding {
     private let healthStore = HKHealthStore()
+    private let observers: HealthObserverCoordinator
+
+    /// `observerBackend` defaults to the store at hand; tests inject a
+    /// controllable adapter so partial enablement failures, suspended
+    /// registrations, and late callbacks can be scripted.
+    init(
+        observerBackend: (any HealthObserverBackend)? = nil,
+        observerCompletionDeadline: TimeInterval = HealthObserverCoordinator.defaultCompletionDeadline
+    ) {
+        observers = HealthObserverCoordinator(
+            backend: observerBackend ?? healthStore,
+            completionDeadline: observerCompletionDeadline
+        )
+    }
 
     var isAvailable: Bool {
         HKHealthStore.isHealthDataAvailable()
@@ -372,66 +386,20 @@ final class HealthKitService: HealthDataProviding {
 
     func observeChanges(
         for metrics: Set<HealthMetric>,
-        handler: @escaping @Sendable () -> Void
+        handler: @escaping @Sendable (ObserverCompletion) -> Void
     ) async throws {
         guard isAvailable else {
             throw HealthKitServiceError.unavailable
         }
-        stopObservingChanges()
-
-        let store = healthStore
         let sampleTypes = HealthMetric.allCases
             .filter { metrics.contains($0) }
             .compactMap { HealthKitRecordMapper.sampleType(for: $0) }
-
-        // Enable background delivery first: if it fails partway, nothing is
-        // left registered (a thrown error leaves enablement to be unwound by
-        // the next stopObservingChanges).
-        for sampleType in sampleTypes {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                store.enableBackgroundDelivery(for: sampleType, frequency: .immediate) { success, error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else if success {
-                        continuation.resume()
-                    } else {
-                        continuation.resume(throwing: HealthKitServiceError.authorizationFailed)
-                    }
-                }
-            }
-        }
-        // Set as soon as delivery is armed: if observer registration below
-        // fails, the next stopObservingChanges() must still unwind the
-        // partially enabled background delivery.
-        hasEnabledBackgroundDelivery = !sampleTypes.isEmpty
-        var registered: [HKObserverQuery] = []
-        for sampleType in sampleTypes {
-            // The observer callback must complete exactly once, promptly:
-            // signal the trigger, let the engine do bounded async work.
-            let observer = HKObserverQuery(sampleType: sampleType, predicate: nil) { _, completionHandler, _ in
-                handler()
-                completionHandler()
-            }
-            store.execute(observer)
-            registered.append(observer)
-        }
-        activeObservers = registered
+        try await observers.start(for: sampleTypes, handler: handler)
     }
 
-    func stopObservingChanges() {
-        for observer in activeObservers {
-            healthStore.stop(observer)
-        }
-        let hadDelivery = !activeObservers.isEmpty || hasEnabledBackgroundDelivery
-        activeObservers.removeAll()
-        if hadDelivery {
-            hasEnabledBackgroundDelivery = false
-            healthStore.disableAllBackgroundDelivery { _, _ in }
-        }
+    func stopObservingChanges() async {
+        await observers.stop()
     }
-
-    private var activeObservers: [HKObserverQuery] = []
-    private var hasEnabledBackgroundDelivery = false
 
     // MARK: - Anchor serialization
 
@@ -460,6 +428,9 @@ enum HealthKitServiceError: LocalizedError, Equatable {
     case authorizationFailed
     case noMetricsRequested
     case corruptedAnchor
+    /// A newer registration or a teardown replaced this one while it was
+    /// still being established.
+    case registrationSuperseded
 
     var errorDescription: String? {
         switch self {
@@ -471,6 +442,8 @@ enum HealthKitServiceError: LocalizedError, Equatable {
             "Select at least one category in Health Data first."
         case .corruptedAnchor:
             "The stored synchronization checkpoint is unreadable; it will be rebuilt from the initial window."
+        case .registrationSuperseded:
+            "Background observation was replaced before it finished starting."
         }
     }
 

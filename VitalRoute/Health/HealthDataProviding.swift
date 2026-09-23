@@ -56,14 +56,21 @@ protocol HealthDataProviding {
         limit: Int
     ) async throws -> HealthChangePage
 
-    /// Registers change observers for the categories; the handler runs on a
-    /// HealthKit queue and is a trigger, not a result. Re-registering
-    /// replaces the previous observer set.
+    /// Registers change observers for the categories; re-registering replaces
+    /// the previous observer set, and a failed registration leaves none of
+    /// its partial work behind.
+    ///
+    /// `handler` runs on a HealthKit queue whenever new data arrives. It
+    /// receives an exactly-once completion for that notification, which the
+    /// caller releases once the work the notification triggered is durable —
+    /// not before, and never on network success alone. Notifications whose
+    /// capture never finishes are released on the coordinator's deadline.
     func observeChanges(
         for metrics: Set<HealthMetric>,
-        handler: @escaping @Sendable () -> Void
+        handler: @escaping @Sendable (ObserverCompletion) -> Void
     ) async throws
 
-    /// Removes all observers registered by this service.
+    /// Removes all observers registered by this service, including the
+    /// background delivery they were armed with.
     func stopObservingChanges() async
 }

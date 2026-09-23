@@ -22,6 +22,10 @@ targets:
       path: VitalRoute/VitalRoute.entitlements
       properties:
         com.apple.developer.healthkit: true
+        # Required on iOS 15 and later: enableBackgroundDelivery fails without
+        # it, which would silently disable observer-driven background work.
+        # https://developer.apple.com/documentation/healthkit/hkhealthstore/enablebackgrounddelivery(for:frequency:withcompletion:)
+        com.apple.developer.healthkit.background-delivery: true
     info:
       path: VitalRoute/Info.plist
       properties:
