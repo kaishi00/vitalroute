@@ -690,7 +690,7 @@ final class AutomaticSyncEngine {
         if destination.isEmpty {
             return .destinationMissing
         }
-        if let token, !token.isEmpty else {
+        guard let token, !token.isEmpty else {
             return .credentialMissing
         }
         if selectedMetrics.isEmpty {

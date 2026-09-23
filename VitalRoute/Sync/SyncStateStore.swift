@@ -88,7 +88,7 @@ actor SyncStateStore {
     /// durably recorded in the outbox or already acknowledged.
     func save(_ checkpoint: CategoryCheckpoint) throws {
         let data = try encoder.encode(checkpoint)
-        try atomicWrite(data, to: url(for: metric: checkpoint.scope.metric))
+        try atomicWrite(data, to: url(for: checkpoint.scope.metric))
     }
 
     func clearCheckpoint(for metric: HealthMetric) {
