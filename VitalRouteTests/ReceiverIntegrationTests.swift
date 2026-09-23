@@ -48,7 +48,7 @@ final class ReceiverIntegrationTests: XCTestCase {
         return SyncPayload(records: records)
     }
 
-    func testConnectionTestAgainstLiveReceiver() throws {
+    func testConnectionTestAgainstLiveReceiver() async throws {
         let configuration = try integrationConfiguration()
 
         let response = try await awaitWithTimeout {
@@ -62,7 +62,7 @@ final class ReceiverIntegrationTests: XCTestCase {
         XCTAssertEqual(response.apiVersion, 1)
     }
 
-    func testIngestionRetryIsIdempotentAgainstLiveReceiver() throws {
+    func testIngestionRetryIsIdempotentAgainstLiveReceiver() async throws {
         let configuration = try integrationConfiguration()
         let payload = syntheticPayload(count: 6)
 
@@ -88,7 +88,7 @@ final class ReceiverIntegrationTests: XCTestCase {
         XCTAssertEqual(retry.duplicates, 6)
     }
 
-    func testWrongTokenIsRejectedByLiveReceiver() throws {
+    func testWrongTokenIsRejectedByLiveReceiver() async throws {
         let configuration = try integrationConfiguration()
         let payload = syntheticPayload(count: 2)
 
