@@ -519,8 +519,10 @@ final class AutomaticSyncEngine {
             // properties, so this call is not alone: a concurrent report for
             // the same decision won the registration race and owns
             // observation. Reporting that as a failure would pause the engine
-            // and mark it unarmed while it is in fact armed.
-            return
+            // and mark it unarmed while it is in fact armed, so this falls
+            // through to the tail below — the pass it schedules is what
+            // drains anything pending, in case the run that won is itself
+            // generation-stale and skips delivery.
         } catch {
             guard isCurrent(generation) else { return }
             observersRegistered = false
@@ -1140,6 +1142,9 @@ final class AutomaticSyncEngine {
     // MARK: - Classification
 
     static func classify(_ error: Error) -> DeliveryFailureClassification {
+        // Unreachable from the delivery path since cancellation is rethrown
+        // before classification; kept so a future caller cannot silently turn
+        // a cancellation into an actionable destination failure.
         if error is CancellationError {
             return .transient
         }

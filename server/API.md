@@ -112,7 +112,10 @@ tombstone would let a sufficiently stale replayed addition resurrect a
 deleted sample — but it means `deleted_ids` grows without bound on a
 long-running receiver and must be planned for operationally (size the volume
 for it, and monitor table growth). If a deployment needs pruning, the
-retention window must be longer than any batch that could still be replayed.
+retention window must be longer than any batch that could still be replayed —
+and note that this horizon is effectively unbounded, because a restored device
+backup can replay arbitrarily old batches. Any pruning is therefore accepting
+resurrection risk for whatever it prunes, not merely a batch-age bound.
 
 Acknowledgment (after commit):
 

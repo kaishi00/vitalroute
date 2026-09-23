@@ -156,6 +156,7 @@ final class ManualSyncCoordinator {
         }
 
         let gate = workGate
+        let startedAt = Date()
         let task = Task { [weak self] in
             guard let self else { return }
             // The in-flight marker is cleared here rather than inside
@@ -173,9 +174,20 @@ final class ManualSyncCoordinator {
                 try await gate.run { @MainActor [weak self] () throws -> Void in
                     try await self?.runSync(plan: plan)
                 }
+            } catch is CancellationError {
+                // Cancelled while queued: `runSync` was never entered, so it
+                // could not record the stop itself. Without this the outcome
+                // card would keep showing the previous run's result.
+                self.lastOutcome = SyncOutcome(
+                    startedAt: startedAt,
+                    finishedAt: Date(),
+                    result: .cancelled
+                )
             } catch {
-                // runSync handles its own failures; only cancellation can
-                // escape the gate wrapper.
+                // runSync handles its own failures; only cancellation is
+                // expected to escape the gate wrapper. Anything else is a
+                // bug worth surfacing in debug builds rather than losing.
+                assertionFailure("ManualSyncCoordinator: unexpected gate error: \(error)")
             }
         }
         syncTask = task

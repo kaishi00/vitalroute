@@ -362,8 +362,10 @@ final class ManualSyncCoordinatorTests: XCTestCase {
             workGate: gate
         )
         let queuedClient = StubDestinationClient()
+        // A non-empty export, so the "nothing was uploaded" assertion below
+        // actually proves `runSync` was never entered.
         let queued = ManualSyncCoordinator(
-            healthData: StubHealthDataProvider(export: []),
+            healthData: StubHealthDataProvider(export: [record(99)]),
             client: queuedClient,
             defaults: makeDefaults(),
             workGate: gate
