@@ -333,7 +333,8 @@ final class AutomaticSyncEngineTests: XCTestCase {
         await engine.configurationChanged(destination: otherEndpoint, token: token, metrics: [.steps])
 
         XCTAssertFalse(engine.isEnabled)
-        XCTAssertEqual(engine.pendingCount, 0, "pending work for the old destination must be discarded")
+        let pendingAfterChange = engine.pendingCount
+        XCTAssertEqual(pendingAfterChange, 0, "pending work for the old destination must be discarded")
         let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
         XCTAssertNil(checkpoint, "checkpoints must not move to the new destination")
         XCTAssertTrue(
@@ -413,7 +414,8 @@ final class AutomaticSyncEngineTests: XCTestCase {
         await engine.waitUntilIdle()
         XCTAssertEqual(engine.pendingCount, 1)
         let outbox = Outbox(directory: tempDirectory)
-        XCTAssertEqual(try await outbox.pendingCount(), 1)
+        let pendingBeforeReplay = try await outbox.pendingCount()
+        XCTAssertEqual(pendingBeforeReplay, 1)
 
         // Simulate the crash window: the checkpoint file was never written.
         await SyncStateStore(directory: tempDirectory).clearCheckpoint(for: .steps)
@@ -426,7 +428,8 @@ final class AutomaticSyncEngineTests: XCTestCase {
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
 
-        XCTAssertEqual(try await outbox.pendingCount(), 0)
+        let pendingAfterReplay = try await outbox.pendingCount()
+        XCTAssertEqual(pendingAfterReplay, 0)
         XCTAssertEqual(client.sentChangeBatches.count, 1)
         XCTAssertEqual(client.sentChangeBatches[0].changes, [.upsert(record(1))])
     }
@@ -601,7 +604,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         // Changes arrive mid-run: two observer fires are absorbed.
         provider.fireObserver()
         provider.fireObserver()
-        await client.sendGate.openAndWait()
+        if let gate = client.sendGate { await gate.openAndWait() }
 
         await engine.waitUntilIdle()
         XCTAssertEqual(client.sentChangeBatches.count, 1, "the in-flight run delivers once")
@@ -649,7 +652,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertEqual(provider.changeQueries.filter { $0.anchorData == Data("a1".utf8) }.count, 0,
                        "automatic capture waits too")
 
-        await manualClient.sendGate?.openAndWait()
+        if let gate = manualClient.sendGate { await gate.openAndWait() }
         while manual.isSyncing {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
@@ -672,7 +675,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         engine.foregroundCatchUp()
         try await Task.sleep(nanoseconds: 50_000_000)
         engine.cancelActiveWork()
-        await client.sendGate.openAndWait()
+        if let gate = client.sendGate { await gate.openAndWait() }
         await engine.waitUntilIdle()
 
         XCTAssertEqual(engine.pendingCount, 2, "cancellation preserves undelivered work")
@@ -702,7 +705,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let elapsed = ContinuousClock.now - start
         XCTAssertLessThan(elapsed, .milliseconds(500))
 
-        await client.sendGate.openAndWait()
+        if let gate = client.sendGate { await gate.openAndWait() }
         await engine.waitUntilIdle()
         XCTAssertEqual(client.sentChangeBatches.count, 1)
     }
