@@ -3,6 +3,9 @@ import SwiftUI
 struct OverviewView: View {
     @Environment(VitalRouteModel.self) private var model
     @Environment(DestinationConfigurationStore.self) private var destinationStore
+    @Environment(DestinationCredentialStore.self) private var credentialStore
+    @Environment(ExportSelectionStore.self) private var selectionStore
+    @Environment(ManualSyncCoordinator.self) private var syncCoordinator
 
     var body: some View {
         ScrollView {
@@ -63,13 +66,17 @@ struct OverviewView: View {
                     .accessibilityHidden(true)
             }
 
-            Text("VitalRoute requests read-only access to the categories listed in Health Data. Apple keeps read permission private, so an empty result can mean there is no recent data or access was not granted.")
+            Text("VitalRoute requests read-only access to the categories you enable in Health Data. Apple keeps read permission private, so an empty result can mean there is no recent data or access was not granted.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Button {
-                Task { await model.requestAccessAndLoadRecentData() }
+                Task {
+                    await model.requestAccessAndLoadRecentData(
+                        metrics: selectionStore.selectedMetrics
+                    )
+                }
             } label: {
                 HStack(spacing: 8) {
                     if model.isLoadingHealthData {
@@ -84,7 +91,7 @@ struct OverviewView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.teal)
-            .disabled(!model.isHealthAvailable || model.isLoadingHealthData)
+            .disabled(!model.isHealthAvailable || model.isLoadingHealthData || !selectionStore.hasSelection)
         }
         .padding(18)
         .background(.background, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -120,16 +127,66 @@ struct OverviewView: View {
     }
 
     private var syncCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button {} label: {
-                Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
-                    .frame(maxWidth: .infinity)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Manual sync")
+                    .font(.headline)
+                Spacer()
+                Text("Last \(SyncLimits.windowDays) days")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.thinMaterial, in: Capsule())
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.primary)
-            .disabled(true)
 
-            Text("Secure delivery is not available yet. No health data leaves this device in this build.")
+            if syncCoordinator.isSyncing {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text(syncProgressText)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Button("Cancel sync", role: .destructive) {
+                    syncCoordinator.cancelSync()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                Button {
+                    syncCoordinator.startSync(
+                        endpoint: destinationStore.savedEndpoint,
+                        token: credentialStore.loadedToken,
+                        metrics: selectionStore.selectedMetrics
+                    )
+                } label: {
+                    Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSync)
+
+                Text(syncReadinessText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let outcomeText {
+                Label(outcomeText, systemImage: outcomeImageName)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let lastSync = syncCoordinator.lastSuccessfulSync {
+                Text("Last successful sync: \(lastSync.finishedAt.formatted(date: .abbreviated, time: .shortened)) · \(lastSync.deliveredRecords) records acknowledged.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Syncing sends every record found in the window for the selected categories — not just the preview above — in batches of \(SyncLimits.recordsPerUploadBatch). It only happens when you tap Sync Now; saving settings or opening the app never uploads data. Retrying is safe: the receiver keeps one copy of each record.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -170,7 +227,7 @@ struct OverviewView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else if model.recentRecords.isEmpty {
-                Text("No recent samples were returned. Apple Health does not reveal whether read access was declined or no data is available.")
+                Text("No recent samples were returned for the selected categories. Apple Health does not reveal whether read access was declined or no data is available.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -202,6 +259,8 @@ struct OverviewView: View {
         .padding(.top, 4)
     }
 
+    // MARK: Derived state
+
     private var accessStatus: String {
         if !model.isHealthAvailable {
             return "Not available on this device"
@@ -213,13 +272,102 @@ struct OverviewView: View {
         guard destinationStore.isLoaded else {
             return "Checking secure storage…"
         }
-        return destinationStore.isConfigured ? "Configured · HTTPS" : "Not configured"
+        if !destinationStore.isConfigured {
+            return "Not configured"
+        }
+        return credentialStore.hasCredential ? "Configured · HTTPS" : "Endpoint saved · API key missing"
     }
 
     private var destinationDetailText: String {
         guard destinationStore.isLoaded else {
             return "The saved destination will appear here."
         }
-        return destinationStore.isConfigured ? "Saved securely in Keychain" : "Add an endpoint you control."
+        if !destinationStore.isConfigured {
+            return "Add an endpoint you control."
+        }
+        return credentialStore.hasCredential
+            ? destinationStore.savedEndpoint
+            : "Add the API key for this destination to enable syncing."
+    }
+
+    private var canSync: Bool {
+        model.isHealthAvailable
+            && destinationStore.isConfigured
+            && credentialStore.hasCredential
+            // The credential must belong to the endpoint being synced — the
+            // same invariant the connection test enforces.
+            && credentialStore.credentialEndpoint == destinationStore.savedEndpoint
+            && selectionStore.hasSelection
+            && !syncCoordinator.isSyncing
+    }
+
+    private var syncReadinessText: String {
+        if !model.isHealthAvailable {
+            return "Apple Health is not available on this device, so there is nothing to sync."
+        }
+        if !destinationStore.isConfigured {
+            return "Save an HTTPS destination and its API key to enable syncing."
+        }
+        if !credentialStore.hasCredential {
+            return "Add the API key for this destination to enable syncing."
+        }
+        if !selectionStore.hasSelection {
+            return "Enable at least one category in Health Data to sync."
+        }
+        return "Sends the last \(SyncLimits.windowDays) days for \(selectionStore.selectedMetrics.count) selected categor\(selectionStore.selectedMetrics.count == 1 ? "y" : "ies") to your destination."
+    }
+
+    private var syncProgressText: String {
+        switch syncCoordinator.phase {
+        case .idle:
+            "Preparing…"
+        case .authorizing:
+            "Confirming Apple Health access…"
+        case .readingHealthData:
+            "Reading the last \(SyncLimits.windowDays) days of selected categories…"
+        case .uploading(let batch, let totalBatches):
+            "Uploading batch \(batch) of \(totalBatches) · \(syncCoordinator.currentSummary.deliveredRecords) records acknowledged"
+        }
+    }
+
+    private var outcomeText: String? {
+        guard let outcome = syncCoordinator.lastOutcome, !syncCoordinator.isSyncing else {
+            return nil
+        }
+        switch outcome.result {
+        case .completed:
+            if outcome.summary.recordsFound == 0 {
+                return "Sync finished: no records were found in the window for the selected categories. Nothing was sent."
+            }
+            return "Sync finished: \(outcome.summary.deliveredRecords) records acknowledged (\(outcome.summary.acceptedRecords) new, \(outcome.summary.duplicateRecords) already present) — \(outcome.summary.breakdownText)."
+        case .truncated(let metrics):
+            let names = metrics.map(\.displayName).sorted().joined(separator: ", ")
+            return "Sync stopped early: \(outcome.summary.deliveredRecords) records were acknowledged, but the \(names) window was too large to read completely. Narrow the selection or sync again — this was not a complete export."
+        case .failed(let message):
+            let partial = outcome.summary.batchesDelivered > 0
+                ? " \(outcome.summary.batchesDelivered) of \(outcome.summary.batchesPlanned) batches (\(outcome.summary.deliveredRecords) records) were acknowledged before the failure."
+                : ""
+            return "Sync failed: \(message)\(partial) Tap Sync Now to retry — the receiver keeps one copy of each record."
+        case .cancelled:
+            let partial = outcome.summary.deliveredRecords > 0
+                ? " \(outcome.summary.deliveredRecords) records were acknowledged before cancelling."
+                : ""
+            return "Sync cancelled.\(partial)"
+        }
+    }
+
+    private var outcomeImageName: String {
+        switch syncCoordinator.lastOutcome?.result {
+        case .completed:
+            "checkmark.circle"
+        case .cancelled:
+            "xmark.circle"
+        case .truncated:
+            "exclamationmark.triangle"
+        case .failed:
+            "exclamationmark.circle"
+        case nil:
+            "info.circle"
+        }
     }
 }

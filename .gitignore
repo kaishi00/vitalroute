@@ -21,6 +21,21 @@ Packages/
 *.p12
 *.mobileprovision
 
+# Python (reference receiver)
+__pycache__/
+*.pyc
+.python-version
+
+# Receiver databases, tokens, and TLS material — never commit health data or secrets
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+server/token*
+server/*.pem
+server/*.crt
+server/*.key
+
 # macOS
 .DS_Store
 *.swp
