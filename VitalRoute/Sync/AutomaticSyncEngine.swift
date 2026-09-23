@@ -532,6 +532,8 @@ final class AutomaticSyncEngine {
         guard registrationChanged || !observersRegistered else {
             if case .paused(let reason) = mode, reason.isAutoRecoverable {
                 mode = .active
+                // The pause notice is stale the moment work resumes.
+                lastStatusMessage = nil
             }
             startPass(trigger: .foregroundCatchUp)
             return

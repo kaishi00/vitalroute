@@ -1427,6 +1427,9 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let provider = ScriptedHealthProvider()
         let client = ScriptedSyncClient()
         let engine = makeEngine(provider: provider, client: client)
+        // Proves the persisted flag was honoured, so the assertions below
+        // cannot pass vacuously.
+        XCTAssertTrue(engine.isEnabled)
 
         provider.observeError = HealthKitServiceError.registrationSuperseded
         await engine.restoreOnLaunch(destination: endpoint, token: token, metrics: [.steps])
@@ -1440,6 +1443,54 @@ final class AutomaticSyncEngineTests: XCTestCase {
             engine.lastStatusMessage?.contains("observers could not be registered") == true,
             engine.lastStatusMessage ?? ""
         )
+    }
+
+    func testIdenticalReportReArmsWhenObservationIsKnownToBeUnarmed() async throws {
+        // The load-bearing safety net on the skip path: an identical
+        // re-report must still re-arm if the engine knows observation is not
+        // in place.
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        // A changed category set forces a registration attempt, which fails:
+        // the engine is then paused and knows observation is not in place.
+        provider.observeError = HealthKitServiceError.unavailable
+        await engine.configurationChanged(destination: endpoint, token: token, metrics: [.steps, .sleep])
+        await engine.waitUntilIdle()
+        if case .paused(let reason) = engine.mode {
+            XCTAssertTrue(reason.isAutoRecoverable, "\(reason)")
+        } else {
+            XCTFail("a failed registration must pause recoverably, got \(engine.mode)")
+        }
+        let attemptsAfterFailure = provider.registrationAttempts
+
+        // Recovery must not depend on the configuration changing.
+        provider.observeError = nil
+        await engine.configurationChanged(destination: endpoint, token: token, metrics: [.steps, .sleep])
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.registrationAttempts, attemptsAfterFailure + 1,
+                       "an unarmed engine must re-register even for an identical report")
+        XCTAssertEqual(engine.mode, .active)
+    }
+
+    func testDisableClearsTheNextRetryItWasShowing() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(1)], anchor: "p1")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertNotNil(engine.nextRetryAt, "a transient failure arms a retry")
+
+        await engine.disable()
+
+        XCTAssertNil(engine.nextRetryAt, "a disabled engine has no next retry to show")
+        XCTAssertFalse(engine.isEnabled)
     }
 
     // MARK: Destination-bound queue
