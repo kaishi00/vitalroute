@@ -76,28 +76,28 @@ enum HealthKitRecordMapper {
         )
     }
 
-    /// Workouts record distance under activity-specific quantity types.
-    /// Scanning the candidates — walking/running first, matching the legacy
-    /// totalDistance behavior — keeps distance for activities without a
-    /// dedicated mapping. statistics(for:) returns nil for types a workout
-    /// does not measure, so the first hit is the primary distance.
+    /// Workouts record distance under activity-specific quantity types, and
+    /// multisport workouts can carry several; summing the candidates matches
+    /// the legacy totalDistance behavior. statistics(for:) returns nil for
+    /// types a workout does not measure.
+    private static let distanceTypes: [HKQuantityType] = [
+        .distanceWalkingRunning,
+        .distanceCycling,
+        .distanceSwimming,
+        .distanceWheelchair,
+        .distanceDownhillSnowSports
+    ].compactMap { HKObjectType.quantityType(forIdentifier: $0) }
+
     private static func workoutDistance(for workout: HKWorkout) -> HKQuantity? {
-        let distanceIdentifiers: [HKQuantityTypeIdentifier] = [
-            .distanceWalkingRunning,
-            .distanceCycling,
-            .distanceSwimming,
-            .distanceWheelchair,
-            .distanceDownhillSnowSports
-        ]
-        for identifier in distanceIdentifiers {
-            guard let type = HKObjectType.quantityType(forIdentifier: identifier) else {
-                continue
-            }
+        var totalMeters = 0.0
+        var foundAny = false
+        for type in distanceTypes {
             if let quantity = workout.statistics(for: type)?.sumQuantity() {
-                return quantity
+                totalMeters += quantity.doubleValue(for: .meter())
+                foundAny = true
             }
         }
-        return nil
+        return foundAny ? HKQuantity(unit: .meter(), doubleValue: totalMeters) : nil
     }
 
     private static func sleepStage(for rawValue: Int) -> String {

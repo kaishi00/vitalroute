@@ -124,6 +124,10 @@ enum HealthKitServiceError: LocalizedError, Equatable {
 
     /// Maps HealthKit's (granted, error) authorization callback to a thrown
     /// error. `granted == false` with no error must not be read as success.
+    /// `granted` reflects whether the request was processed, not the user's
+    /// choice — HealthKit does not disclose read denial through this
+    /// callback — so the failure branch is defensive and must not grow
+    /// consent-checking logic.
     static func authorizationError(granted: Bool, error: Error?) -> Error? {
         if let error {
             return error

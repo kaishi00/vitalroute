@@ -81,6 +81,15 @@ final class SyncPayloadTests: XCTestCase {
         XCTAssertEqual(decoded.createdAt, Date(timeIntervalSince1970: 1_735_689_600))
     }
 
+    func testDecodingAcceptsTimezoneOffsetISO8601Strings() throws {
+        let offsetForm = #"{"createdAt":"2025-01-01T02:00:00.500+02:00","records":[],"schemaVersion":1}"#
+        let data = try XCTUnwrap(offsetForm.data(using: .utf8))
+
+        let decoded = try SyncPayloadEncoder.decode(data)
+
+        XCTAssertEqual(decoded.createdAt, Date(timeIntervalSince1970: 1_735_689_600.5))
+    }
+
     func testDecodingRejectsMalformedDateStrings() throws {
         let malformed = #"{"createdAt":"not-a-date","records":[],"schemaVersion":1}"#
         let data = try XCTUnwrap(malformed.data(using: .utf8))

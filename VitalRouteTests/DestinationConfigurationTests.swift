@@ -108,9 +108,75 @@ final class DestinationConfigurationTests: XCTestCase {
         XCTAssertEqual(configurationStore.savedEndpoint, "https://saved.example.org/v1/ingest")
         XCTAssertTrue(configurationStore.isConfigured)
     }
+
+    @MainActor
+    func testSaveDuringInFlightLoadKeepsSavedState() async throws {
+        let secureStore = GatedReadStore()
+        let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
+
+        async let loadResult = configurationStore.loadSavedEndpoint()
+        // Poll without blocking the main actor so the load task stays free to
+        // reach the gated read; fail fast instead of hanging if it never does.
+        let deadline = ContinuousClock().now + .seconds(5)
+        while !secureStore.isReadEntered {
+            XCTAssertTrue(ContinuousClock().now < deadline, "gated read never started")
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        try configurationStore.save(endpoint: "https://new.example.org/v1/ingest")
+
+        secureStore.releaseRead()
+        await loadResult
+
+        XCTAssertEqual(configurationStore.savedEndpoint, "https://new.example.org/v1/ingest")
+        XCTAssertEqual(secureStore.savedValue, "https://new.example.org/v1/ingest")
+        XCTAssertTrue(configurationStore.isConfigured)
+        XCTAssertNil(configurationStore.storageError)
+    }
 }
 
 private struct ThrowingSecureValueStoreError: Error {}
+
+/// Blocks the detached Keychain read until the test releases it, so a
+/// save() can be interleaved while the load is in flight.
+private final class GatedReadStore: SecureValueStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var readEntered = false
+    private var released = false
+    private(set) var savedValue: String?
+
+    var isReadEntered: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return readEntered
+    }
+
+    func releaseRead() {
+        lock.lock()
+        released = true
+        lock.unlock()
+    }
+
+    func readValue(forKey key: String) throws -> String? {
+        lock.lock()
+        readEntered = true
+        while !released {
+            lock.unlock()
+            Thread.sleep(forTimeInterval: 0.005)
+            lock.lock()
+        }
+        lock.unlock()
+        return "https://old.example.org/v1/ingest"
+    }
+
+    func saveValue(_ value: String, forKey key: String) throws {
+        lock.lock()
+        savedValue = value
+        lock.unlock()
+    }
+
+    func removeValue(forKey key: String) throws {}
+}
 
 // Test doubles are only ever touched from the store's detached read task and
 // the test body, which are serialized by await points.

@@ -32,6 +32,10 @@ final class DestinationConfigurationStore {
             Result { try secureStore.readValue(forKey: key) }
         }.value
 
+        // save()/clear() may have settled authoritative state while the read
+        // was in flight; keep theirs over the stale read.
+        guard !isLoaded else { return }
+
         switch outcome {
         case .success(let endpoint):
             savedEndpoint = endpoint ?? ""
