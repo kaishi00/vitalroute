@@ -142,7 +142,8 @@ final class ManualSyncCoordinator {
         }
 
         let task = Task { [weak self] in
-            await self?.runSync(plan: plan)
+            guard let self else { return }
+            await self.runSync(plan: plan)
         }
         syncTask = task
     }
