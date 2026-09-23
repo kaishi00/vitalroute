@@ -844,6 +844,14 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         lock.unlock()
     }
 
+    func send(
+        _ payload: SyncPayload,
+        to endpoint: URL,
+        authorization: DestinationAuthorization
+    ) async throws -> SyncAcknowledgment {
+        SyncAcknowledgment(accepted: payload.records.count, duplicates: 0)
+    }
+
     func testConnection(
         to endpoint: URL,
         authorization: DestinationAuthorization
