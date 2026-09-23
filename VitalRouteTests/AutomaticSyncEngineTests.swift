@@ -626,12 +626,13 @@ final class AutomaticSyncEngineTests: XCTestCase {
     }
 
     func testCorruptedAnchorClearsCheckpointAndRebootstraps() async throws {
+        let clock = ClockBox()
         let provider = ScriptedHealthProvider()
         provider.script = [
             .steps: [HealthChangePage(additions: [record(1)], deletions: [], anchorData: Data("a1".utf8), isFull: false)],
         ]
         let client = ScriptedSyncClient()
-        let engine = makeEngine(provider: provider, client: client)
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
         _ = await enable(engine)
         await engine.waitUntilIdle()
         let firstScope = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)?.scope
@@ -658,6 +659,9 @@ final class AutomaticSyncEngineTests: XCTestCase {
         provider.script = [
             .steps: [HealthChangePage(additions: [record(2)], deletions: [], anchorData: Data("b1".utf8), isFull: false)],
         ]
+        // The corrupted-anchor pass counted as a transient failure; pass
+        // the backoff before the recovery pass.
+        clock.advance(by: 61)
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
         let newScope = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)?.scope
