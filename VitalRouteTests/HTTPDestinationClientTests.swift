@@ -248,7 +248,7 @@ final class HTTPDestinationClientTests: XCTestCase {
     func testPlainHTTPEndpointsAreRefused() async {
         let client = HTTPDestinationClient { _ in
             XCTFail("transport must not be invoked for a non-HTTPS endpoint")
-            return (Data(), httpResponse(status: 200, url: endpoint))
+            return (Data(), self.httpResponse(status: 200, url: self.endpoint))
         }
 
         await assertThrows(.insecureEndpoint) {
