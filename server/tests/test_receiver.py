@@ -391,6 +391,19 @@ class IngestionValidationTests(ReceiverServerTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["accepted"], 1)
 
+    def test_swift_spelling_without_optional_fields_accepted(self):
+        # Swift's synthesized Codable omits nil optionals rather than writing
+        # null, so the wire format the iOS client actually produces has seven
+        # keys per record.
+        record = {key: value for key, value in make_record().items()
+                  if key not in ("sourceName", "deviceName")}
+        status, body = self.post("/v1/records", make_payload([record]))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["accepted"], 1)
+        rows = self.stored_rows()
+        self.assertIsNone(rows[0]["source_name"])
+        self.assertIsNone(rows[0]["device_name"])
+
 
 class IngestionLimitTests(ReceiverServerTestCase):
     max_records = 3

@@ -129,20 +129,22 @@ failure rejects the entire request with a 4xx and nothing is stored.
 | Top-level keys exactly `schemaVersion`, `createdAt`, `records` | `invalid_payload` |
 | `schemaVersion` must be `1` | `unsupported_schema_version` |
 | `createdAt` ISO 8601 with offset | `invalid_payload` |
-| Record keys exactly `id`, `metric`, `value`, `unit`, `startDate`, `endDate`, `sourceName`, `deviceName`, `metadata` | `invalid_record` |
+| Record keys limited to the nine contract fields | `invalid_record` |
 | `id` a canonical UUID string | `invalid_record` |
 | `metric` one of the seven supported values below | `unknown_metric` |
 | `value` a finite number | `invalid_record` |
 | `unit` non-empty, ≤ 64 characters | `invalid_record` |
 | `startDate` / `endDate` ISO 8601 with offset; `endDate` ≥ `startDate` | `invalid_record` |
-| `sourceName` / `deviceName` null or string ≤ 256 characters | `invalid_record` |
+| `sourceName` / `deviceName` optional: absent, null, or a string ≤ 256 characters | `invalid_record` |
 | `metadata` object with ≤ 32 string keys (≤ 64 chars each) and string values (≤ 512 chars each) | `invalid_record` |
 
 Supported `metric` values: `steps`, `heartRate`, `restingHeartRate`,
 `heartRateVariability`, `sleep`, `activeEnergy`, `workouts`.
 
-Unknown fields are rejected rather than ignored, so contract drift fails loudly
-instead of silently dropping data.
+The two optional name fields may be omitted entirely — the natural spelling
+produced by Swift's `JSONEncoder` for nil optionals — or sent as `null`; both
+are stored as absent. Unknown fields are rejected rather than ignored, so
+contract drift fails loudly instead of silently dropping data.
 
 ## Error responses
 

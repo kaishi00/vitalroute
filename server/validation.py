@@ -35,7 +35,7 @@ _MAX_METADATA_KEY_LENGTH = 64
 _MAX_METADATA_VALUE_LENGTH = 512
 
 _TOP_LEVEL_KEYS = frozenset({"schemaVersion", "createdAt", "records"})
-_RECORD_KEYS = frozenset(
+_RECORD_REQUIRED_KEYS = frozenset(
     {
         "id",
         "metric",
@@ -43,11 +43,12 @@ _RECORD_KEYS = frozenset(
         "unit",
         "startDate",
         "endDate",
-        "sourceName",
-        "deviceName",
         "metadata",
     }
 )
+# Optional string fields: may be absent (the common Swift JSONEncoder
+# spelling of null) or present with null or a string.
+_RECORD_OPTIONAL_KEYS = frozenset({"sourceName", "deviceName"})
 
 _UUID_PATTERN = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 # ISO 8601 date-time with a mandatory UTC offset ("Z" or "+HH:MM") and
@@ -199,7 +200,10 @@ def _validate_record(record, index):
     where = "record at index %d" % index
     if not isinstance(record, dict):
         raise ValidationError("invalid_record", "%s must be an object." % where)
-    if set(record) != _RECORD_KEYS:
+    keys = set(record)
+    unknown = keys - _RECORD_REQUIRED_KEYS - _RECORD_OPTIONAL_KEYS
+    missing = _RECORD_REQUIRED_KEYS - keys
+    if unknown or missing:
         raise ValidationError(
             "invalid_record",
             "%s must contain exactly the nine contract fields." % where,
@@ -229,7 +233,7 @@ def _validate_record(record, index):
         _require_string(record["unit"], "%s unit" % where, _MAX_UNIT_LENGTH),
         format_timestamp_utc(start_date),
         format_timestamp_utc(end_date),
-        _require_optional_string(record["sourceName"], "%s sourceName" % where),
-        _require_optional_string(record["deviceName"], "%s deviceName" % where),
+        _require_optional_string(record.get("sourceName"), "%s sourceName" % where),
+        _require_optional_string(record.get("deviceName"), "%s deviceName" % where),
         _require_metadata(record["metadata"], "%s metadata" % where),
     )
