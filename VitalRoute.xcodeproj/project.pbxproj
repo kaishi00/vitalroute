@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		04F133BDA725690BF5E7B4D3 /* BackgroundSyncTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91A5DBE27503555D4CB71DD9 /* BackgroundSyncTasks.swift */; };
+		055EF315C0ACA6414663A03B /* BackfillDepth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799C3E429B3AFF5FF3944AEA /* BackfillDepth.swift */; };
 		0C67AFD1CBADACB1A0FF8075 /* SyncWorkGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3294DCD4D709D28C9D343ADD /* SyncWorkGate.swift */; };
 		165DEBBA3DDD258077035B79 /* DestinationCredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51A5216F48B81FFFE4804F1E /* DestinationCredentialStoreTests.swift */; };
 		16D24E041FACA08280E47D48 /* HealthObserverCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5F466F6BA29E9C78322417C /* HealthObserverCoordinatorTests.swift */; };
@@ -49,6 +50,7 @@
 		D090DCDCDAB54ED48548850C /* ManualSyncCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D43A57F7EF0A32938F96F1A9 /* ManualSyncCoordinatorTests.swift */; };
 		D2B5006C32A7E60614892FBB /* HealthObserverCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09F4B3379E19F7B8F52AFD93 /* HealthObserverCoordinator.swift */; };
 		D47D0CB96AFF64D45C6812E9 /* DestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB6E1A524629690F037A76D /* DestinationView.swift */; };
+		DA9030DCC46662048397B289 /* BackfillDepthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F900E8D27C268308C92106D /* BackfillDepthTests.swift */; };
 		DC9E825A1042CA70C14FC6CE /* HTTPDestinationClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E3CEFFC3A301A61654A9EC4 /* HTTPDestinationClientTests.swift */; };
 		EA69876ACBF388BF44F0DD09 /* Outbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01DB13088BFA2FDDE9EB674B /* Outbox.swift */; };
 		EB3AAEDD0A0570A3D137C907 /* HealthKitServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E643F41109A59136822965 /* HealthKitServiceTests.swift */; };
@@ -73,6 +75,7 @@
 		09F4B3379E19F7B8F52AFD93 /* HealthObserverCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthObserverCoordinator.swift; sourceTree = "<group>"; };
 		1867D25051C387367F3761B0 /* SyncAcknowledgment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncAcknowledgment.swift; sourceTree = "<group>"; };
 		1D244659BE71C0EC41544089 /* VitalRouteTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = VitalRouteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1F900E8D27C268308C92106D /* BackfillDepthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillDepthTests.swift; sourceTree = "<group>"; };
 		253F1897B82767544D465728 /* DestinationConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfiguration.swift; sourceTree = "<group>"; };
 		2BEC5CE89D985751A16DDB80 /* HealthRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRecord.swift; sourceTree = "<group>"; };
 		2CBAF875332D415C9CF4E581 /* SyncPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPayload.swift; sourceTree = "<group>"; };
@@ -95,6 +98,7 @@
 		711E1DD1FC2624EA1E6E61DA /* VitalRouteModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VitalRouteModel.swift; sourceTree = "<group>"; };
 		72BF4C6C3FA72DA4F352AE01 /* ExportSelectionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportSelectionStore.swift; sourceTree = "<group>"; };
 		72C40C84194F8D920E7D0A3B /* HealthKitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitService.swift; sourceTree = "<group>"; };
+		799C3E429B3AFF5FF3944AEA /* BackfillDepth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillDepth.swift; sourceTree = "<group>"; };
 		81221D020CA14E57185AB7F7 /* KeychainValueStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainValueStore.swift; sourceTree = "<group>"; };
 		828B3FDAB2FD3EC54A2D7135 /* ObserverCompletion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObserverCompletion.swift; sourceTree = "<group>"; };
 		91A5DBE27503555D4CB71DD9 /* BackgroundSyncTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundSyncTasks.swift; sourceTree = "<group>"; };
@@ -160,6 +164,7 @@
 			isa = PBXGroup;
 			children = (
 				E5DEE3382F095688AA2155C7 /* AutomaticSyncEngine.swift */,
+				799C3E429B3AFF5FF3944AEA /* BackfillDepth.swift */,
 				91A5DBE27503555D4CB71DD9 /* BackgroundSyncTasks.swift */,
 				F64AFE0A3CBFA24AE20998D8 /* ManualSyncCoordinator.swift */,
 				01DB13088BFA2FDDE9EB674B /* Outbox.swift */,
@@ -275,6 +280,7 @@
 			children = (
 				FCD380A53F497796C90D9B1D /* AppConfigurationTests.swift */,
 				5FD7D248B3B516C8B2CCC5A2 /* AutomaticSyncEngineTests.swift */,
+				1F900E8D27C268308C92106D /* BackfillDepthTests.swift */,
 				4008320A95D4EFD02B848CE8 /* DestinationConfigurationTests.swift */,
 				51A5216F48B81FFFE4804F1E /* DestinationCredentialStoreTests.swift */,
 				AC2042C15CF56303A636F4B9 /* ExportSelectionStoreTests.swift */,
@@ -380,6 +386,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				8386EF3A6975A962BCA98DFA /* AutomaticSyncEngine.swift in Sources */,
+				055EF315C0ACA6414663A03B /* BackfillDepth.swift in Sources */,
 				04F133BDA725690BF5E7B4D3 /* BackgroundSyncTasks.swift in Sources */,
 				EF523D7479DDEC47947B8576 /* DestinationClient.swift in Sources */,
 				52D4DA3AE945A7FC71B7BD66 /* DestinationConfiguration.swift in Sources */,
@@ -419,6 +426,7 @@
 			files = (
 				87B954539A9E383D7BA6B07C /* AppConfigurationTests.swift in Sources */,
 				886F03486415586CFC31B91E /* AutomaticSyncEngineTests.swift in Sources */,
+				DA9030DCC46662048397B289 /* BackfillDepthTests.swift in Sources */,
 				7581D6EA5F72BF5A9E52B9B9 /* DestinationConfigurationTests.swift in Sources */,
 				165DEBBA3DDD258077035B79 /* DestinationCredentialStoreTests.swift in Sources */,
 				2148028360D86F2731CCE1CD /* ExportSelectionStoreTests.swift in Sources */,

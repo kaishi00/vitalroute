@@ -45,7 +45,7 @@ struct HealthDataView: View {
             } header: {
                 Text("Export selection")
             } footer: {
-                Text("Toggles choose which categories are included when you sync — they are separate from Apple Health authorization. The preview below shows up to 20 recent samples per enabled category from the last 7 days; syncing sends every sample in the window, not just the preview.")
+                Text("Toggles choose which categories are included when you sync — they are separate from Apple Health authorization. The preview below shows up to 20 recent samples per enabled category; syncing sends every sample in the configured history window, not just the preview.")
             }
 
             if let error = model.healthDataError {

@@ -9,6 +9,7 @@ struct VitalRouteApp: App {
     @State private var selectionStore: ExportSelectionStore
     @State private var syncCoordinator: ManualSyncCoordinator
     @State private var autoSyncEngine: AutomaticSyncEngine
+    @State private var backfillStore = BackfillPreferenceStore()
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -68,6 +69,7 @@ struct VitalRouteApp: App {
                 .environment(selectionStore)
                 .environment(syncCoordinator)
                 .environment(autoSyncEngine)
+                .environment(backfillStore)
                 .task { await destinationStore.loadSavedEndpoint() }
                 // Re-reading the credential whenever the endpoint settles or
                 // changes keeps credential state namespaced to the active

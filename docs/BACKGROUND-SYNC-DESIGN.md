@@ -62,7 +62,7 @@ entitlements are declared in `project.yml` and generated into
 | Destination changed / removed | Automatic sync **disables**; pending events and checkpoints bound to the previous destination identity are discarded with a visible notice. Nothing is ever re-pointed to a different recipient. |
 | Credential replaced (same destination) | State kept; pending work stays; the next attempt uses the new credential (the credential store publishes a nonsecret revision so a same-endpoint replacement reaches the engine). |
 | Category disabled | That category's observers stop, the in-flight pass is cancelled and awaited, its queued events are removed and its checkpoint cleared; other categories continue. A batch already committed to the wire cannot be recalled, so — as with the destination purge — what is *not* uploaded is the queued work that had not yet been sent. |
-| Category re-enabled | A **new scope generation** is minted: fresh 7-day bootstrap (never silently lifetime history, never a silent gap). |
+| Category re-enabled | A **new scope generation** is minted: fresh bootstrap at the configured backfill depth (never a silent gap; lifetime history only when the user chose All records). |
 | Queue at capacity | Query passes stop (backpressure); state surfaces pending work; delivery resumes draining first. |
 | Destination changed while automatic sync is **off** | The queue bound to the previous destination is discarded with a visible notice — queued health data must never become deliverable to an endpoint it was not captured for. |
 | Configuration (destination, credential, or selection) changes while an operation is suspended | The newer decision wins. A generation counter is claimed before the first suspension of every user decision; a resumed enable, registration, or restore finds itself superseded, unwinds, and mutates nothing. |
@@ -78,18 +78,25 @@ SyncScopeID = destinationIdentity + category + scopeGeneration(UUID)
 - `destinationIdentity` is the canonical saved endpoint string (same identity
   the credential Keychain namespace uses).
 - A new `scopeGeneration` is minted on: initial enable, category re-enable,
-  and any destination change (which disables and requires re-enabling).
+  a deepened backfill depth, and any destination change (which disables and
+  requires re-enabling).
 - Each scope fixes its query definition at creation:
-  `predicate = startDate >= (bootstrapMoment − 7 days)` — **fixed, not
-  moving**. Per Apple's anchor semantics (anchor = last object *received* by
-  that query), an anchor is only ever reused with the exact predicate it was
-  produced with. Incremental queries for a scope always use the scope's fixed
-  predicate. Documented trade-off: backdated samples whose start date is
-  older than the scope window are not captured (same window semantics as
-  manual sync).
+  `predicate = startDate >= (bootstrapMoment − backfillDepth)` — **fixed, not
+  moving**. The backfill depth is user-configurable (7 days default; 30/90
+  days, 1 year, or the entire history), so "how far back the first sync of a
+  category reaches" is an explicit choice made in Settings. Per Apple's
+  anchor semantics (anchor = last object *received* by that query), an anchor
+  is only ever reused with the exact predicate it was produced with.
+  Incremental queries for a scope always use the scope's fixed predicate.
+  Deepening the depth mints a fresh scope generation whose window reaches
+  further back (a deliberate re-bootstrap that captures the older history);
+  making it shallower never discards an existing deeper scope — everything
+  from enablement forward is captured regardless of this setting. Documented
+  trade-off: samples older than a scope's fixed window are only captured by
+  deepening the depth (which re-bootstraps that category).
 - A stored checkpoint whose scope ID no longer matches the current scope for
   that category is invalid → the category re-bootstraps (fresh generation,
-  7-day window).
+  window from the configured backfill depth).
 - Known limitation, documented: deletions of samples that predate the scope
   window are not reported (predicate-filtered), matching the windowed scope.
 

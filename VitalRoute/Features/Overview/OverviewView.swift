@@ -5,6 +5,7 @@ struct OverviewView: View {
     @Environment(DestinationConfigurationStore.self) private var destinationStore
     @Environment(DestinationCredentialStore.self) private var credentialStore
     @Environment(ExportSelectionStore.self) private var selectionStore
+    @Environment(BackfillPreferenceStore.self) private var backfillStore
     @Environment(ManualSyncCoordinator.self) private var syncCoordinator
     @Environment(AutomaticSyncEngine.self) private var autoSyncEngine
 
@@ -133,7 +134,7 @@ struct OverviewView: View {
                 Text("Manual sync")
                     .font(.headline)
                 Spacer()
-                Text("Last \(SyncLimits.windowDays) days")
+                Text(backfillStore.depth.label)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
@@ -210,7 +211,7 @@ struct OverviewView: View {
                 Text("Recent health data")
                     .font(.title3.weight(.semibold))
                 Spacer()
-                Text("7 days")
+                Text(backfillStore.depth.label)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
@@ -336,7 +337,7 @@ struct OverviewView: View {
         if !selectionStore.hasSelection {
             return "Enable at least one category in Health Data to sync."
         }
-        return "Sends the last \(SyncLimits.windowDays) days for \(selectionStore.selectedMetrics.count) selected categor\(selectionStore.selectedMetrics.count == 1 ? "y" : "ies") to your destination."
+        return "Sends \(backfillStore.depth == .allRecords ? "all records" : "the \(backfillStore.depth.label.lowercased())") for \(selectionStore.selectedMetrics.count) selected categor\(selectionStore.selectedMetrics.count == 1 ? "y" : "ies") to your destination."
     }
 
     private var syncProgressText: String {
@@ -346,7 +347,7 @@ struct OverviewView: View {
         case .authorizing:
             "Confirming Apple Health access…"
         case .readingHealthData:
-            "Reading the last \(SyncLimits.windowDays) days of selected categories…"
+            "Reading \(backfillStore.depth == .allRecords ? "all records" : "the \(backfillStore.depth.label.lowercased())") of selected categories…"
         case .uploading(let batch, let totalBatches):
             "Uploading batch \(batch) of \(totalBatches) · \(syncCoordinator.currentSummary.deliveredRecords) records acknowledged"
         }

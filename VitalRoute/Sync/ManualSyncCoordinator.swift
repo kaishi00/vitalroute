@@ -5,7 +5,6 @@ import Observation
 /// HealthKit work and request payloads bounded; hitting a bound is surfaced
 /// as truncation, never as silent success.
 enum SyncLimits {
-    static let windowDays = 7
     static let recordsPerUploadBatch = 200
     static let healthQueryPageSize = 500
     static let maxPagesPerMetric = 40
@@ -75,7 +74,7 @@ struct LastSyncInfo: Equatable, Codable {
 }
 
 /// Drives foreground, user-initiated syncs: authorize for the selected
-/// categories, read the full seven-day window, upload in batches, and report
+/// categories, read the configured history window, upload in batches, and report
 /// honest progress, partial, truncated, and cancelled states.
 ///
 /// The coordinator never starts work on its own — saving configuration,
@@ -141,11 +140,10 @@ final class ManualSyncCoordinator {
                 recordPreflightFailure("Select at least one category in Health Data before syncing.")
                 return
             }
-            let windowStart = Calendar.current.date(
-                byAdding: .day,
-                value: -SyncLimits.windowDays,
-                to: now
-            ) ?? now
+            // The manual export window follows the same configured backfill
+            // depth as automatic sync's scopes.
+            let windowStart = BackfillDepth.stored(in: defaults)
+                .windowStart(from: now, calendar: Calendar.current)
             plan = SyncPlan(
                 endpoint: configuration.endpoint,
                 bearerToken: trimmedToken,

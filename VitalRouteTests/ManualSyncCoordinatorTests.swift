@@ -154,12 +154,29 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(provider.exportQueryWindows.count, 1)
         let window = provider.exportQueryWindows[0]
         XCTAssertEqual(window.end, now)
-        // Seven-day window per SyncLimits.
+        // Default depth (7 days) shapes the manual window.
         XCTAssertEqual(
-            window.start.timeIntervalSince(window.end),
-            -Double(SyncLimits.windowDays * 24 * 3600),
+            window.start.timeIntervalSince(BackfillDepth.sevenDays.windowStart(from: now)),
+            0,
             accuracy: 1
         )
+    }
+
+    @MainActor
+    func testManualPlanHonorsAllRecordsDepth() async throws {
+        let provider = StubHealthDataProvider(export: [])
+        let client = StubDestinationClient()
+        let defaults = makeDefaults()
+        BackfillDepth.store(.allRecords, in: defaults)
+        let coordinator = makeCoordinator(provider: provider, client: client, defaults: defaults)
+
+        let now = Date()
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueryWindows.count, 1)
+        XCTAssertEqual(provider.exportQueryWindows[0].start, .distantPast)
+        XCTAssertEqual(provider.exportQueryWindows[0].end, now)
     }
 
     @MainActor
