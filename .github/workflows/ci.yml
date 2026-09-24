@@ -149,3 +149,20 @@ jobs:
           echo "$out"
           grep -q 'backup ok: 0 records, 0 tombstones' <<<"$out" ||
             { echo "::error::unexpected backup summary"; exit 1; }
+
+      - name: Execute install.sh from the checkout branch
+        env:
+          COMPOSE_FILE_PATH: ${{ github.workspace }}/server/deploy/docker-compose.yml
+        run: |
+          set -euo pipefail
+          cleanup() { docker compose -p vr-install -f "$COMPOSE_FILE_PATH" down -v || true; sudo rm -rf /tmp/vr-install-data || true; }
+          trap cleanup EXIT
+          # The from-a-checkout invocation mode (script resolving its own
+          # repo root) has no bash -n coverage — executing it is the only
+          # way to catch path-arithmetic regressions like a wrong SRC level.
+          sudo env VITALROUTE_PROJECT_NAME=vr-install \
+               VITALROUTE_DATA_DIR=/tmp/vr-install-data \
+               VITALROUTE_HOST_PORT=8799 \
+            bash server/deploy/install.sh 2>&1 | tail -6
+          code="$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8799/v1/health)"
+          [ "$code" = "401" ] || { echo "::error::install.sh stack did not come up (health returned $code)"; exit 1; }
