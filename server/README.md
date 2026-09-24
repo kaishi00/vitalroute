@@ -12,13 +12,15 @@ how to run and deploy the receiver.
 - Receives batched health records over HTTPS, validates them strictly,
   persists them transactionally, and acknowledges them idempotently.
 - Provides a connection-test operation that sends and stores nothing.
-- Runs with no accounts, no web dashboard, no query interface, no outbound
-  connections, and no third-party services.
+- Runs with no accounts, no web dashboard, no outbound connections, and no
+  third-party services. (Agent reads go through the separate read-only MCP
+  query service — see DEPLOYMENT.md — not this ingestion surface.)
 
-Not in this milestone (by design): any read/query/MCP interface for
-downstream consumers. (Background delivery from the client, anchored
-incremental sync, and deletion propagation through contract v2 are
-implemented — see [API.md](API.md).)
+Background delivery from the client, anchored incremental sync, deletion
+propagation through contract v2 (see [API.md](API.md)), and a read-only
+MCP query service for agent access (`mcp_server.py`; see
+[DEPLOYMENT.md](DEPLOYMENT.md)) are implemented. Not in scope: accounts,
+multi-user access, or any write path beyond ingestion.
 
 For production installation as a managed Docker Compose service — including
 HTTPS exposure, upgrades, token rotation, and backups — see

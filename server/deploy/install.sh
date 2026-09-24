@@ -134,35 +134,62 @@ fi
 chown "$CONTAINER_UID:$CONTAINER_UID" "$TOKEN_FILE"
 chmod 400 "$TOKEN_FILE"
 
+# Separate bearer token for the read-only MCP query service: agent access
+# can be rotated or revoked without touching ingestion.
+QUERY_TOKEN_FILE="$VITALROUTE_DATA_DIR/query-token"
+query_regenerate=0
+if [ -f "$QUERY_TOKEN_FILE" ]; then
+  query_printable="$(tr -d '[:space:]' <"$QUERY_TOKEN_FILE" | wc -c | tr -d ' ')"
+  if [ "${query_printable:-0}" -lt 16 ]; then
+    echo "existing query token at $QUERY_TOKEN_FILE is too short or blank — regenerating"
+    query_regenerate=1
+  fi
+else
+  query_regenerate=1
+fi
+if [ "$query_regenerate" -eq 1 ]; then
+  (umask 377 && python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")' >"$QUERY_TOKEN_FILE")
+  echo "Generated a new query token at $QUERY_TOKEN_FILE"
+else
+  echo "Existing query token preserved at $QUERY_TOKEN_FILE"
+fi
+chown "$CONTAINER_UID:$CONTAINER_UID" "$QUERY_TOKEN_FILE"
+chmod 400 "$QUERY_TOKEN_FILE"
+
 # ---- build and start --------------------------------------------------------
 
 compose() {
   VITALROUTE_HOST_PORT="$VITALROUTE_HOST_PORT" \
     VITALROUTE_TOKEN_FILE="$TOKEN_FILE" \
+    VITALROUTE_QUERY_TOKEN_FILE="$QUERY_TOKEN_FILE" \
     docker compose -p "$VITALROUTE_PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
 }
 
 compose up -d --build
 
-# ---- wait for the health check ---------------------------------------------
+# ---- wait for the health checks --------------------------------------------
 
-CONTAINER="$(compose ps -q receiver 2>/dev/null || true)"
-[ -n "$CONTAINER" ] || fail "receiver container did not start; see: docker compose -p $VITALROUTE_PROJECT_NAME logs receiver"
-echo "Waiting for the receiver health check..."
-status=""
-for _ in $(seq 1 45); do
-  status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "$CONTAINER" 2>/dev/null || echo starting)"
-  if [ "$status" = "healthy" ]; then
-    break
-  fi
-  [ "$status" = "unhealthy" ] && break
-  sleep 2
-done
-if [ "$status" != "healthy" ]; then
-  echo "receiver did not become healthy (status: ${status:-unknown})" >&2
-  echo "inspect with: docker compose -p $VITALROUTE_PROJECT_NAME logs receiver" >&2
-  exit 1
-fi
+wait_healthy() {
+  local service="$1" cid status
+  cid="$(compose ps -q "$service" 2>/dev/null || true)"
+  [ -n "$cid" ] || fail "$service container did not start; see: docker compose -p $VITALROUTE_PROJECT_NAME logs $service"
+  status=""
+  for _ in $(seq 1 45); do
+    status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "$cid" 2>/dev/null || echo starting)"
+    if [ "$status" = "healthy" ]; then
+      return 0
+    fi
+    [ "$status" = "unhealthy" ] && break
+    sleep 2
+  done
+  echo "$service did not become healthy (status: ${status:-unknown})" >&2
+  echo "inspect with: docker compose -p $VITALROUTE_PROJECT_NAME logs $service" >&2
+  return 1
+}
+
+echo "Waiting for the service health checks..."
+wait_healthy receiver || exit 1
+wait_healthy mcp || exit 1
 
 printf '%s\n' "$REV" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$VITALROUTE_DATA_DIR/.installed-revision"
 chmod 600 "$VITALROUTE_DATA_DIR/.installed-revision"
@@ -175,6 +202,7 @@ echo "  backend:  $BACKEND  (host loopback only)"
 echo "  token:    $TOKEN_FILE"
 echo "             retrieve with: sudo cat $TOKEN_FILE"
 echo "  data:     named volume ${VITALROUTE_PROJECT_NAME}_vitalroute-data (/var/lib/vitalroute inside the container)"
+echo "  query:    read-only MCP service on 127.0.0.1:8791 (token: $QUERY_TOKEN_FILE)"
 echo
 echo "Next: expose the backend over HTTPS — see server/DEPLOYMENT.md."
 echo "The iOS destination URL must end in /v1/records and use HTTPS."

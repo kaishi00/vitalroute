@@ -98,7 +98,7 @@ jobs:
           set -euo pipefail
           hdr=""
           cleanup() {
-            rm -f "$hdr" /tmp/vr-ci-token || true
+            rm -f "$hdr" /tmp/vr-ci-token /tmp/vr-ci-qtoken || true
             sudo rm -rf /tmp/vr-ci-data || true
             docker compose -p vr-ci -f "$COMPOSE_FILE_PATH" down -v || true
           }
@@ -113,7 +113,7 @@ jobs:
           # ports to long form where the bind address lands in `host_ip`
           # and `published` holds only the port — match the rendered
           # host_ip, captured first so grep cannot SIGPIPE the producer.
-          cfg="$(VITALROUTE_TOKEN_FILE=/tmp/placeholder docker compose -f "$COMPOSE_FILE_PATH" config)" ||
+          cfg="$(VITALROUTE_TOKEN_FILE=/tmp/placeholder VITALROUTE_QUERY_TOKEN_FILE=/tmp/placeholder docker compose -f "$COMPOSE_FILE_PATH" config)" ||
             { echo "::error::docker compose config failed"; exit 1; }
           grep -qE 'host_ip: 127\.0\.0\.1' <<<"$cfg" ||
             { echo "::error::backend port is not loopback-only"; exit 1; }
@@ -126,17 +126,52 @@ jobs:
           python3 -c "import secrets; print(secrets.token_urlsafe(32), end='')" > /tmp/vr-ci-token
           sudo chown 64000:64000 /tmp/vr-ci-token
           sudo chmod 400 /tmp/vr-ci-token
+          python3 -c "import secrets; print(secrets.token_urlsafe(32), end='')" > /tmp/vr-ci-qtoken
+          sudo chown 64000:64000 /tmp/vr-ci-qtoken
+          sudo chmod 400 /tmp/vr-ci-qtoken
           # Build, start, and wait for the container health check, then
           # prove both auth outcomes against the loopback backend. The
           # bearer token is passed via a curl config file, never argv.
           cd server/deploy
-          VITALROUTE_TOKEN_FILE=/tmp/vr-ci-token docker compose -p vr-ci -f "$COMPOSE_FILE_PATH" up -d --build --wait --wait-timeout 180
+          VITALROUTE_TOKEN_FILE=/tmp/vr-ci-token \
+            VITALROUTE_QUERY_TOKEN_FILE=/tmp/vr-ci-qtoken \
+            docker compose -p vr-ci -f "$COMPOSE_FILE_PATH" up -d --build --wait --wait-timeout 180
           hdr="$(mktemp)"
           printf 'header = "Authorization: Bearer %s"\n' "$(sudo cat /tmp/vr-ci-token)" >"$hdr"
           code="$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/v1/health)"
           [ "$code" = "401" ] || { echo "::error::unauthenticated /v1/health returned $code, expected 401"; exit 1; }
           code="$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -K "$hdr" http://127.0.0.1:8790/v1/health)"
           [ "$code" = "200" ] || { echo "::error::authenticated /v1/health returned $code, expected 200"; exit 1; }
+          rm -f "$hdr" && hdr=""
+          # MCP query service: liveness without auth, JSON-RPC rejected
+          # without the query token, and a full initialize → tools/list
+          # round-trip with it (header via config file, never argv).
+          code="$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8791/healthz)"
+          [ "$code" = "200" ] || { echo "::error::query /healthz returned $code, expected 200"; exit 1; }
+          code="$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            http://127.0.0.1:8791/)"
+          [ "$code" = "401" ] || { echo "::error::unauthenticated initialize returned $code, expected 401"; exit 1; }
+          hdr="$(mktemp)"
+          printf 'header = "Authorization: Bearer %s"\n' "$(sudo cat /tmp/vr-ci-qtoken)" >"$hdr"
+          body="$(curl --noproxy '*' -s -K "$hdr" -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            http://127.0.0.1:8791/)"
+          grep -q '"serverInfo":{"name":"vitalroute-query"' <<<"$body" ||
+            { echo "::error::initialize did not return the query server info: $body"; exit 1; }
+          # The handshake never touches SQLite; a real tool call does, and
+          # it runs in the DEPLOYMENT shape (rw-mounted WAL database), so a
+          # read-path regression fails here instead of in production.
+          body="$(curl --noproxy '*' -s -K "$hdr" -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_metrics","arguments":{}}}' \
+            http://127.0.0.1:8791/)"
+          grep -q '"isError":true' <<<"$body" &&
+            { echo "::error::tools/call returned isError: $body"; exit 1; }
+          grep -q 'metrics' <<<"$body" ||
+            { echo "::error::tools/call failed through the stack: $body"; exit 1; }
           rm -f "$hdr" && hdr=""
           # Round-trip a backup against the live stack (synthetic database;
           # the stack has received no data, so it must report zero rows).

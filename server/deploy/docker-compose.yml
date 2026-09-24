@@ -5,6 +5,11 @@
 #
 # Overridables (environment):
 #   VITALROUTE_HOST_PORT  host loopback port to publish  (default 8790)
+#   VITALROUTE_QUERY_HOST_PORT host loopback port for the MCP query
+#                            service (default 8791)
+#   VITALROUTE_QUERY_TOKEN_FILE host path of the query-token file (default
+#                            /srv/vitalroute/query-token; separate from the
+#                            ingest token so agent access revokes alone)
 #   VITALROUTE_TOKEN_FILE host path of the bearer-token file (default
 #                         /srv/vitalroute/token; created by install.sh owned
 #                         by UID 64000 with mode 0400 — compose file-secrets
@@ -74,6 +79,57 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+  # Read-only MCP query server (mcp_server.py): the agent-facing stats
+  # surface. Shares the receiver's image and data volume. The volume is
+  # mounted read-write ONLY because SQLite may need to recreate the
+  # -wal/-shm sidecars the receiver deletes between write batches; the
+  # service still cannot modify health data — it opens the database with
+  # mode=ro plus PRAGMA query_only (see queries.connect). Its bearer token
+  # is separate from the ingest token (vitalroute-query-token), so agent
+  # access can be revoked independently.
+  mcp:
+    image: vitalroute-receiver:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["python3", "/app/mcp_server.py"]
+    restart: unless-stopped
+    read_only: true
+    user: "64000:64000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    environment:
+      VITALROUTE_HOST: "0.0.0.0"
+      VITALROUTE_PORT: "8787"
+      VITALROUTE_DB: /data/records.sqlite3
+      VITALROUTE_QUERY_TOKEN_FILE: /run/secrets/vitalroute-query-token
+    ports:
+      - "127.0.0.1:${VITALROUTE_QUERY_HOST_PORT:-8791}:8787"
+    depends_on:
+      receiver:
+        condition: service_healthy
+    volumes:
+      # See the comment above: rw mount is required for WAL sidecars;
+      # writes are blocked at the SQLite layer (mode=ro + query_only).
+      - vitalroute-data:/data
+    secrets:
+      - vitalroute-query-token
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler({})); assert opener.open('http://127.0.0.1:8787/healthz', timeout=5).status == 200"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   vitalroute-data:
@@ -81,3 +137,5 @@ volumes:
 secrets:
   vitalroute-token:
     file: ${VITALROUTE_TOKEN_FILE:-/srv/vitalroute/token}
+  vitalroute-query-token:
+    file: ${VITALROUTE_QUERY_TOKEN_FILE:-/srv/vitalroute/query-token}

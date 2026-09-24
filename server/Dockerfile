@@ -13,7 +13,7 @@ RUN groupadd --gid 64000 vitalroute \
  && chown vitalroute:vitalroute /var/lib/vitalroute
 
 WORKDIR /app
-COPY receiver.py storage.py validation.py ./
+COPY receiver.py storage.py validation.py queries.py mcp_server.py ./
 
 USER vitalroute
 EXPOSE 8787

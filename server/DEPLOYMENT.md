@@ -86,6 +86,7 @@ paths win over a `/` handler, which keeps serving):
 ```sh
 sudo tailscale serve --bg --https=443 --set-path=/v1/records http://127.0.0.1:8790/v1/records
 sudo tailscale serve --bg --https=443 --set-path=/v1/health  http://127.0.0.1:8790/v1/health
+sudo tailscale serve --bg --https=443 --set-path=/mcp        http://127.0.0.1:8791/mcp
 ```
 
 The path is repeated on the target deliberately: Tailscale's docs do not
@@ -107,6 +108,7 @@ mounts later (the backend keeps running):
 ```sh
 sudo tailscale serve --https=443 --set-path=/v1/records off
 sudo tailscale serve --https=443 --set-path=/v1/health  off
+sudo tailscale serve --https=443 --set-path=/mcp        off
 ```
 
 **Do not** run `tailscale serve reset` or `--https=443 off` on a host that
@@ -126,6 +128,46 @@ point the certificate at a hostname you control. Requirements: valid
 certificate (the app does not accept self-signed CAs), HTTPS only, and no
 rewriting of the two paths (`/v1/records`, `/v1/health`) or headers
 (`Authorization`).
+
+## Agent access: the read-only MCP query service
+
+The stack also runs `mcp_server.py` — a read-only Model Context Protocol
+server that lets an agent query your stats without SSH and without any
+write path. It opens SQLite with `mode=ro` plus `PRAGMA query_only` (the
+volume is mounted read-write only because SQLite may need to recreate the
+WAL sidecars the receiver removes between writes), exposes only three
+fixed tools (list metrics, daily aggregates, recent records — no arbitrary
+SQL), excludes samples deleted on the phone, and authenticates with its
+own bearer token so agent access revokes independently of ingestion.
+
+| Item | Value |
+|---|---|
+| MCP endpoint (with the serve mount above) | `https://<machine>.<tailnet>.ts.net/mcp` |
+| Query token | `/srv/vitalroute/query-token` (UID 64000, 0400; `sudo cat` it) |
+| Transport | MCP streamable HTTP (JSON-RPC POST; no server push) |
+| Tools | `list_metrics`, `daily_stats`, `recent_records` |
+
+Adding it to an MCP client (e.g. ZCode's `~/.zcode/cli/config.json`):
+
+```json
+{
+  "mcpServers": {
+    "vitalroute": {
+      "type": "http",
+      "url": "https://<machine>.<tailnet>.ts.net/mcp",
+      "headers": { "Authorization": "Bearer <query token>" }
+    }
+  }
+}
+```
+
+Then ask the agent naturally, e.g. "what's my average resting heart rate
+this week" — the tool descriptions guide it.
+
+Rotate the query token like the ingest token (same ownership rules:
+UID 64000, mode 0400, then `docker compose ... up -d --force-recreate mcp`).
+To disable agent access entirely, remove the serve mount and/or run
+`docker compose -p vitalroute stop mcp`; ingestion is unaffected.
 
 ## Day-2 operations
 
