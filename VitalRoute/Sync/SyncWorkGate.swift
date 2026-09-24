@@ -29,6 +29,12 @@ actor SyncWorkGate {
     private var waiters: [Waiter] = []
 
     /// Runs `operation` exclusively; callers queue in arrival order.
+    ///
+    /// A waiter that is cancelled while queued is not removed from the queue
+    /// immediately — it is dropped the moment the gate is handed over, and
+    /// then exits without running its operation. Callers that surface a
+    /// cancel to the user should expect it to take effect at that handover
+    /// (bounded by the run currently holding the gate), not instantly.
     func run<T: Sendable>(_ operation: @escaping @Sendable () async throws -> T) async throws -> T {
         await acquire()
         defer { release() }

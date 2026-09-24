@@ -396,6 +396,10 @@ final class AutomaticSyncEngine {
         selectedMetrics = metrics
         if let reason = unsatisfiedPrerequisite() {
             mode = .paused(reason)
+            lastStatusMessage = reason.userMessage
+            // The launch pass may never run (nothing changes to trigger one),
+            // so the queued work is counted here rather than left at zero.
+            await refreshPendingCount()
             return
         }
         do {
@@ -1120,6 +1124,7 @@ final class AutomaticSyncEngine {
         await stateStore.clearPendingScope()
         await stateStore.saveRetryState(.initial)
         await refreshPendingCount()
+        nextRetryAt = nil
         discardedWorkNotice = "\(pending) queued change(s) were discarded because they were captured for a different destination. They will never be sent anywhere else."
         // The fact is recorded unconditionally — a user must not silently
         // lose queued health data — but the visible line is only this pass's
