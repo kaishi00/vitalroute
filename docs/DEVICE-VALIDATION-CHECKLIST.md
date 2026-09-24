@@ -55,6 +55,9 @@ architecture level, not end-to-end.
 
 ## Device-validation status — 2026-09-23 (tested commit `9b2fa52`)
 
+> Superseded by the 2026-09-24 record below (Case 0 PASS via
+> distribution signing; cases 1–10 still pending on hardware).
+
 Attempted on the build Mac (Xcode 27.0 / 27A266a, team `U2TH557QA8`,
 ASC API key `4K2295KL5Q`, tested commit `9b2fa52`):
 
@@ -105,3 +108,33 @@ Manager role or above, or create the profile manually in the portal),
 and pair the Apple Watch for case 2. Cases 3–7 additionally require
 on-device gestures (Health-app deletion, lock/unlock, force-quit,
 airplane mode) that only the device holder can perform.
+
+## Device-validation status — 2026-09-24 (tested commit `6077e56`)
+
+Follow-up to the 2026-09-23 record. The account blockers were resolved
+(an Xcode account session exists on the build Mac and an
+Admin-role App Store Connect API key is installed), and the
+distribution path replaced the development-profile path, so no
+registered device is needed to sign.
+
+- **Case 0 — PASS (distribution signing).** An App Store provisioning
+  profile ("VitalRoute App Store", team `U2TH557QA8`) authorizes
+  HealthKit for `com.milim.vitalroute`; a Release ipa built at
+  `6077e56` with the Apple Distribution certificate (expires 2027-05;
+  the profile's own expiration is clamped to that same date) carries
+  both `com.apple.developer.healthkit` and
+  `com.apple.developer.healthkit.background-delivery` in its code
+  signature (read with `codesign -d --entitlements` on the exported
+  app; `codesign --verify --strict` passes). Apple's TestFlight upload
+  validation accepted the binary, which also proves the ITMS-90683
+  purpose-string gate now passes — upload validation is not App Store
+  Review approval. The read-only app declares
+  `NSHealthUpdateUsageDescription` wording that states its real
+  (read-only) purpose, guarded by a build-time test that fails CI if a
+  key is missing or blank.
+- Cases 1–10: **PENDING** — the device holder chose TestFlight (no USB)
+  over a development install. Build 1 (version 0.1.0) passed TestFlight
+  upload validation and was processing at the time of writing; install
+  on a physical iPhone via TestFlight has not started. Simulator
+  evidence still does not apply, and no background-scheduling behavior
+  may be inferred until these cases run on hardware.
