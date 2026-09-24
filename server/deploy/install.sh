@@ -70,7 +70,9 @@ else
   SCRIPT_DIR=""
 fi
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/../receiver.py" ]; then
-  SRC="$SCRIPT_DIR/.."
+  # The script lives at <repo>/server/deploy/install.sh: the source tree is
+  # the repository root, two levels up from the script directory.
+  SRC="$(cd "$SCRIPT_DIR/../.." && pwd)"
   # An explicit revision always wins, even from a checkout — this is the
   # documented upgrade path (install.sh at the old revision deploying a new
   # one). Without REV, deploy the code the operator is looking at.
