@@ -1,0 +1,6 @@
+# Keep the image build context to the runtime code only.
+*
+!Dockerfile
+!receiver.py
+!storage.py
+!validation.py

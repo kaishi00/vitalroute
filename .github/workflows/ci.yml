@@ -90,3 +90,62 @@ jobs:
 
       - name: Run receiver tests
         run: python3 -m unittest discover -s server/tests -v
+
+      - name: Package receiver image and smoke-test the compose stack
+        env:
+          COMPOSE_FILE_PATH: ${{ github.workspace }}/server/deploy/docker-compose.yml
+        run: |
+          set -euo pipefail
+          hdr=""
+          cleanup() {
+            rm -f "$hdr" /tmp/vr-ci-token || true
+            sudo rm -rf /tmp/vr-ci-data || true
+            docker compose -p vr-ci -f "$COMPOSE_FILE_PATH" down -v || true
+          }
+          trap cleanup EXIT
+          # Validate the packaging scripts (bash -n takes ONE file; a list
+          # would silently check only the first).
+          for s in server/deploy/install.sh server/deploy/backup.sh server/deploy/restore.sh; do
+            bash -n "$s"
+          done
+          # Privacy invariant: the backend must be published to host
+          # loopback only. `docker compose config` normalizes short-syntax
+          # ports to long form where the bind address lands in `host_ip`
+          # and `published` holds only the port — match the rendered
+          # host_ip, captured first so grep cannot SIGPIPE the producer.
+          cfg="$(VITALROUTE_TOKEN_FILE=/tmp/placeholder docker compose -f "$COMPOSE_FILE_PATH" config)" ||
+            { echo "::error::docker compose config failed"; exit 1; }
+          grep -qE 'host_ip: 127\.0\.0\.1' <<<"$cfg" ||
+            { echo "::error::backend port is not loopback-only"; exit 1; }
+          if grep -qE 'host_ip: (0\.0\.0\.0|::)' <<<"$cfg"; then
+            echo "::error::a service is published on a non-loopback address"; exit 1
+          fi
+          # Create the token with PRODUCTION permissions (owned by the
+          # container UID 64000, mode 0400) so a permission regression in
+          # the secret handling fails here, not on a real host.
+          python3 -c "import secrets; print(secrets.token_urlsafe(32), end='')" > /tmp/vr-ci-token
+          sudo chown 64000:64000 /tmp/vr-ci-token
+          sudo chmod 400 /tmp/vr-ci-token
+          # Build, start, and wait for the container health check, then
+          # prove both auth outcomes against the loopback backend. The
+          # bearer token is passed via a curl config file, never argv.
+          cd server/deploy
+          VITALROUTE_TOKEN_FILE=/tmp/vr-ci-token docker compose -p vr-ci -f "$COMPOSE_FILE_PATH" up -d --build --wait --wait-timeout 180
+          hdr="$(mktemp)"
+          printf 'header = "Authorization: Bearer %s"\n' "$(sudo cat /tmp/vr-ci-token)" >"$hdr"
+          code="$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/v1/health)"
+          [ "$code" = "401" ] || { echo "::error::unauthenticated /v1/health returned $code, expected 401"; exit 1; }
+          code="$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -K "$hdr" http://127.0.0.1:8790/v1/health)"
+          [ "$code" = "200" ] || { echo "::error::authenticated /v1/health returned $code, expected 200"; exit 1; }
+          rm -f "$hdr" && hdr=""
+          # Round-trip a backup against the live stack (synthetic database;
+          # the stack has received no data, so it must report zero rows).
+          # Output is captured first: grep -q in a pipe would close early
+          # and take the still-writing script down with SIGPIPE.
+          out="$(cd "$GITHUB_WORKSPACE/server/deploy" && sudo -E env \
+            VITALROUTE_PROJECT_NAME=vr-ci VITALROUTE_DATA_DIR=/tmp/vr-ci-data \
+            bash backup.sh /tmp/vr-ci-data/backups)" ||
+            { echo "::error::backup.sh failed"; exit 1; }
+          echo "$out"
+          grep -q 'backup ok: 0 records, 0 tombstones' <<<"$out" ||
+            { echo "::error::unexpected backup summary"; exit 1; }

@@ -15,9 +15,14 @@ how to run and deploy the receiver.
 - Runs with no accounts, no web dashboard, no query interface, no outbound
   connections, and no third-party services.
 
-Not in this milestone (by design): background delivery, anchored incremental
-sync from the client, deletion propagation, and any read/query/MCP interface
-for downstream consumers.
+Not in this milestone (by design): any read/query/MCP interface for
+downstream consumers. (Background delivery from the client, anchored
+incremental sync, and deletion propagation through contract v2 are
+implemented — see [API.md](API.md).)
+
+For production installation as a managed Docker Compose service — including
+HTTPS exposure, upgrades, token rotation, and backups — see
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Quick start
 

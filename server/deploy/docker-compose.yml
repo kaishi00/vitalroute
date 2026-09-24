@@ -1,0 +1,83 @@
+# VitalRoute receiver — production stack.
+#
+# Managed by server/deploy/install.sh; see server/DEPLOYMENT.md for the full
+# runbook (install, upgrade, token rotation, backup/restore, uninstall).
+#
+# Overridables (environment):
+#   VITALROUTE_HOST_PORT  host loopback port to publish  (default 8790)
+#   VITALROUTE_TOKEN_FILE host path of the bearer-token file (default
+#                         /srv/vitalroute/token; created by install.sh owned
+#                         by UID 64000 with mode 0400 — compose file-secrets
+#                         are plain bind mounts, so the container UID must
+#                         own the file; the token value never appears in
+#                         this file, the environment, or the image)
+name: vitalroute
+
+services:
+  receiver:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: vitalroute-receiver:local
+    restart: unless-stopped
+    # Hardened single-process container: read-only root filesystem, no new
+    # privileges, no capabilities, writable state confined to the data
+    # volume and /tmp.
+    read_only: true
+    user: "64000:64000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    environment:
+      # Listen on all interfaces *inside* the container; the ports mapping
+      # below is what keeps the backend reachable only from host loopback.
+      VITALROUTE_HOST: "0.0.0.0"
+      VITALROUTE_PORT: "8787"
+      VITALROUTE_DB: /var/lib/vitalroute/records.sqlite3
+      VITALROUTE_TOKEN_FILE: /run/secrets/vitalroute-token
+    ports:
+      - "127.0.0.1:${VITALROUTE_HOST_PORT:-8790}:8787"
+    volumes:
+      # Named volume: survives container recreation and upgrades. Verify and
+      # throwaway stacks (install.sh docs) use a different compose project
+      # name, which gives them their own volume.
+      - vitalroute-data:/var/lib/vitalroute
+    secrets:
+      - vitalroute-token
+    healthcheck:
+      # Non-mutating authenticated connection test: proves the token file is
+      # readable, the listener is up, and the API answers. Never sends data.
+      # The explicit empty ProxyHandler keeps a proxy-carrying environment
+      # from diverting the loopback probe.
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import os, urllib.request;
+          token = open(os.environ["VITALROUTE_TOKEN_FILE"], encoding="utf-8").read().strip();
+          request = urllib.request.Request(
+            "http://127.0.0.1:8787/v1/health",
+            headers={"Authorization": "Bearer " + token},
+          );
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}));
+          assert opener.open(request, timeout=5).status == 200
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  vitalroute-data:
+
+secrets:
+  vitalroute-token:
+    file: ${VITALROUTE_TOKEN_FILE:-/srv/vitalroute/token}
