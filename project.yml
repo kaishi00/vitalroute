@@ -33,6 +33,14 @@ targets:
         CFBundleShortVersionString: 0.1.0
         CFBundleVersion: '3'
         NSHealthShareUsageDescription: VitalRoute reads only the Apple Health categories shown in Health Data so you can route recent records to a destination you control.
+        # Export compliance: VitalRoute ships no non-exempt encryption.
+        # All crypto is Apple-provided exempt usage — HTTPS via
+        # URLSession/ATS, Keychain via the Security framework, and a
+        # CryptoKit SHA-256 that only namespaces Keychain entries (a hash,
+        # not encryption). Declaring it in the binary answers compliance at
+        # upload time so App Store Connect never shows the per-build
+        # "Missing Compliance" step.
+        ITSAppUsesNonExemptEncryption: false
         # VitalRoute never writes to Apple Health and never requests write
         # authorization; App Store validation (ITMS-90683) requires this key
         # for every HealthKit-entitled binary regardless. The string states
