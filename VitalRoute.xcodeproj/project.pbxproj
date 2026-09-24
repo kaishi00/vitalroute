@@ -30,6 +30,7 @@
 		8386EF3A6975A962BCA98DFA /* AutomaticSyncEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5DEE3382F095688AA2155C7 /* AutomaticSyncEngine.swift */; };
 		84AC933F1A7E394C9E30F379 /* HealthDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F8CBF05F56585C49B20A509 /* HealthDataView.swift */; };
 		876E427E9EDA2567BB1AF393 /* VitalRouteModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CDAA387B2A9A9D8665794F /* VitalRouteModelTests.swift */; };
+		87B954539A9E383D7BA6B07C /* AppConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCD380A53F497796C90D9B1D /* AppConfigurationTests.swift */; };
 		886F03486415586CFC31B91E /* AutomaticSyncEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FD7D248B3B516C8B2CCC5A2 /* AutomaticSyncEngineTests.swift */; };
 		8C3425E2B66FCF5F2407753E /* VitalRouteApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C3CC9CC03A4A57281C7B761 /* VitalRouteApp.swift */; };
 		8D2774DFB08F3B8FDA2F413E /* HealthKitService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72C40C84194F8D920E7D0A3B /* HealthKitService.swift */; };
@@ -117,6 +118,7 @@
 		F5F466F6BA29E9C78322417C /* HealthObserverCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthObserverCoordinatorTests.swift; sourceTree = "<group>"; };
 		F64AFE0A3CBFA24AE20998D8 /* ManualSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualSyncCoordinator.swift; sourceTree = "<group>"; };
 		F91B0740C51996005F797DAE /* VitalRoute.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VitalRoute.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FCD380A53F497796C90D9B1D /* AppConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfigurationTests.swift; sourceTree = "<group>"; };
 		FD0FE789EA58F7F78F6913BE /* SyncChangeEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncChangeEvent.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -271,6 +273,7 @@
 		F65FAF79D6FC759A9A829919 /* VitalRouteTests */ = {
 			isa = PBXGroup;
 			children = (
+				FCD380A53F497796C90D9B1D /* AppConfigurationTests.swift */,
 				5FD7D248B3B516C8B2CCC5A2 /* AutomaticSyncEngineTests.swift */,
 				4008320A95D4EFD02B848CE8 /* DestinationConfigurationTests.swift */,
 				51A5216F48B81FFFE4804F1E /* DestinationCredentialStoreTests.swift */,
@@ -414,6 +417,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				87B954539A9E383D7BA6B07C /* AppConfigurationTests.swift in Sources */,
 				886F03486415586CFC31B91E /* AutomaticSyncEngineTests.swift in Sources */,
 				7581D6EA5F72BF5A9E52B9B9 /* DestinationConfigurationTests.swift in Sources */,
 				165DEBBA3DDD258077035B79 /* DestinationCredentialStoreTests.swift in Sources */,

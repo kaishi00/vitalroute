@@ -33,6 +33,11 @@ targets:
         CFBundleShortVersionString: 0.1.0
         CFBundleVersion: '1'
         NSHealthShareUsageDescription: VitalRoute reads only the Apple Health categories shown in Health Data so you can route recent records to a destination you control.
+        # VitalRoute never writes to Apple Health and never requests write
+        # authorization; App Store validation (ITMS-90683) requires this key
+        # for every HealthKit-entitled binary regardless. The string states
+        # the real (read-only) purpose because App Review reads it.
+        NSHealthUpdateUsageDescription: VitalRoute reads the Apple Health categories you choose to route recent records to a destination you control, and never writes to Apple Health.
         UILaunchScreen: {}
         UIBackgroundModes:
           - fetch
