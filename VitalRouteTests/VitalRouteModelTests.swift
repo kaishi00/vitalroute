@@ -161,6 +161,15 @@ private final class StubHealthDataProvider: HealthDataProviding {
     private(set) var observationStopCount = 0
     private var observerHandler: (@Sendable (ObserverCompletion) -> Void)?
 
+
+    func latestRecords(
+        for metric: HealthMetric,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> [HealthRecord] {
+        []
+    }
+
     func observeChanges(
         for metrics: Set<HealthMetric>,
         handler: @escaping @Sendable (ObserverCompletion) -> Void

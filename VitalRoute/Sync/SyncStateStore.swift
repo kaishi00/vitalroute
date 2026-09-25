@@ -26,6 +26,27 @@ struct CategoryCheckpoint: Codable, Equatable {
     /// Serialized `HKQueryAnchor`; nil until the first page completes.
     let anchorData: Data?
     let updatedAt: Date
+    /// False until a read of this scope drains the stream to its head (a
+    /// page that is not full). Pages captured before that are historical
+    /// backfill; pages after it are live changes, which the outbox delivers
+    /// first. Checkpoints written before this flag existed decode as false,
+    /// which correctly keeps their remaining pages classified as history.
+    var isCaughtUp: Bool
+
+    init(scope: CategoryScope, anchorData: Data?, updatedAt: Date, isCaughtUp: Bool = false) {
+        self.scope = scope
+        self.anchorData = anchorData
+        self.updatedAt = updatedAt
+        self.isCaughtUp = isCaughtUp
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        scope = try container.decode(CategoryScope.self, forKey: .scope)
+        anchorData = try container.decodeIfPresent(Data.self, forKey: .anchorData)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        isCaughtUp = try container.decodeIfPresent(Bool.self, forKey: .isCaughtUp) ?? false
+    }
 }
 
 /// A manual ("Sync Now") export cursor: how far the additions-only export

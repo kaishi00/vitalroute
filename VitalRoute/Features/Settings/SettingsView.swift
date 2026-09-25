@@ -93,6 +93,12 @@ struct SettingsView: View {
         LabeledContent("State", value: modeDescription)
         if autoSyncEngine.pendingCount > 0 {
             LabeledContent("Pending changes", value: "\(autoSyncEngine.pendingCount)")
+            if autoSyncEngine.backfillPendingCount > 0 {
+                LabeledContent(
+                    "…of which history backfill",
+                    value: "\(autoSyncEngine.backfillPendingCount)"
+                )
+            }
         }
         if let lastDelivery = autoSyncEngine.lastDeliveryAt {
             LabeledContent(
@@ -107,8 +113,10 @@ struct SettingsView: View {
             )
         }
         if let nextRetry = autoSyncEngine.nextRetryAt {
+            // A request, not a promise: iOS decides when background work
+            // actually runs.
             LabeledContent(
-                "Next retry",
+                "Next attempt (requested)",
                 value: nextRetry.formatted(date: .abbreviated, time: .shortened)
             )
         }
@@ -123,7 +131,7 @@ struct SettingsView: View {
     }
 
     private var statusSymbol: String {
-        if case .paused = autoSyncEngine.mode {
+        if case .paused = autoSyncEngine.displayStatus {
             return "exclamationmark.circle"
         }
         return "info.circle"
@@ -137,11 +145,19 @@ struct SettingsView: View {
     }
 
     private var modeDescription: String {
-        switch autoSyncEngine.mode {
-        case .disabled:
+        switch autoSyncEngine.displayStatus {
+        case .off:
             return "Off"
-        case .active:
-            return autoSyncEngine.isRunning ? "On · working…" : "On"
+        case .idle:
+            return "On · up to date"
+        case .working:
+            return "On · syncing"
+        case .backfilling:
+            return "On · catching up"
+        case .deliveringBacklog:
+            return "On · delivering backlog"
+        case .waitingRetry:
+            return "On · waiting for retry"
         case .paused:
             return "Paused"
         }

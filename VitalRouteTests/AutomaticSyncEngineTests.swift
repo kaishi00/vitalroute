@@ -32,20 +32,38 @@ final class AutomaticSyncEngineTests: XCTestCase {
 
     // MARK: Fixtures
 
+    /// The outbox instance the most recently built engine uses. Tests that
+    /// seed or drain the queue must go through it: the index is in memory
+    /// per instance, so a second instance over the same directory would not
+    /// share state (fresh instances are only safe for read-only inspection,
+    /// where the index rebuilds from disk).
+    private var lastOutbox: Outbox!
+
     private func makeEngine(
         provider: ScriptedHealthProvider,
         client: ScriptedSyncClient,
         clock: ClockBox = ClockBox(),
-        gate: SyncWorkGate = SyncWorkGate()
+        gate: SyncWorkGate = SyncWorkGate(),
+        outbox: Outbox? = nil,
+        capacityLimit: Int? = nil,
+        backfillHighWater: Int = BackgroundSyncLimits.backfillCaptureHighWater,
+        backfillLowWater: Int = BackgroundSyncLimits.backfillCaptureLowWater
     ) -> AutomaticSyncEngine {
-        AutomaticSyncEngine(
+        let outbox = outbox ?? Outbox(
+            directory: tempDirectory,
+            capacityLimit: capacityLimit ?? Outbox.capacityLimit
+        )
+        lastOutbox = outbox
+        return AutomaticSyncEngine(
             healthData: provider,
             client: client,
             stateStore: SyncStateStore(directory: tempDirectory),
-            outbox: Outbox(directory: tempDirectory),
+            outbox: outbox,
             workGate: gate,
             defaults: defaults,
-            now: { clock.now }
+            now: { clock.now },
+            backfillHighWater: backfillHighWater,
+            backfillLowWater: backfillLowWater
         )
     }
 
@@ -604,7 +622,9 @@ final class AutomaticSyncEngineTests: XCTestCase {
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
 
-        let pendingAfterReplay = try await outbox.pendingCount()
+        // A fresh instance reads the disk as the replay left it; a previously
+        // created instance serves its prepare-time index.
+        let pendingAfterReplay = try await Outbox(directory: tempDirectory).pendingCount()
         XCTAssertEqual(pendingAfterReplay, 0)
         XCTAssertEqual(client.sentChangeBatches.count, 1)
         XCTAssertEqual(client.sentChangeBatches[0].changes, [.upsert(record(1))])
@@ -711,18 +731,16 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let provider = ScriptedHealthProvider()
         let client = ScriptedSyncClient()
         client.failNextDelivery(with: .connectionFailed)
-        let engine = makeEngine(provider: provider, client: client)
+        let engine = makeEngine(provider: provider, client: client, capacityLimit: 8)
         _ = await enable(engine)
         await engine.waitUntilIdle()
 
         // Fill the outbox to capacity directly (e.g. built up while offline).
-        let outbox = Outbox(directory: tempDirectory)
-        try await outbox.prepare()
         var events: [SyncChangeEvent] = []
-        for index in 0..<Outbox.capacityLimit {
+        for index in 0..<8 {
             events.append(.upsert(record(index + 1)))
         }
-        _ = try await outbox.append(events)
+        _ = try await lastOutbox.append(events, lane: .backfill)
         // Queued changes carry the identity of the destination they were
         // captured for; a real queue is always written by a capture that
         // recorded it first.
@@ -736,17 +754,261 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertEqual(provider.changeQueries.count, queriesBefore, "no capture at capacity")
         XCTAssertEqual(engine.mode, .paused(.queueAtCapacity))
         XCTAssertTrue(client.sentChangeBatches.count > 0, "delivery keeps draining")
+        // Capacity backpressure holds capture only: the status must never
+        // tell the user the whole engine is paused while the queue drains.
+        // Between passes the honest state is "waiting to upload", and while
+        // a pass runs it is "delivering backlog" — never a paused engine.
+        XCTAssertEqual(engine.displayStatus, .waitingRetry)
 
         // Drain everything: capacity pause is auto-recoverable.
-        let drained = try await outbox.pendingCount()
+        let drained = try await lastOutbox.pendingCount()
         for _ in 0..<(drained / Outbox.deliveryBatchSize + 1) {
-            let snapshot = try await outbox.nextBatch()
+            let snapshot = try await lastOutbox.nextBatch()
             if snapshot.events.isEmpty { break }
-            await outbox.remove(eventIDs: snapshot.events.map(\.eventID))
+            await lastOutbox.remove(eventIDs: snapshot.events.map(\.eventID))
         }
         engine.foregroundCatchUp()
         await engine.waitUntilIdle()
         XCTAssertEqual(engine.mode, .active)
+    }
+
+    // MARK: Live/backfill lanes
+
+    func testFullPagesRideBackfillLaneAndTailPageFlipsCategoryLive() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script[.steps] = [
+            page(additions: [record(1), record(2)], anchor: "a1", isFull: true),
+            page(additions: [record(3)], anchor: "a2", isFull: false),
+        ]
+        let client = ScriptedSyncClient()
+        client.setFailAllDeliveries(true)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        let counts = try await lastOutbox.laneCounts()
+        XCTAssertEqual(counts.live, 1, "the page that drains the stream to its head is live")
+        XCTAssertEqual(counts.backfill, 2, "a full page belongs to the historical catch-up")
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.isCaughtUp, true, "the caught-up state persists with the checkpoint")
+    }
+
+    func testBackfillThrottleSparesLiveCategoriesAndDeliveryKeepsRunning() async throws {
+        let provider = ScriptedHealthProvider()
+        // heartRate's first page is full: its capture is backfill and hits
+        // the throttle. steps' stream is empty and drains to live at once.
+        provider.script[.heartRate] = [
+            page(
+                additions: [record(1, metric: .heartRate), record(2, metric: .heartRate)],
+                anchor: "h1",
+                isFull: true
+            ),
+        ]
+        let client = ScriptedSyncClient()
+        client.setFailAllDeliveries(true) // keep everything queued
+        let clock = ClockBox()
+        let engine = makeEngine(
+            provider: provider,
+            client: client,
+            clock: clock,
+            backfillHighWater: 2,
+            backfillLowWater: 1
+        )
+        _ = await enable(engine, metrics: [.steps, .heartRate])
+        await engine.waitUntilIdle()
+
+        // heartRate hit the high-water mark mid-metric and stopped reading;
+        // steps drained to the head and is live.
+        XCTAssertEqual(provider.changeQueries.filter { $0.metric == .heartRate }.count, 1)
+        XCTAssertEqual(engine.backfillPendingCount, 2)
+        let stepsCheckpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertEqual(stepsCheckpoint?.isCaughtUp, true)
+        let heartCheckpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .heartRate)
+        XCTAssertEqual(heartCheckpoint?.isCaughtUp, false)
+
+        // A wake while the throttle holds: the live category is still read,
+        // the throttled category's FRESH samples still flow (head read onto
+        // the live lane), and delivery keeps attempting the backlog.
+        provider.latestScript[.heartRate] = [record(100, metric: .heartRate)]
+        clock.advance(by: 61)
+        // Park the delivery so the pass's in-flight state is observable: a
+        // running pass with capture throttled must project delivering-backlog
+        // -- never a paused engine -- while the queue drains.
+        let gate = AsyncGate()
+        client.sendGate = gate
+        engine.foregroundCatchUp()
+        await waitFor("deliveringBacklog while a throttled pass is running") {
+            engine.isRunning && engine.displayStatus == .deliveringBacklog
+        }
+        gate.open()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(
+            provider.changeQueries.filter { $0.metric == .heartRate }.count,
+            1,
+            "the historical reading stays throttled"
+        )
+        XCTAssertGreaterThanOrEqual(
+            provider.changeQueries.filter { $0.metric == .steps }.count,
+            1,
+            "the live category keeps being read"
+        )
+        XCTAssertEqual(provider.latestQueries, [.heartRate], "fresh samples come from the head read")
+        let counts = try await lastOutbox.laneCounts()
+        XCTAssertEqual(counts.live, 1, "head-read samples ride the live lane")
+        XCTAssertEqual(client.sentChangeBatches.count, 2, "delivery attempted the backlog again")
+        XCTAssertEqual(
+            client.sentChangeBatches[1].changes.first?.sampleID,
+            record(100, metric: .heartRate).id,
+            "the fresh sample rides the first batch"
+        )
+    }
+    func testSickHeadReadDoesNotSkipLiveCategoriesOrDelivery() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script[.heartRate] = [
+            page(
+                additions: [record(1, metric: .heartRate), record(2, metric: .heartRate)],
+                anchor: "h1",
+                isFull: true
+            ),
+        ]
+        let client = ScriptedSyncClient()
+        client.setFailAllDeliveries(true)
+        let clock = ClockBox()
+        let engine = makeEngine(
+            provider: provider,
+            client: client,
+            clock: clock,
+            backfillHighWater: 2,
+            backfillLowWater: 1
+        )
+        _ = await enable(engine, metrics: [.steps, .heartRate])
+        await engine.waitUntilIdle()
+
+        // The throttled category's head read fails; the pass must keep
+        // going: the live category is still read and delivery still runs.
+        provider.latestError = HealthKitServiceError.unavailable
+        clock.advance(by: 61)
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        XCTAssertGreaterThanOrEqual(
+            provider.changeQueries.filter { $0.metric == .steps }.count,
+            1,
+            "a sick head-read must not skip the live category"
+        )
+        XCTAssertEqual(client.sentChangeBatches.count, 2, "the delivery phase still runs")
+    }
+
+    func testBackfillThrottleHoldsAboveLowWaterAndResumesAtLowWater() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script[.heartRate] = [
+            page(
+                additions: [record(1, metric: .heartRate), record(2, metric: .heartRate)],
+                anchor: "a1",
+                isFull: true
+            ),
+            page(additions: [record(3, metric: .heartRate)], anchor: "a2", isFull: false),
+        ]
+        let client = ScriptedSyncClient()
+        client.setFailAllDeliveries(true)
+        let engine = makeEngine(
+            provider: provider,
+            client: client,
+            backfillHighWater: 2,
+            backfillLowWater: 1
+        )
+        _ = await enable(engine, metrics: [.heartRate])
+        await engine.waitUntilIdle()
+
+        // The full page hit the high-water mark mid-metric: exactly one page
+        // read, its two events queued, none delivered.
+        XCTAssertEqual(provider.changeQueries.count, 1)
+        XCTAssertEqual(engine.backfillPendingCount, 2)
+
+        // Above the low-water mark the throttle holds — a trigger reads
+        // nothing further.
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+        XCTAssertEqual(provider.changeQueries.count, 1)
+
+        // Delivery drains to the low-water mark; reading resumes on the next
+        // pass and the tail page flips the category live.
+        await lastOutbox.remove(
+            eventIDs: [SyncChangeEvent.upsert(record(1, metric: .heartRate)).eventID]
+        )
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.count, 2, "reading resumed below the low-water mark")
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .heartRate)
+        XCTAssertEqual(checkpoint?.isCaughtUp, true)
+        XCTAssertEqual(engine.backfillPendingCount, 1, "only the undelivered backfill page remains")
+    }
+
+    func testBackgroundTaskFiredDrainsPendingBacklog() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script[.steps] = [page(additions: [record(1)], anchor: "a1", isFull: false)]
+        let client = ScriptedSyncClient()
+        client.setFailAllDeliveries(true)
+        let clock = ClockBox()
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        client.resetDelivery()
+        client.setFailAllDeliveries(false)
+        clock.advance(by: 61)
+
+        engine.backgroundTaskFired()
+        await engine.waitUntilIdle()
+
+        XCTAssertGreaterThan(client.sentChangeBatches.count, 0, "a BGTask pass drains pending delivery")
+    }
+    func testForegroundActivationDrainsPendingWork() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script[.steps] = [page(additions: [record(1)], anchor: "a1", isFull: false)]
+        let client = ScriptedSyncClient()
+        client.setFailAllDeliveries(true)
+        let clock = ClockBox()
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        client.resetDelivery()
+        client.setFailAllDeliveries(false)
+        clock.advance(by: 61)
+
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        XCTAssertGreaterThan(client.sentChangeBatches.count, 0)
+    }
+    func testActionablePrerequisiteStillReportsPaused() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        // The credential disappears: nothing can upload until the user
+        // acts, and the honest display state is paused — not "waiting".
+        await engine.configurationChanged(destination: endpoint, token: "   ", metrics: [.steps])
+        XCTAssertEqual(engine.mode, .paused(.credentialMissing))
+        XCTAssertEqual(engine.displayStatus, .paused(.credentialMissing))
+    }
+
+    func testCategoryChangeReregistersObserversForTheNewSet() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine, metrics: [.steps, .heartRate])
+        await engine.waitUntilIdle()
+        XCTAssertEqual(provider.observedMetrics.last, Set([.steps, .heartRate]))
+
+        await engine.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.observedMetrics.last, Set([.steps]))
+        XCTAssertTrue(provider.observedMetrics.count >= 2)
     }
 
     func testLockedStorageDefersInsteadOfPausing() async throws {
@@ -1902,6 +2164,26 @@ private final class ScriptedHealthProvider: HealthDataProviding {
         return pages[index]
     }
 
+    private(set) var latestQueries: [HealthMetric] = []
+    /// Records served by head-of-stream reads (fresh samples while the
+    /// category's historical reading is throttled).
+    var latestScript: [HealthMetric: [HealthRecord]] = [:]
+
+    /// When set, head-of-stream reads throw (sick head-read isolation).
+    var latestError: Error?
+
+    func latestRecords(
+        for metric: HealthMetric,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> [HealthRecord] {
+        latestQueries.append(metric)
+        if let latestError {
+            throw latestError
+        }
+        return latestScript[metric] ?? []
+    }
+
     func observeChanges(
         for metrics: Set<HealthMetric>,
         handler: @escaping @Sendable (ObserverCompletion) -> Void
@@ -1974,6 +2256,13 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
     var sendGate: AsyncGate?
     private var queuedFailure: DestinationClientError?
     private var failureForThisSend: DestinationClientError?
+    /// When set, every delivery fails (keeps a pass's captures queued while
+    /// later assertions inspect lane assignment and pending counts).
+    private var failAllDeliveries = false
+
+    func setFailAllDeliveries(_ value: Bool) {
+        performLocked { failAllDeliveries = value }
+    }
 
     func failNextDelivery(with error: DestinationClientError) {
         performLocked { queuedFailure = error }
@@ -1985,10 +2274,10 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         performLocked { storage.removeAll() }
     }
 
-    private func performLocked(_ body: () -> Void) {
+    private func performLocked<T>(_ body: () -> T) -> T {
         lock.lock()
-        body()
-        lock.unlock()
+        defer { lock.unlock() }
+        return body()
     }
 
     func send(
@@ -2022,6 +2311,12 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         if let gate = sendGate {
             await gate.enter()
             try Task.checkCancellation()
+        }
+        let failing = performLocked { () -> Bool in
+            failAllDeliveries
+        }
+        if failing {
+            throw DestinationClientError.connectionFailed
         }
         performLocked {
             failureForThisSend = queuedFailure
@@ -2077,6 +2372,15 @@ private final class ManualStubHealthProvider: HealthDataProviding {
         limit: Int
     ) async throws -> HealthChangePage {
         HealthChangePage(additions: [], deletions: [], anchorData: anchorData, isFull: false)
+    }
+
+
+    func latestRecords(
+        for metric: HealthMetric,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> [HealthRecord] {
+        []
     }
 
     func observeChanges(

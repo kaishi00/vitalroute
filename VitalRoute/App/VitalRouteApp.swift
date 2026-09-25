@@ -34,10 +34,17 @@ struct VitalRouteApp: App {
             BackgroundSyncTasks.scheduleNext(after: delay)
         }
 
+        // The stores the engine's launch restoration reads. Built here as
+        // locals so the restoration task below can capture them; the @State
+        // wrappers share the same instances.
+        let destinationStore = DestinationConfigurationStore()
+        let credentialStore = DestinationCredentialStore()
+        let selectionStore = ExportSelectionStore()
+
         _appModel = State(initialValue: VitalRouteModel(healthData: healthKitService))
-        _destinationStore = State(initialValue: DestinationConfigurationStore())
-        _credentialStore = State(initialValue: DestinationCredentialStore())
-        _selectionStore = State(initialValue: ExportSelectionStore())
+        _destinationStore = State(initialValue: destinationStore)
+        _credentialStore = State(initialValue: credentialStore)
+        _selectionStore = State(initialValue: selectionStore)
         _syncCoordinator = State(
             initialValue: ManualSyncCoordinator(
                 healthData: healthKitService,
@@ -50,6 +57,32 @@ struct VitalRouteApp: App {
 
         // Must happen before the app finishes launching.
         BackgroundSyncTasks.register(engine: engine)
+
+        // Launch restoration must not depend on a UI scene existing. iOS can
+        // relaunch a terminated app directly into the background — a
+        // HealthKit background-delivery wake or a scheduled BGTask — and no
+        // SwiftUI scene ever connects there, so `.task` modifiers on scene
+        // content never run. Restoration is what re-arms the observers and
+        // gives the engine its destination and credential; without it, a
+        // process death ended observation until the user happened to open
+        // the app, and background passes could see no configuration at all.
+        //
+        // This races the scene-driven configuration re-reports in the
+        // foreground; that is safe by construction — an identical re-report
+        // claims no generation, and `restoreOnLaunch`'s claim always wins
+        // ordering because it runs before the scene's onChange hooks can
+        // observe a settled store — so a duplicate pass is redundant work at
+        // worst, never lost work.
+        Task { @MainActor in
+            await destinationStore.loadSavedEndpoint()
+            await credentialStore.loadCredential(for: destinationStore.savedEndpoint)
+            await engine.prepareStorage()
+            await engine.restoreOnLaunch(
+                destination: destinationStore.savedEndpoint,
+                token: credentialStore.loadedToken,
+                metrics: selectionStore.selectedMetrics
+            )
+        }
     }
 
     nonisolated private static func syncDirectory() -> URL {
@@ -74,12 +107,11 @@ struct VitalRouteApp: App {
                 .task { await destinationStore.loadSavedEndpoint() }
                 // Re-reading the credential whenever the endpoint settles or
                 // changes keeps credential state namespaced to the active
-                // destination; it never triggers any network traffic.
+                // destination; it never triggers any network traffic. Engine
+                // launch restoration itself happens in `init`, independent
+                // of any scene.
                 .task(id: destinationStore.savedEndpoint) {
                     await credentialStore.loadCredential(for: destinationStore.savedEndpoint)
-                }
-                .task {
-                    await launchAutomaticSync()
                 }
                 .onChange(of: destinationStore.savedEndpoint) {
                     syncConfigurationWithEngine()
@@ -118,17 +150,6 @@ struct VitalRouteApp: App {
                     }
                 }
         }
-    }
-
-    /// App-level (not screen-level) restoration: prepares durable stores and
-    /// re-arms observers whenever automatic sync is enabled.
-    private func launchAutomaticSync() async {
-        await autoSyncEngine.prepareStorage()
-        await autoSyncEngine.restoreOnLaunch(
-            destination: destinationStore.savedEndpoint,
-            token: credentialStore.loadedToken,
-            metrics: selectionStore.selectedMetrics
-        )
     }
 
     private func syncConfigurationWithEngine() {

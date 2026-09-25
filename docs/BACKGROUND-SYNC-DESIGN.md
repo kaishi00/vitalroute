@@ -268,3 +268,72 @@ addition replay (tombstone prevents resurrection) → final database
 inspection. Physical-device validation for real background delivery is a
 separate checklist: a simulator cannot prove background wakes, and simulator
 builds strip the device-only HealthKit entitlements.
+
+## 7. Background wake and live-vs-backfill priorities
+
+Build 5 exposed two structural problems in the automatic path: background
+relaunches never restored the engine, and a single FIFO queue let a deep
+historical backfill delay — then fully block — newly arriving samples.
+
+### 7.1 Launch restoration is scene-independent
+
+`restoreOnLaunch` (which re-arms `HKObserverQuery`s + background delivery
+and gives the engine its destination/token/categories) runs from a task
+spawned in `VitalRouteApp.init`, not from a scene `.task`. iOS can relaunch
+a terminated app directly into the background — a HealthKit wake or a
+scheduled BGTask — and no SwiftUI scene ever connects there, so
+scene-bound `.task` modifiers never run. Without this, any process death
+ended observation until the user happened to reopen the app, and BGTask
+passes found an engine with no configuration and delivered nothing.
+
+The observer remains the wake signal for new data; anchored change queries
+remain the source of truth; BGAppRefreshTask stays the secondary
+continuation/retry mechanism. `.immediate` background delivery is requested
+for every enabled type. Force-quitting the app still suppresses background
+relaunch — that is iOS policy, not something the app can opt out of.
+
+### 7.2 Two lanes: live first, backfill behind
+
+Every outbox event carries a lane:
+
+- **live** — pages read at the head of a category's stream (the category
+  has drained once, recorded in the persisted checkpoint as `isCaughtUp`).
+- **backfill** — pages of a category still working through its historical
+  window (bootstrap, or an interrupted deep catch-up).
+
+Delivery always takes live events first (insertion order within each lane),
+topping a batch up with backfill events, so a new sample rides the first
+batch of the next pass even while years of history are draining. The lane
+is encoded in the outbox file name, leaving the wire format untouched;
+pre-lane files read as backfill.
+
+The per-category `isCaughtUp` flag lives on the checkpoint: a read that
+returns a non-full page has reached the head of the stream, and everything
+from that page on is live. A re-bootstrapped scope (deeper window, new
+destination, corrupted anchor) starts as backfill again.
+
+### 7.3 Backpressure with hysteresis, capture only
+
+Backfill *reading* pauses when the backfill queue reaches the high-water
+mark (6,000) and resumes below the low-water mark (1,500) — the gap
+prevents oscillation around a single threshold. Delivery is never
+throttled: every pass drains up to `maxDeliveryBatchesPerRun` batches
+regardless of capture state. Only the outbox's total capacity still pauses
+capture outright (storage safety), and even then delivery continues.
+
+A throttled category is not frozen: each pass also reads the head of its
+stream (newest additions, no anchor) onto the live lane without touching
+the checkpoint, so newly arriving samples for a still-backfilling category
+reach the destination while its history waits. The later unthrottled
+anchored read re-reports those additions (deduped by event identity, and
+the receiver answers idempotently) and recovers the deletions.
+
+### 7.4 Honest status
+
+`AutomaticSyncEngine.displayStatus` projects the internal mode onto what
+the user should see: off, idle, syncing, catching up (backfill),
+delivering backlog, waiting for retry, paused (actionable). Capacity
+backpressure and throttling are never reported as a paused engine while
+delivery is active — the queue draining is exactly what the status names.
+"Next attempt (requested)" labels a BGTask request, which iOS schedules at
+its own discretion.
