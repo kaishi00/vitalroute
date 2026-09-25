@@ -55,6 +55,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.milim.vitalroute
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_NAME: VitalRoute
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"

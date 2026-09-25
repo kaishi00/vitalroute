@@ -134,15 +134,13 @@ private final class StubHealthDataProvider: HealthDataProviding {
         return records.filter { metrics.contains($0.metric) }
     }
 
-    func exportRecords(
-        since startDate: Date,
-        through endDate: Date,
-        metrics: Set<HealthMetric>
-    ) async throws -> HealthExportResult {
-        HealthExportResult(
-            records: records.filter { metrics.contains($0.metric) },
-            truncatedMetrics: []
-        )
+    func exportPage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthExportPage {
+        HealthExportPage(records: [], anchorData: anchorData, isFull: false)
     }
 
     func changePage(

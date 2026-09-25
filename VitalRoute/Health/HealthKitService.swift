@@ -135,79 +135,36 @@ final class HealthKitService: HealthDataProviding {
         return records.sorted { $0.startDate > $1.startDate }
     }
 
-    func exportRecords(
-        since startDate: Date,
-        through endDate: Date,
-        metrics: Set<HealthMetric>
-    ) async throws -> HealthExportResult {
+    func exportPage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthExportPage {
         guard isAvailable else {
             throw HealthKitServiceError.unavailable
         }
-        guard !metrics.isEmpty else {
-            throw HealthKitServiceError.noMetricsRequested
-        }
-
+        let anchor = try Self.deserialize(anchorData)
+        // Fixed, open-ended predicate: an anchor is only valid with the
+        // exact predicate that produced it, so the window start is frozen
+        // per cursor and there is no moving end date.
         let predicate = HKQuery.predicateForSamples(
-            withStart: startDate,
-            end: endDate,
+            withStart: windowStart,
+            end: nil,
             options: [.strictStartDate]
         )
-        let store = healthStore
-
-        // One anchored paging loop per selected metric; concurrency is
-        // bounded by the metric count, and each loop is bounded by
-        // SyncLimits.maxPagesPerMetric pages.
-        let storeResults = try await withThrowingTaskGroup(
-            of: (HealthMetric, (records: [HealthRecord], truncated: Bool)).self
-        ) { group in
-            for metric in HealthMetric.allCases where metrics.contains(metric) {
-                group.addTask {
-                    (metric, try await Self.pageAllRecords(
-                        for: metric,
-                        using: store,
-                        predicate: predicate
-                    ))
-                }
-            }
-            var results: [HealthMetric: (records: [HealthRecord], truncated: Bool)] = [:]
-            for try await (metric, result) in group {
-                results[metric] = result
-            }
-            return results
-        }
-
-        var records: [HealthRecord] = []
-        var truncatedMetrics: Set<HealthMetric> = []
-        for metric in HealthMetric.allCases where metrics.contains(metric) {
-            guard let result = storeResults[metric] else { continue }
-            records.append(contentsOf: result.records)
-            if result.truncated {
-                truncatedMetrics.insert(metric)
-            }
-        }
-
-        return HealthExportResult(
-            records: records.sorted { ($0.startDate, $0.id.uuidString) < ($1.startDate, $1.id.uuidString) },
-            truncatedMetrics: truncatedMetrics
+        let page = try await Self.queryAnchorPage(
+            for: metric,
+            using: healthStore,
+            predicate: predicate,
+            anchor: anchor,
+            limit: limit
         )
-    }
-
-    /// Nonisolated so the task-group children neither hop through the main
-    /// actor nor capture the isolated service; HKHealthStore is thread-safe.
-    private nonisolated static func pageAllRecords(
-        for metric: HealthMetric,
-        using healthStore: HKHealthStore,
-        predicate: NSPredicate
-    ) async throws -> (records: [HealthRecord], truncated: Bool) {
-        try await RecordPager.collect(maxPages: SyncLimits.maxPagesPerMetric) { anchor in
-            try await Self.queryAnchorPage(
-                for: metric,
-                using: healthStore,
-                predicate: predicate,
-                anchor: anchor,
-                limit: SyncLimits.healthQueryPageSize
-            )
-        }
+        return HealthExportPage(
+            records: page.records,
+            anchorData: Self.serialize(page.nextAnchor),
+            isFull: page.isFull
+        )
     }
 
     /// Nonisolated so the task-group children neither hop through the main

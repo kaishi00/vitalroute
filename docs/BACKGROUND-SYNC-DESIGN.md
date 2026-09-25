@@ -200,6 +200,31 @@ time as their interval; the receiver's tombstone stores it for audit.
   stops background delivery until the next launch; the app never implies
   guaranteed or immediate delivery.
 
+### Resumable backfill for large histories (both paths)
+
+A deep window — especially "All records" — can hold far more samples than
+one execution should read. Both paths now converge automatically instead of
+failing on an oversized read:
+
+- **Manual sync** reads each category as a stream of anchored 500-record
+  addition pages with a FIXED, open-ended predicate
+  (`start >= windowStart`, no end date — the same anchor-validity rule as
+  scopes). A page is delivered in batches and acknowledged before its
+  cursor is persisted, so an acknowledged page can never be lost and an
+  undelivered one is re-read on the next sync (the receiver dedupes).
+  Cursors are stored per (destination, category, window start): deepening
+  the depth mints a fresh cursor (a real backfill of older data),
+  shallowing leaves deeper cursors untouched on disk, and unchanged depth
+  resumes with no re-reading. A per-run page budget bounds one tap; hitting
+  it reports a resumable *backfill in progress* state, never a dead-end
+  failure. Deleted samples are deliberately not part of the manual stream;
+  they belong to the change stream below.
+- **Automatic sync** chains passes: a capture that ends a category on a
+  full page re-arms an internal catch-up pass that resumes from the
+  persisted checkpoint, so one app-open converges a deep backfill pass
+  after pass. Capacity backpressure and delivery backoff still bound the
+  chain naturally.
+
 ## 5. Receiver contract v2 (deletions)
 
 Same endpoint, explicit new payload version. A v1-only receiver rejects a v2

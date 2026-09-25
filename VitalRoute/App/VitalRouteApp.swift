@@ -42,6 +42,7 @@ struct VitalRouteApp: App {
             initialValue: ManualSyncCoordinator(
                 healthData: healthKitService,
                 client: destinationClient,
+                stateStore: stateStore,
                 workGate: sharedGate
             )
         )

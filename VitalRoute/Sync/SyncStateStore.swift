@@ -28,6 +28,30 @@ struct CategoryCheckpoint: Codable, Equatable {
     let updatedAt: Date
 }
 
+/// A manual ("Sync Now") export cursor: how far the additions-only export
+/// for one (destination, category, window start) identity has been read AND
+/// acknowledged. The window start is part of the identity because an anchor
+/// is only valid with the exact predicate that produced it — a deeper
+/// configured history mints a fresh cursor rather than moving this one, and
+/// a shallower choice simply leaves an older, deeper cursor unused on disk
+/// (nothing captured is ever discarded). Deletions are not tracked here;
+/// they belong to the change stream the automatic engine owns.
+struct ManualExportCursor: Codable, Equatable {
+    let destination: String
+    let metric: HealthMetric
+    let windowStart: Date
+    var anchorData: Data?
+    var updatedAt: Date
+
+    var storageKey: String {
+        ManualExportCursor.key(destination: destination, metric: metric, windowStart: windowStart)
+    }
+
+    static func key(destination: String, metric: HealthMetric, windowStart: Date) -> String {
+        "\(metric.rawValue)|\(Int(windowStart.timeIntervalSince1970))|\(destination)"
+    }
+}
+
 /// Persisted retry/backoff bookkeeping. Counts and timestamps only.
 struct DeliveryRetryState: Codable, Equatable {
     var consecutiveFailures = 0
@@ -120,6 +144,72 @@ actor SyncStateStore {
         for metric in HealthMetric.allCases {
             clearCheckpoint(for: metric)
         }
+    }
+
+    // MARK: - Manual export windows
+
+    private var manualWindowsURL: URL { directory.appendingPathComponent("manual-windows.json") }
+
+    /// The FIXED window start for one (category, depth, destination) manual
+    /// identity — the exact rule automatic-sync scopes follow: the window is
+    /// minted once from the candidate and then never moves, so a cursor
+    /// stays valid tap after tap regardless of the wall clock. A candidate
+    /// that reaches DEEPER than the minted window (the user deepened the
+    /// history) re-mints it, backfilling the older data; anything at or
+    /// after the minted start reuses it (unchanged depth resumes, a
+    /// shallower depth is simply a different identity).
+    func manualWindowStart(
+        destination: String,
+        metric: HealthMetric,
+        depth: BackfillDepth,
+        candidate: Date
+    ) throws -> Date {
+        try ensurePrepared()
+        var windows = loadManualWindows()
+        let key = "\(metric.rawValue)|\(depth.rawValue)|\(destination)"
+        if let minted = windows[key], candidate >= minted {
+            return minted
+        }
+        windows[key] = candidate
+        let data = try encoder.encode(windows)
+        try atomicWrite(data, to: manualWindowsURL)
+        return candidate
+    }
+
+    private func loadManualWindows() -> [String: Date] {
+        guard let data = try? Data(contentsOf: manualWindowsURL) else {
+            return [:]
+        }
+        return (try? decoder.decode([String: Date].self, from: data)) ?? [:]
+    }
+
+    // MARK: - Manual export cursors
+
+    private var manualCursorsURL: URL { directory.appendingPathComponent("manual-cursors.json") }
+
+    /// All persisted manual export cursors, keyed by
+    /// `ManualExportCursor.storageKey`.
+    func loadManualCursors() -> [String: ManualExportCursor] {
+        guard let data = try? Data(contentsOf: manualCursorsURL) else {
+            return [:]
+        }
+        return (try? decoder.decode([String: ManualExportCursor].self, from: data)) ?? [:]
+    }
+
+    func manualCursor(destination: String, metric: HealthMetric, windowStart: Date) -> ManualExportCursor? {
+        loadManualCursors()[ManualExportCursor.key(destination: destination, metric: metric, windowStart: windowStart)]
+    }
+
+    /// Persists one cursor, preserving the others. Call only after the page
+    /// the anchor came from has been delivered and acknowledged; write
+    /// failures throw so the caller can stop advancing on a cursor it could
+    /// not save.
+    func saveManualCursor(_ cursor: ManualExportCursor) throws {
+        try ensurePrepared()
+        var cursors = loadManualCursors()
+        cursors[cursor.storageKey] = cursor
+        let data = try encoder.encode(cursors)
+        try atomicWrite(data, to: manualCursorsURL)
     }
 
     func loadRetryState() -> DeliveryRetryState {

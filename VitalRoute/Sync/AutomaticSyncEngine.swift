@@ -715,6 +715,10 @@ final class AutomaticSyncEngine {
                 lastStatusMessage = "Automatic sync stopped early this run; pending work is kept and will resume."
             }
         } catch {
+            // A failed pass must not chain into a hot retry loop: the
+            // scheduled retry (with backoff) owns resumption. Clearing the
+            // absorbed trigger ends the chain here.
+            needsCatchUp = false
             await handlePassFailure(error, generation: generation)
         }
         await refreshPendingCount()
@@ -852,7 +856,7 @@ final class AutomaticSyncEngine {
                 anchorData = nil
             }
 
-            for _ in 0..<BackgroundSyncLimits.pagesPerCategoryPerPass {
+            for pageLoopIndex in 0..<BackgroundSyncLimits.pagesPerCategoryPerPass {
                 try Task.checkCancellation()
                 let page: HealthChangePage
                 do {
@@ -891,6 +895,15 @@ final class AutomaticSyncEngine {
                 // A full page means more changes may follow; the page budget
                 // bounds this run and the persisted checkpoint lets the next
                 // run resume mid-stream.
+                //
+                // Ending on a full page also re-arms the catch-up chain: a
+                // deep backfill (All records) then converges pass after pass
+                // in one app-open instead of waiting for the next external
+                // trigger. Capacity pauses and delivery backoff still bound
+                // the chain naturally.
+                if pageLoopIndex == BackgroundSyncLimits.pagesPerCategoryPerPass - 1 {
+                    needsCatchUp = true
+                }
             }
 
             guard isCurrent(generation) else { return }

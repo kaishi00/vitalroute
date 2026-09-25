@@ -16,7 +16,6 @@
 		2148028360D86F2731CCE1CD /* ExportSelectionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC2042C15CF56303A636F4B9 /* ExportSelectionStoreTests.swift */; };
 		21B9087824E6EE929687EAB5 /* RecordPager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C83042FFA762A22B446B6F75 /* RecordPager.swift */; };
 		29378BAB4D04A80C59A3AEFC /* SyncAcknowledgment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1867D25051C387367F3761B0 /* SyncAcknowledgment.swift */; };
-		2DA23A4CD6C6B73062309073 /* RecordPagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA9F2B93BF30AD5C7FBDD3C2 /* RecordPagerTests.swift */; };
 		3764D99AFB5EC1848AFC1AF8 /* VitalRouteModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 711E1DD1FC2624EA1E6E61DA /* VitalRouteModel.swift */; };
 		455CFE7448618721CD3C731B /* SyncPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */; };
 		459D3293B03D01AD0B0246C0 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DBB21975C9F05A1352B6ADE3 /* Assets.xcassets */; };
@@ -113,7 +112,6 @@
 		D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthMetricTests.swift; sourceTree = "<group>"; };
 		D43A57F7EF0A32938F96F1A9 /* ManualSyncCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualSyncCoordinatorTests.swift; sourceTree = "<group>"; };
 		D54B37CCD5BA917FB54C8B85 /* VitalRoute.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VitalRoute.entitlements; sourceTree = "<group>"; };
-		DA9F2B93BF30AD5C7FBDD3C2 /* RecordPagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordPagerTests.swift; sourceTree = "<group>"; };
 		DBB21975C9F05A1352B6ADE3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DCF0F120103661DDE2DB95CA /* HealthMetric.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthMetric.swift; sourceTree = "<group>"; };
 		E5DEE3382F095688AA2155C7 /* AutomaticSyncEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomaticSyncEngine.swift; sourceTree = "<group>"; };
@@ -292,7 +290,6 @@
 				D43A57F7EF0A32938F96F1A9 /* ManualSyncCoordinatorTests.swift */,
 				08B7BA635E61AD44B5356799 /* OutboxAndStateStoreTests.swift */,
 				B8D6728F7FF093E7539BB03E /* ReceiverIntegrationTests.swift */,
-				DA9F2B93BF30AD5C7FBDD3C2 /* RecordPagerTests.swift */,
 				F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */,
 				33CDAA387B2A9A9D8665794F /* VitalRouteModelTests.swift */,
 			);
@@ -438,7 +435,6 @@
 				D090DCDCDAB54ED48548850C /* ManualSyncCoordinatorTests.swift in Sources */,
 				BCF027AF9A0C63CB272F32CE /* OutboxAndStateStoreTests.swift in Sources */,
 				B5D717EE2076416171A0BA75 /* ReceiverIntegrationTests.swift in Sources */,
-				2DA23A4CD6C6B73062309073 /* RecordPagerTests.swift in Sources */,
 				455CFE7448618721CD3C731B /* SyncPayloadTests.swift in Sources */,
 				876E427E9EDA2567BB1AF393 /* VitalRouteModelTests.swift in Sources */,
 			);

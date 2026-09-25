@@ -1,13 +1,42 @@
 import Foundation
 import Observation
 
-/// Bounds for one manual sync. Query paging and upload batching keep both
-/// HealthKit work and request payloads bounded; hitting a bound is surfaced
-/// as truncation, never as silent success.
+/// Bounds for one manual sync. Upload batching and per-page queries keep
+/// both HealthKit work and request payloads bounded; a run that reaches a
+/// budget is reported as a resumable backfill in progress, never as a
+/// dead-end failure, because the cursor it saved lets the next sync
+/// continue exactly where this one stopped.
 enum SyncLimits {
     static let recordsPerUploadBatch = 200
     static let healthQueryPageSize = 500
-    static let maxPagesPerMetric = 40
+    /// Pages per category one manual run may read. Generous on purpose —
+    /// memory is bounded by the page size, not the total, and the run can
+    /// be cancelled — but finite, so one tap cannot spin unbounded. 400
+    /// pages × 500 records = 200,000 records per category per run.
+    static let manualPagesPerMetricRun = 400
+    /// Wall-clock bound for one manual run, so a slow link cannot hold the
+    /// shared work gate (background sync waits behind it) for unbounded
+    /// minutes. Hitting it reports the same resumable backfill state as the
+    /// page budget; progress is saved either way.
+    static let maxManualRunSeconds: TimeInterval = 180
+}
+
+/// Manual-path failures that need stable, honest user copy.
+enum ManualSyncError: LocalizedError, Equatable {
+    /// The source kept returning a full page without advancing the cursor;
+    /// continuing would re-send the same page forever, so the run stops
+    /// with delivered work intact.
+    case cursorCannotAdvance
+    case progressNotSaved
+
+    var errorDescription: String? {
+        switch self {
+        case .cursorCannotAdvance:
+            return "Sync stopped: this history could not be read past the last delivered page. The records already delivered were accepted; try a shorter history depth."
+        case .progressNotSaved:
+            return "Sync stopped: progress could not be saved on this device. The records already delivered were accepted; try again."
+        }
+    }
 }
 
 /// Everything one operation needs, captured when it starts so configuration
@@ -17,8 +46,6 @@ struct SyncPlan: Equatable {
     let endpoint: URL
     let bearerToken: String
     let metrics: [HealthMetric]
-    let windowStart: Date
-    let windowEnd: Date
 }
 
 /// Live counts for progress and outcome reporting. Nothing here is health
@@ -45,7 +72,11 @@ struct SyncSummary: Equatable {
 
 enum SyncResult: Equatable {
     case completed
-    case truncated(metrics: Set<HealthMetric>)
+    /// The run delivered and acknowledged everything it read, but at least
+    /// one category still has history pending behind the per-run page
+    /// budget. Progress is saved; the next sync resumes from the cursor —
+    /// this is a state to continue, not a failure to fix.
+    case backfilling(metrics: Set<HealthMetric>)
     case failed(message: String)
     case cancelled
 }
@@ -61,6 +92,8 @@ enum SyncPhase: Equatable {
     case idle
     case authorizing
     case readingHealthData
+    /// `totalBatches` is 0 while streaming pages (the total is not known
+    /// until the end); the progress copy renders that as "batch N".
     case uploading(batch: Int, totalBatches: Int)
 }
 
@@ -74,8 +107,16 @@ struct LastSyncInfo: Equatable, Codable {
 }
 
 /// Drives foreground, user-initiated syncs: authorize for the selected
-/// categories, read the configured history window, upload in batches, and report
-/// honest progress, partial, truncated, and cancelled states.
+/// categories, read from the configured history window, upload in batches,
+/// and report honest progress, partial, backfilling, and cancelled states.
+///
+/// Reading is resumable: each category advances through additions-only
+/// anchored pages, and the page's cursor is persisted only after its
+/// records have been acknowledged. A large historical window therefore
+/// converges across successive syncs — deepening the configured history
+/// starts a fresh backfill that continues automatically run after run
+/// instead of failing on an oversized read. Deletions are not part of the
+/// manual path; they belong to the automatic change stream.
 ///
 /// The coordinator never starts work on its own — saving configuration,
 /// opening the app, or refreshing the dashboard must not upload anything.
@@ -85,6 +126,7 @@ final class ManualSyncCoordinator {
     @ObservationIgnored private let healthData: any HealthDataProviding
     @ObservationIgnored private let client: any DestinationClient
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let stateStore: SyncStateStore
     @ObservationIgnored private static let lastSyncStorageKey = "sync.lastSuccessful"
 
     private(set) var phase: SyncPhase = .idle
@@ -101,11 +143,13 @@ final class ManualSyncCoordinator {
     init(
         healthData: any HealthDataProviding,
         client: any DestinationClient,
+        stateStore: SyncStateStore,
         defaults: UserDefaults = .standard,
         workGate: SyncWorkGate = SyncWorkGate()
     ) {
         self.healthData = healthData
         self.client = client
+        self.stateStore = stateStore
         self.defaults = defaults
         self.workGate = workGate
         lastSuccessfulSync = Self.loadLastSync(from: defaults)
@@ -114,7 +158,7 @@ final class ManualSyncCoordinator {
     /// Observable in-flight state.
     ///
     /// `syncTask` is observation-ignored, so a computed `isSyncing` over it
-    /// registers no Observation dependency and a view reading it never
+    /// registers no Observation dependency; a view reading it never
     /// updates. That matters now that a manual sync can wait behind an
     /// automatic pass: the wait is real, and the screen has to show it and
     /// offer the cancel.
@@ -129,6 +173,7 @@ final class ManualSyncCoordinator {
         }
 
         let plan: SyncPlan
+        let windowStart: Date
         do {
             let trimmedToken = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !trimmedToken.isEmpty else {
@@ -140,17 +185,16 @@ final class ManualSyncCoordinator {
                 recordPreflightFailure("Select at least one category in Health Data before syncing.")
                 return
             }
-            // The manual export window follows the same configured backfill
-            // depth as automatic sync's scopes.
-            let windowStart = BackfillDepth.stored(in: defaults)
-                .windowStart(from: now, calendar: Calendar.current)
             plan = SyncPlan(
                 endpoint: configuration.endpoint,
                 bearerToken: trimmedToken,
-                metrics: HealthMetric.allCases.filter { metrics.contains($0) },
-                windowStart: windowStart,
-                windowEnd: now
+                metrics: HealthMetric.allCases.filter { metrics.contains($0) }
             )
+            // Captured with the plan so the window start is one decision:
+            // configuration captured at start time, not whenever the gate
+            // hands over.
+            windowStart = BackfillDepth.stored(in: defaults)
+                .windowStart(from: now, calendar: Calendar.current)
         } catch {
             recordPreflightFailure(
                 "The saved destination is not usable: \(error.localizedDescription)"
@@ -178,7 +222,7 @@ final class ManualSyncCoordinator {
             // (query + upload) holds the gate.
             do {
                 try await gate.run { @MainActor [weak self] () throws -> Void in
-                    try await self?.runSync(plan: plan)
+                    try await self?.runSync(plan: plan, startedAt: startedAt, windowStart: windowStart)
                 }
             } catch is CancellationError {
                 // Cancelled while queued: `runSync` was never entered, so it
@@ -212,8 +256,7 @@ final class ManualSyncCoordinator {
         )
     }
 
-    private func runSync(plan: SyncPlan) async throws {
-        let startedAt = Date()
+    private func runSync(plan: SyncPlan, startedAt: Date, windowStart: Date) async throws {
         var summary = SyncSummary()
         currentSummary = summary
         phase = .authorizing
@@ -221,45 +264,53 @@ final class ManualSyncCoordinator {
         do {
             try await healthData.requestReadAuthorization(for: Set(plan.metrics))
 
-            phase = .readingHealthData
-            let export = try await healthData.exportRecords(
-                since: plan.windowStart,
-                through: plan.windowEnd,
-                metrics: Set(plan.metrics)
-            )
-            summary.recordsFound = export.records.count
-            summary.recordsByMetric = Dictionary(grouping: export.records, by: \.metric).mapValues(\.count)
-            currentSummary = summary
-
-            let batches = export.records.batched(into: SyncLimits.recordsPerUploadBatch)
-            summary.batchesPlanned = batches.count
-            currentSummary = summary
-
+            // The depth decides the CANDIDATE window; the store freezes the
+            // actual window per (category, depth, destination) on first
+            // mint, so cursors stay valid tap after tap regardless of the
+            // wall clock — the same fixed-predicate rule as scopes.
+            let depth = BackfillDepth.stored(in: defaults)
+            let destination = plan.endpoint.absoluteString
             let authorization = DestinationAuthorization(bearerToken: plan.bearerToken)
-            for (index, batch) in batches.enumerated() {
+            // The budget starts when the gate hands over, not when the tap
+            // happened: a long wait behind an automatic pass must not
+            // consume the reading budget.
+            let runDeadline = Date().addingTimeInterval(SyncLimits.maxManualRunSeconds)
+
+            phase = .readingHealthData
+            var backfilling: Set<HealthMetric> = []
+            for metric in plan.metrics {
                 try Task.checkCancellation()
-                phase = .uploading(batch: index + 1, totalBatches: batches.count)
-                let payload = SyncPayload(records: batch)
-                let acknowledgment = try await client.send(
-                    payload,
-                    to: plan.endpoint,
-                    authorization: authorization
-                )
-                summary.batchesDelivered += 1
-                summary.acceptedRecords += acknowledgment.accepted
-                summary.duplicateRecords += acknowledgment.duplicates
-                currentSummary = summary
+                let metricWindow: Date
+                do {
+                    metricWindow = try await stateStore.manualWindowStart(
+                        destination: destination,
+                        metric: metric,
+                        depth: depth,
+                        candidate: windowStart
+                    )
+                } catch {
+                    throw ManualSyncError.progressNotSaved
+                }
+                if try await syncMetric(
+                    metric, plan: plan, destination: destination,
+                    windowStart: metricWindow, authorization: authorization,
+                    runDeadline: runDeadline,
+                    summary: &summary
+                ) {
+                    backfilling.insert(metric)
+                }
             }
 
             let outcome = SyncOutcome(
                 startedAt: startedAt,
                 finishedAt: Date(),
-                result: export.isTruncated ? .truncated(metrics: export.truncatedMetrics) : .completed,
+                result: backfilling.isEmpty ? .completed : .backfilling(metrics: backfilling),
                 summary: summary
             )
             lastOutcome = outcome
-            // A truncated sync delivered only part of the window, so it must
-            // not update the "last successful sync" marker.
+            // A backfill still in progress delivered only part of the
+            // history, so it must not update the "last successful sync"
+            // marker; its progress lives in the saved cursors.
             if case .completed = outcome.result {
                 let info = LastSyncInfo(
                     finishedAt: outcome.finishedAt,
@@ -287,9 +338,133 @@ final class ManualSyncCoordinator {
         }
     }
 
+    /// Streams one category: anchored addition pages, each page delivered
+    /// and acknowledged before its cursor is saved. Returns true when the
+    /// per-run page budget ended the category with more history pending —
+    /// a resumable backfill state, not an error.
+    private func syncMetric(
+        _ metric: HealthMetric,
+        plan: SyncPlan,
+        destination: String,
+        windowStart: Date,
+        authorization: DestinationAuthorization,
+        runDeadline: Date,
+        summary: inout SyncSummary
+    ) async throws -> Bool {
+        let savedCursor = await stateStore.manualCursor(
+            destination: destination, metric: metric, windowStart: windowStart
+        )
+        var anchorData = savedCursor?.anchorData
+
+        for pageRead in 0..<SyncLimits.manualPagesPerMetricRun {
+            try Task.checkCancellation()
+            if Date() >= runDeadline {
+                // Out of wall clock: same resumable state as the page
+                // budget, with everything acknowledged so far checkpointed.
+                phase = .readingHealthData
+                return true
+            }
+            let page: HealthExportPage
+            do {
+                page = try await healthData.exportPage(
+                    for: metric,
+                    since: anchorData,
+                    windowStart: windowStart,
+                    limit: SyncLimits.healthQueryPageSize
+                )
+            } catch let error as HealthKitServiceError where error == .corruptedAnchor && anchorData != nil {
+                // The saved cursor is unreadable: drop it and re-read the
+                // window from its start, exactly like the change stream
+                // rebuilds its checkpoint. The receiver dedupes everything
+                // that was already acknowledged.
+                anchorData = nil
+                do {
+                    try await stateStore.saveManualCursor(ManualExportCursor(
+                        destination: destination,
+                        metric: metric,
+                        windowStart: windowStart,
+                        anchorData: nil,
+                        updatedAt: Date()
+                    ))
+                } catch {
+                    throw ManualSyncError.progressNotSaved
+                }
+                continue
+            }
+
+            summary.recordsFound += page.records.count
+            summary.recordsByMetric[metric, default: 0] += page.records.count
+            currentSummary = summary
+
+            // Deliver this page before its cursor moves: an acknowledged
+            // page can never be lost, and an undelivered one is re-read on
+            // the next sync (the receiver keeps one copy of each record).
+            let batches = page.records.batched(into: SyncLimits.recordsPerUploadBatch)
+            summary.batchesPlanned += batches.count
+            for batch in batches {
+                try Task.checkCancellation()
+                phase = .uploading(
+                    batch: summary.batchesDelivered + 1,
+                    totalBatches: 0 // streaming: the total is not known yet
+                )
+                let payload = SyncPayload(records: batch)
+                let acknowledgment = try await client.send(
+                    payload,
+                    to: plan.endpoint,
+                    authorization: authorization
+                )
+                summary.batchesDelivered += 1
+                summary.acceptedRecords += acknowledgment.accepted
+                summary.duplicateRecords += acknowledgment.duplicates
+                currentSummary = summary
+            }
+
+            // A full page that did not advance the cursor would repeat
+            // forever; stop honestly with the delivered work intact.
+            if page.isFull, page.anchorData == anchorData, !page.records.isEmpty {
+                throw ManualSyncError.cursorCannotAdvance
+            }
+
+            // Advance the cursor only after every batch of this page was
+            // acknowledged. A failure above leaves the previous cursor, so
+            // the next sync resumes at this page's start.
+            anchorData = page.anchorData
+            do {
+                try await stateStore.saveManualCursor(ManualExportCursor(
+                    destination: destination,
+                    metric: metric,
+                    windowStart: windowStart,
+                    anchorData: anchorData,
+                    updatedAt: Date()
+                ))
+            } catch {
+                // Stopping without saving is the safe direction: the next
+                // sync re-reads this page and the receiver dedupes.
+                throw ManualSyncError.progressNotSaved
+            }
+
+            if !page.isFull {
+                // Caught up: the category has no more history pending.
+                phase = .readingHealthData
+                return false
+            }
+            if pageRead == SyncLimits.manualPagesPerMetricRun - 1 {
+                // Budget exhausted with more history pending: resumable
+                // backfill state for this category.
+                phase = .readingHealthData
+                return true
+            }
+        }
+        // Unreachable: the loop returns from both exits above.
+        return false
+    }
+
     /// Maps errors to user-facing text. Messages never contain the endpoint,
     /// token, or health-record contents.
     private static func failureMessage(for error: Error) -> String {
+        if let manualError = error as? ManualSyncError {
+            return manualError.errorDescription ?? "Sync stopped."
+        }
         if let clientError = error as? DestinationClientError {
             return clientError.localizedDescription
         }
