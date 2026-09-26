@@ -343,13 +343,15 @@ struct OverviewView: View {
     private var syncProgressText: String {
         switch syncCoordinator.phase {
         case .idle:
-            "Preparing…"
+            return "Preparing…"
         case .authorizing:
-            "Confirming Apple Health access…"
+            return "Confirming Apple Health access…"
         case .readingHealthData:
-            "Reading \(backfillStore.depth == .allRecords ? "all records" : "the \(backfillStore.depth.label.lowercased())") of selected categories…"
+            return "Reading \(backfillStore.depth == .allRecords ? "all records" : "the \(backfillStore.depth.label.lowercased())") of selected categories…"
         case .uploading(let batch, let totalBatches):
-            "Uploading batch \(batch) of \(totalBatches) · \(syncCoordinator.currentSummary.deliveredRecords) records acknowledged"
+            // totalBatches is 0 while pages stream (the total is unknown).
+            let scope = totalBatches > 0 ? "batch \(batch) of \(totalBatches)" : "batch \(batch)"
+            return "Uploading \(scope) · \(syncCoordinator.currentSummary.deliveredRecords) records acknowledged"
         }
     }
 
@@ -363,9 +365,9 @@ struct OverviewView: View {
                 return "Sync finished: no records were found in the window for the selected categories. Nothing was sent."
             }
             return "Sync finished: \(outcome.summary.deliveredRecords) records acknowledged (\(outcome.summary.acceptedRecords) new, \(outcome.summary.duplicateRecords) already present) — \(outcome.summary.breakdownText)."
-        case .truncated(let metrics):
+        case .backfilling(let metrics):
             let names = metrics.map(\.displayName).sorted().joined(separator: ", ")
-            return "Sync stopped early: \(outcome.summary.deliveredRecords) records were acknowledged, but the \(names) window was too large to read completely. Narrow the selection or sync again — this was not a complete export."
+            return "History backfill in progress for \(names): \(outcome.summary.deliveredRecords) records acknowledged in this run and progress saved. Tap Sync Now to continue where it left off."
         case .failed(let message):
             let partial = outcome.summary.batchesDelivered > 0
                 ? " \(outcome.summary.batchesDelivered) of \(outcome.summary.batchesPlanned) batches (\(outcome.summary.deliveredRecords) records) were acknowledged before the failure."
@@ -385,8 +387,8 @@ struct OverviewView: View {
             "checkmark.circle"
         case .cancelled:
             "xmark.circle"
-        case .truncated:
-            "exclamationmark.triangle"
+        case .backfilling:
+            "arrow.triangle.2.circlepath"
         case .failed:
             "exclamationmark.circle"
         case nil:

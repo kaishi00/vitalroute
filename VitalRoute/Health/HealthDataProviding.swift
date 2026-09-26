@@ -1,23 +1,21 @@
 import Foundation
 
-/// The result of a complete export query: every record in the window up to
-/// bounded per-category page caps. `truncatedMetrics` names categories whose
-/// caps were hit — a truncated export must never be reported as complete.
-struct HealthExportResult: Equatable {
-    let records: [HealthRecord]
-    let truncatedMetrics: Set<HealthMetric>
-
-    var isTruncated: Bool {
-        !truncatedMetrics.isEmpty
-    }
-}
-
 /// One page of incremental changes for a category. `anchorData` is the
 /// serialized cursor to persist after the page's changes are durably
 /// recorded; `isFull` marks a pagination boundary.
 struct HealthChangePage: Equatable {
     let additions: [HealthRecord]
     let deletions: [DeletedRecord]
+    let anchorData: Data?
+    let isFull: Bool
+}
+
+/// One page of additions-only export reading for a category. Like a change
+/// page, `anchorData` is the cursor to persist only after the page has been
+/// durably handled (delivered and acknowledged for manual exports), and
+/// `isFull` marks that more pages follow.
+struct HealthExportPage: Equatable {
+    let records: [HealthRecord]
     let anchorData: Data?
     let isFull: Bool
 }
@@ -36,14 +34,19 @@ protocol HealthDataProviding {
         perMetricLimit: Int
     ) async throws -> [HealthRecord]
 
-    /// Full export query for the sync window; pages through every matching
-    /// record instead of stopping at a preview limit. `through` pins the
-    /// window end so an operation reads a consistent interval.
-    func exportRecords(
-        since startDate: Date,
-        through endDate: Date,
-        metrics: Set<HealthMetric>
-    ) async throws -> HealthExportResult
+    /// One additions-only export page for a category since the given
+    /// serialized anchor, restricted to samples starting at or after
+    /// `windowStart`. The predicate is fixed per window start — the same
+    /// anchor-validity rule as change pages — so a manual export resumes
+    /// across runs by persisting the returned anchor. Deleted samples are
+    /// deliberately not reported here; deletion propagation belongs to the
+    /// change stream.
+    func exportPage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthExportPage
 
     /// One incremental page of additions and deletions for a category since
     /// the given serialized anchor, restricted to samples starting at or

@@ -403,15 +403,20 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertEqual(client.sentChangeBatches[0].changes, [.delete(deletion(1))])
     }
 
-    func testPageBudgetStopsMidStreamAndNextPassResumes() async throws {
+    func testPageBudgetChainsPassesUntilTheStreamIsCaughtUp() async throws {
+        // A deep backfill (All records) that exceeds one pass's page budget
+        // must converge automatically: each pass that ends on a full page
+        // re-arms a successor, resuming from the persisted checkpoint,
+        // instead of stalling until the next external trigger.
+        let budget = BackgroundSyncLimits.pagesPerCategoryPerPass
         let provider = ScriptedHealthProvider()
         provider.script = [
-            .steps: (0..<100).map { index in
+            .steps: (0..<(budget * 2 + 6)).map { index in
                 HealthChangePage(
                     additions: [record(index + 1)],
                     deletions: [],
                     anchorData: Data("a\(index)".utf8),
-                    isFull: true
+                    isFull: index < budget * 2 + 5 // last page ends the stream
                 )
             },
         ]
@@ -420,20 +425,40 @@ final class AutomaticSyncEngineTests: XCTestCase {
         _ = await enable(engine)
         await engine.waitUntilIdle()
 
-        // The pass stops at the page budget; the checkpoint is the anchor of
-        // the last completed page.
-        XCTAssertEqual(provider.changeQueries.count, BackgroundSyncLimits.pagesPerCategoryPerPass)
-        let budget = BackgroundSyncLimits.pagesPerCategoryPerPass
-        let lastAnchor = Data("a\(budget - 1)".utf8)
+        // Every scripted page was read across the chained passes.
+        XCTAssertEqual(provider.changeQueries.count, budget * 2 + 6)
+        // Each successor resumed from its predecessor's persisted anchor:
+        // the first query of the second pass is the budget-th query.
+        XCTAssertEqual(provider.changeQueries[budget].anchorData, Data("a\(budget - 1)".utf8))
         let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
-        XCTAssertEqual(checkpoint?.anchorData, lastAnchor)
+        XCTAssertEqual(checkpoint?.anchorData, Data("a\(budget * 2 + 5)".utf8))
+    }
 
-        // The next pass resumes from the persisted mid-stream anchor.
-        client.resetDelivery()
-        engine.foregroundCatchUp()
+    @MainActor
+    func testAllRecordsBackfillConvergesInOneCatchUp() async throws {
+        BackfillDepth.store(.allRecords, in: defaults)
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: (0..<25).map { index in
+                HealthChangePage(
+                    additions: [record(index + 1)],
+                    deletions: [],
+                    anchorData: Data("p\(index)".utf8),
+                    isFull: true
+                )
+            } + [
+                HealthChangePage(additions: [record(26)], deletions: [], anchorData: Data("p25".utf8), isFull: false),
+            ],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
         await engine.waitUntilIdle()
-        XCTAssertEqual(provider.changeQueries.count, budget * 2)
-        XCTAssertEqual(provider.changeQueries[budget].anchorData, lastAnchor)
+
+        XCTAssertEqual(provider.changeQueries.count, 26)
+        XCTAssertEqual(provider.changeQueries[0].windowStart, .distantPast)
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.anchorData, Data("p25".utf8))
     }
 
     func testScopeMismatchRebootstrapsWithFreshGeneration() async throws {
@@ -923,6 +948,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let manual = ManualSyncCoordinator(
             healthData: manualProvider,
             client: manualClient,
+            stateStore: SyncStateStore(directory: tempDirectory),
             defaults: defaults,
             workGate: gate
         )
@@ -1841,12 +1867,13 @@ private final class ScriptedHealthProvider: HealthDataProviding {
         []
     }
 
-    func exportRecords(
-        since startDate: Date,
-        through endDate: Date,
-        metrics: Set<HealthMetric>
-    ) async throws -> HealthExportResult {
-        HealthExportResult(records: [], truncatedMetrics: [])
+    func exportPage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthExportPage {
+        HealthExportPage(records: [], anchorData: anchorData, isFull: false)
     }
 
     func changePage(
@@ -2033,12 +2060,14 @@ private final class ManualStubHealthProvider: HealthDataProviding {
         []
     }
 
-    func exportRecords(
-        since startDate: Date,
-        through endDate: Date,
-        metrics: Set<HealthMetric>
-    ) async throws -> HealthExportResult {
-        HealthExportResult(records: records, truncatedMetrics: [])
+    func exportPage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthExportPage {
+        // Serves the configured records as one not-full page (caught up).
+        HealthExportPage(records: records, anchorData: Data("m1".utf8), isFull: false)
     }
 
     func changePage(

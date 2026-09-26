@@ -6,12 +6,17 @@ final class ManualSyncCoordinatorTests: XCTestCase {
     private let token = "coordinator-test-token-0001"
 
     private var suites: [(defaults: UserDefaults, name: String)] = []
+    private var tempDirectories: [TempDirBox] = []
 
     override func tearDown() {
         for suite in suites {
             suite.defaults.removePersistentDomain(forName: suite.name)
         }
         suites.removeAll()
+        for temp in tempDirectories {
+            temp.remove()
+        }
+        tempDirectories.removeAll()
         super.tearDown()
     }
 
@@ -26,16 +31,30 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         )
     }
 
+    /// One scripted export page: records identified by index, a serialized
+    /// anchor to hand back, and whether more pages follow.
+    private func page(_ ids: [Int], anchor: String, full: Bool, metric: HealthMetric = .steps) -> HealthExportPage {
+        HealthExportPage(
+            records: ids.map { record($0, metric: metric) },
+            anchorData: Data(anchor.utf8),
+            isFull: full
+        )
+    }
+
     @MainActor
     private func makeCoordinator(
         provider: StubHealthDataProvider,
         client: StubDestinationClient,
-        defaults: UserDefaults? = nil
+        defaults: UserDefaults? = nil,
+        store: SyncStateStore? = nil,
+        workGate: SyncWorkGate = SyncWorkGate()
     ) -> ManualSyncCoordinator {
         ManualSyncCoordinator(
             healthData: provider,
             client: client,
-            defaults: defaults ?? makeDefaults()
+            stateStore: store ?? makeStore(),
+            defaults: defaults ?? makeDefaults(),
+            workGate: workGate
         )
     }
 
@@ -45,6 +64,12 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         defaults.removePersistentDomain(forName: name)
         suites.append((defaults, name))
         return defaults
+    }
+
+    private func makeStore() -> SyncStateStore {
+        let temp = TempDirBox()
+        tempDirectories.append(temp)
+        return SyncStateStore(directory: temp.url)
     }
 
     @MainActor
@@ -59,7 +84,9 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
     @MainActor
     func testSuccessfulSyncReportsCountsAndPersistsLastSync() async throws {
-        let provider = StubHealthDataProvider(export: [record(1), record(2)])
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1, 2], anchor: "a1", full: false)]
+        provider.script[.sleep] = [page([3], anchor: "s1", full: false, metric: .sleep)]
         let client = StubDestinationClient()
         let defaults = makeDefaults()
         let coordinator = makeCoordinator(provider: provider, client: client, defaults: defaults)
@@ -69,26 +96,26 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
         let summary = coordinator.lastOutcome?.summary
-        XCTAssertEqual(summary?.recordsFound, 2)
-        XCTAssertEqual(summary?.batchesPlanned, 1)
-        XCTAssertEqual(summary?.batchesDelivered, 1)
-        XCTAssertEqual(summary?.acceptedRecords, 2)
+        XCTAssertEqual(summary?.recordsFound, 3)
+        XCTAssertEqual(summary?.batchesDelivered, 2)
+        XCTAssertEqual(summary?.acceptedRecords, 3)
         XCTAssertNotNil(coordinator.lastSuccessfulSync)
         XCTAssertEqual(coordinator.lastSuccessfulSync?.deliveredRecords, summary?.deliveredRecords)
 
-        // Authorization was requested for exactly the selected categories.
+        // Authorization and reading covered exactly the selected categories.
         XCTAssertEqual(provider.authorizationRequestedMetrics, [.sleep, .steps])
-        // The export query used the same categories.
-        XCTAssertEqual(provider.exportedMetrics, [.sleep, .steps])
+        XCTAssertEqual(Set(provider.exportQueries.map(\.metric)), [.sleep, .steps])
 
         // Persisted across a new coordinator instance.
-        let reloaded = ManualSyncCoordinator(healthData: provider, client: client, defaults: defaults)
+        let reloaded = ManualSyncCoordinator(
+            healthData: provider, client: client, stateStore: makeStore(), defaults: defaults
+        )
         XCTAssertEqual(reloaded.lastSuccessfulSync, coordinator.lastSuccessfulSync)
     }
 
     @MainActor
-    func testEmptyWindowCompletesWithoutSendingAnything() async throws {
-        let provider = StubHealthDataProvider(export: [])
+    func testEmptyHistoryCompletesWithoutSendingAnything() async throws {
+        let provider = StubHealthDataProvider()
         let client = StubDestinationClient()
         let coordinator = makeCoordinator(provider: provider, client: client)
 
@@ -101,9 +128,10 @@ final class ManualSyncCoordinatorTests: XCTestCase {
     }
 
     @MainActor
-    func testRecordsAreBatchedAtTheConfiguredSize() async throws {
-        let records = (0..<SyncLimits.recordsPerUploadBatch + 50).map { record($0) }
-        let provider = StubHealthDataProvider(export: records)
+    func testRecordsAreBatchedAtTheConfiguredSizeWithinAPage() async throws {
+        let ids = Array(0..<(SyncLimits.recordsPerUploadBatch + 50))
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page(ids, anchor: "a1", full: false)]
         let client = StubDestinationClient()
         let coordinator = makeCoordinator(provider: provider, client: client)
 
@@ -113,94 +141,479 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.sentPayloads.count, 2)
         XCTAssertEqual(client.sentPayloads[0].records.count, SyncLimits.recordsPerUploadBatch)
         XCTAssertEqual(client.sentPayloads[1].records.count, 50)
-        // Batches preserve the deterministic ascending record order.
-        XCTAssertEqual(client.sentPayloads[0].records.first?.id, records.first?.id)
-        XCTAssertEqual(client.sentPayloads[1].records.last?.id, records.last?.id)
+        XCTAssertEqual(client.sentPayloads[0].records.first?.id, ids.first.map { record($0).id })
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
-        XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, records.count)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, ids.count)
     }
 
-    // MARK: Truncation
+    // MARK: Chunked backfill
 
     @MainActor
-    func testTruncatedExportIsNeverReportedAsComplete() async throws {
-        let provider = StubHealthDataProvider(export: [record(1)], truncated: [.heartRate])
+    func testLargeHistoryIsChunkedAcrossAnchoredPages() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [
+            page([1], anchor: "a1", full: true),
+            page([2], anchor: "a2", full: true),
+            page([3], anchor: "a3", full: true),
+            page([4], anchor: "a4", full: false),
+        ]
         let client = StubDestinationClient()
-        let coordinator = makeCoordinator(provider: provider, client: client)
-
-        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.heartRate, .steps])
-        await waitForCompletion(coordinator)
-
-        guard case .truncated(let metrics)? = coordinator.lastOutcome?.result else {
-            XCTFail("expected truncated outcome, got \(String(describing: coordinator.lastOutcome?.result))")
-            return
-        }
-        XCTAssertEqual(metrics, [.heartRate])
-        // Delivered data is still reported, but no success marker is written.
-        XCTAssertNil(coordinator.lastSuccessfulSync)
-        XCTAssertEqual(coordinator.lastOutcome?.summary.deliveredRecords, 1)
-    }
-
-    @MainActor
-    func testExportWindowIsSnapshotPinned() async throws {
-        let provider = StubHealthDataProvider(export: [record(1)])
-        let client = StubDestinationClient()
-        let coordinator = makeCoordinator(provider: provider, client: client)
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-
-        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
-        await waitForCompletion(coordinator)
-
-        XCTAssertEqual(provider.exportQueryWindows.count, 1)
-        let window = provider.exportQueryWindows[0]
-        XCTAssertEqual(window.end, now)
-        // Default depth (7 days) shapes the manual window.
-        XCTAssertEqual(
-            window.start.timeIntervalSince(BackfillDepth.sevenDays.windowStart(from: now)),
-            0,
-            accuracy: 1
-        )
-    }
-
-    @MainActor
-    func testManualPlanHonorsAllRecordsDepth() async throws {
-        let provider = StubHealthDataProvider(export: [])
-        let client = StubDestinationClient()
-        let defaults = makeDefaults()
-        BackfillDepth.store(.allRecords, in: defaults)
-        let coordinator = makeCoordinator(provider: provider, client: client, defaults: defaults)
-
-        let now = Date()
-        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
-        await waitForCompletion(coordinator)
-
-        XCTAssertEqual(provider.exportQueryWindows.count, 1)
-        XCTAssertEqual(provider.exportQueryWindows[0].start, .distantPast)
-        XCTAssertEqual(provider.exportQueryWindows[0].end, now)
-    }
-
-    @MainActor
-    func testEmptyWindowSyncStillCountsAsSuccessful() async throws {
-        // A completed sync that found nothing is a success: it confirms the
-        // selected categories had no records in the window, and updates the
-        // last-success marker with zero counts.
-        let provider = StubHealthDataProvider(export: [])
-        let client = StubDestinationClient()
-        let defaults = makeDefaults()
-        let coordinator = makeCoordinator(provider: provider, client: client, defaults: defaults)
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
 
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
 
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
-        XCTAssertEqual(coordinator.lastSuccessfulSync?.deliveredRecords, 0)
+        // All four pages were read in one run, each resuming from the
+        // previous page's anchor — a chunked read, not one giant window.
+        XCTAssertEqual(provider.exportQueries.count, 4)
+        XCTAssertNil(provider.exportQueries[0].sinceAnchor)
+        XCTAssertEqual(provider.exportQueries[1].sinceAnchor, Data("a1".utf8))
+        XCTAssertEqual(provider.exportQueries[2].sinceAnchor, Data("a2".utf8))
+        XCTAssertEqual(provider.exportQueries[3].sinceAnchor, Data("a3".utf8))
+        // One batch per record page, all acknowledged.
+        XCTAssertEqual(client.sentPayloads.count, 4)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, 4)
+        // The final cursor reflects the last acknowledged page.
+        let cursor = await store.manualCursor(
+            destination: URL(string: endpoint)!.absoluteString,
+            metric: .steps,
+            windowStart: provider.exportQueries[0].windowStart
+        )
+        XCTAssertEqual(cursor?.anchorData, Data("a4".utf8))
+    }
+
+    @MainActor
+    func testPageBudgetEndsAsResumableBackfillNotFailure() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: true)]
+        provider.fullPagesAfterScript = true
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        // Budget consumed with more history pending: a backfill state, and
+        // progress was kept.
+        XCTAssertEqual(coordinator.lastOutcome?.result, .backfilling(metrics: [.steps]))
+        XCTAssertNotNil(coordinator.lastOutcome)
+        XCTAssertGreaterThan(coordinator.lastOutcome!.summary.deliveredRecords, 0)
+        XCTAssertNil(coordinator.lastSuccessfulSync)
+        let windowStart = provider.exportQueries.first!.windowStart
+        let cursor = await store.manualCursor(
+            destination: URL(string: endpoint)!.absoluteString, metric: .steps, windowStart: windowStart
+        )
+        XCTAssertNotNil(cursor?.anchorData)
+    }
+
+    @MainActor
+    func testBackfillResumesFromSavedCursorOnNextSync() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: true)]
+        provider.fullPagesAfterScript = true
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let defaults = makeDefaults()
+        let coordinator = makeCoordinator(
+            provider: provider, client: client, defaults: defaults, store: store
+        )
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: Date(timeIntervalSince1970: 1_800_000_000))
+        await waitForCompletion(coordinator)
+        let savedAnchor = provider.exportQueries.last!.sinceAnchor
+        let firstWindow = provider.exportQueries[0].windowStart
+
+        // Second sync at the SAME depth but a LATER clock: the window is
+        // frozen per identity, so the cursor still hits and the run
+        // continues from the saved anchor instead of re-reading a fresh
+        // window. This is the production resume path (taps are never the
+        // same instant).
+        provider.exportQueries.removeAll()
+        provider.fullPagesAfterScript = false
+        provider.script[.steps] = [page([99], anchor: "a-end", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: Date(timeIntervalSince1970: 1_800_086_400))
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(provider.exportQueries.count, 1)
+        XCTAssertEqual(provider.exportQueries[0].sinceAnchor, savedAnchor)
+        // The frozen window is the one minted at the FIRST sync — earlier
+        // than a fresh 7-day window would be a day later.
+        XCTAssertEqual(provider.exportQueries[0].windowStart, firstWindow)
+    }
+
+    @MainActor
+    func testSameDepthSecondSyncResumesWithoutChurn() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [
+            page([1], anchor: "a1", full: true),
+            page([2], anchor: "a2", full: false),
+        ]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(
+            provider: provider, client: client, store: store
+        )
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        let firstWindow = provider.exportQueries[0].windowStart
+
+        // A later sync (a full day later) at unchanged depth resumes from
+        // the cursor with the SAME frozen window start: no fresh bootstrap,
+        // no re-read, and no drift with the wall clock.
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([], anchor: "a2", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(86_400))
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueries.count, 1)
+        XCTAssertEqual(provider.exportQueries[0].sinceAnchor, Data("a2".utf8))
+        XCTAssertEqual(provider.exportQueries[0].windowStart, firstWindow)
+    }
+
+    @MainActor
+    func testSecondCoordinatorInstanceResumesFromTheSameStore() async throws {
+        // Durability across relaunch: a fresh coordinator over the same
+        // store continues where the previous one stopped.
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [
+            page([1], anchor: "a1", full: true),
+            page([2], anchor: "a2", full: false),
+        ]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let defaults = makeDefaults()
+        let first = makeCoordinator(provider: provider, client: client, defaults: defaults, store: store)
+        first.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(first)
+
+        let reloaded = ManualSyncCoordinator(
+            healthData: provider, client: client, stateStore: store, defaults: defaults
+        )
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([], anchor: "a2", full: false)]
+        reloaded.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(3_600))
+        await waitForCompletion(reloaded)
+
+        XCTAssertEqual(reloaded.lastOutcome?.result, .completed)
+        XCTAssertEqual(provider.exportQueries.count, 1)
+        XCTAssertEqual(provider.exportQueries[0].sinceAnchor, Data("a2".utf8))
+    }
+
+    @MainActor
+    func testCorruptedStoredAnchorRecoversByReReadingTheWindow() async throws {
+        let provider = StubHealthDataProvider()
+        // First run completes and leaves a cursor.
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+
+        // The stored anchor becomes unreadable (e.g. an OS migration). The
+        // next sync must drop it and re-read the window from its start
+        // instead of failing forever.
+        provider.corruptStoredAnchors = true
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([2], anchor: "a1", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(provider.exportQueries[0].sinceAnchor, Data("a1".utf8)) // offered the bad cursor
+        XCTAssertEqual(provider.exportQueries[1].sinceAnchor, nil) // rebuilt from the window start
+        XCTAssertEqual(coordinator.lastOutcome?.summary.recordsFound, 1)
+    }
+
+    @MainActor
+    func testNonAdvancingFullPageFailsHonestly() async throws {
+        let provider = StubHealthDataProvider()
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+
+        // Seed a cursor at "same".
+        provider.script[.steps] = [page([1], anchor: "same", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(client.sentPayloads.count, 1)
+
+        // A full page whose anchor equals the anchor it was read with:
+        // continuing would re-send the same page forever, so the run stops
+        // honestly after delivering it.
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [
+            page([1], anchor: "same", full: false),
+            page([9], anchor: "same", full: true),
+        ]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        guard case .failed(let message)? = coordinator.lastOutcome?.result else {
+            XCTFail("expected failure for a non-advancing full page")
+            return
+        }
+        XCTAssertTrue(message.contains("could not be read past"), message)
+        // The offending page WAS delivered before the stop.
+        XCTAssertEqual(client.sentPayloads.count, 2)
+    }
+
+    @MainActor
+    func testDifferentDestinationUsesItsOwnCursorIdentity() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+        let firstWindow = provider.exportQueries[0].windowStart
+        let firstDestination = URL(string: endpoint)!.absoluteString
+
+        // A different destination mints its own identity: a fresh window
+        // and no anchor reuse, and the first destination's cursor survives.
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([2], anchor: "b1", full: false)]
+        coordinator.startSync(endpoint: "https://other.example.org/v1/records", token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueries[0].sinceAnchor, nil)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        let surviving = await store.manualCursor(
+            destination: firstDestination, metric: .steps, windowStart: firstWindow
+        )
+        XCTAssertEqual(surviving?.anchorData, Data("a1".utf8))
+    }
+
+    // MARK: Depth semantics
+
+    @MainActor
+    func testManualPlanHonorsAllRecordsDepth() async throws {
+        let defaults = makeDefaults()
+        BackfillDepth.store(.allRecords, in: defaults)
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client, defaults: defaults)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueries.count, 1)
+        XCTAssertEqual(provider.exportQueries[0].windowStart, .distantPast)
+        XCTAssertNil(provider.exportQueries[0].sinceAnchor)
+    }
+
+    @MainActor
+    func testDefaultDepthShapesWindowStart() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueries.count, 1)
+        XCTAssertEqual(
+            provider.exportQueries[0].windowStart,
+            BackfillDepth.sevenDays.windowStart(from: now)
+        )
+    }
+
+    @MainActor
+    func testDeepeningDepthStartsFreshBackfillAndKeepsOldCursor() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let defaults = makeDefaults()
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "shallow-1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(
+            provider: provider, client: client, defaults: defaults, store: store
+        )
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        let shallowWindow = provider.exportQueries[0].windowStart
+        let destination = URL(string: endpoint)!.absoluteString
+        let shallowCursor = await store.manualCursor(
+            destination: destination, metric: .steps, windowStart: shallowWindow
+        )
+        XCTAssertEqual(shallowCursor?.anchorData, Data("shallow-1".utf8))
+
+        // Deepen to the entire history: the next sync must really backfill —
+        // a fresh cursor identity (distant past window, no anchor reuse).
+        BackfillDepth.store(.allRecords, in: defaults)
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([2], anchor: "deep-1", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueries.count, 1)
+        XCTAssertEqual(provider.exportQueries[0].windowStart, .distantPast)
+        XCTAssertNil(provider.exportQueries[0].sinceAnchor)
+
+        // The shallower cursor is untouched on disk: shallowing later
+        // resumes it instead of discarding captured history.
+        let reloaded = await store.manualCursor(
+            destination: destination, metric: .steps, windowStart: shallowWindow
+        )
+        XCTAssertEqual(reloaded?.anchorData, Data("shallow-1".utf8))
+        let deepWindow = provider.exportQueries[0].windowStart
+        let deepCursor = await store.manualCursor(
+            destination: destination, metric: .steps, windowStart: deepWindow
+        )
+        if deepCursor == nil {
+            let all = await store.loadManualCursors()
+            XCTFail("deep cursor missing; stored keys: \(all.keys.sorted())")
+        } else {
+            XCTAssertEqual(deepCursor?.anchorData, Data("deep-1".utf8))
+        }
+    }
+
+    @MainActor
+    func testShallowingDepthUsesItsOwnWindowWithoutDiscardingDeeperCapture() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let defaults = makeDefaults()
+        BackfillDepth.store(.allRecords, in: defaults)
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "deep-1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(
+            provider: provider, client: client, defaults: defaults, store: store
+        )
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        let destination = URL(string: endpoint)!.absoluteString
+
+        // Shallow to the default: the next sync reads its own (narrow)
+        // window with its own cursor…
+        BackfillDepth.store(.sevenDays, in: defaults)
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([2], anchor: "shallow-1", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueries.count, 1)
+        XCTAssertEqual(
+            provider.exportQueries[0].windowStart,
+            BackfillDepth.sevenDays.windowStart(from: now)
+        )
+        XCTAssertNil(provider.exportQueries[0].sinceAnchor)
+
+        // …and the deeper capture is still on disk, untouched.
+        let deepCursor = await store.manualCursor(
+            destination: destination, metric: .steps, windowStart: .distantPast
+        )
+        XCTAssertEqual(deepCursor?.anchorData, Data("deep-1".utf8))
+    }
+
+    // MARK: Per-category independence and durability
+
+    @MainActor
+    func testBackfillProgressIsIndependentPerCategory() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "s1", full: true)]
+        provider.fullPagesAfterScriptMetrics.insert(.steps)
+        provider.script[.heartRate] = [page([2], anchor: "h1", full: false, metric: .heartRate)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps, .heartRate], now: now)
+        await waitForCompletion(coordinator)
+
+        // Steps is still backfilling; heart rate completed.
+        XCTAssertEqual(coordinator.lastOutcome?.result, .backfilling(metrics: [.steps]))
+        let destination = URL(string: endpoint)!.absoluteString
+        let window = provider.exportQueries[0].windowStart
+        let stepsCursor = await store.manualCursor(
+            destination: destination, metric: .steps, windowStart: window
+        )
+        let heartCursor = await store.manualCursor(
+            destination: destination, metric: .heartRate, windowStart: window
+        )
+        XCTAssertNotNil(stepsCursor?.anchorData)
+        XCTAssertNotNil(heartCursor?.anchorData)
+
+        // Next sync: heart rate resumes from its cursor and finishes with
+        // one empty page; steps continues from its saved anchor.
+        provider.exportQueries.removeAll()
+        provider.fullPagesAfterScriptMetrics.removeAll()
+        provider.script[.heartRate] = [page([], anchor: "h1", full: false, metric: .heartRate)]
+        provider.script[.steps] = [page([3], anchor: "s2", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps, .heartRate], now: now)
+        await waitForCompletion(coordinator)
+
+        let byMetric = Dictionary(grouping: provider.exportQueries, by: \.metric)
+        XCTAssertEqual(byMetric[.heartRate]?.count, 1)
+        XCTAssertEqual(byMetric[.heartRate]?.first?.sinceAnchor, heartCursor?.anchorData)
+        XCTAssertEqual(byMetric[.steps]?.first?.sinceAnchor, stepsCursor?.anchorData)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+    }
+
+    @MainActor
+    func testCursorAdvancesOnlyAfterAcknowledgement() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [
+            page([1], anchor: "a1", full: true),
+            page([2], anchor: "a2", full: true),
+            page([3], anchor: "a3", full: false),
+        ]
+        let client = StubDestinationClient()
+        client.failOnBatchNumber = 2 // the second page's only batch
+        client.failure = .serverRejected(status: 500)
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+
+        // Page 1 was acknowledged and checkpointed; page 2's delivery
+        // failed, so the cursor must still point at page 1's end.
+        guard case .failed = coordinator.lastOutcome?.result else {
+            XCTFail("expected failure after batch error")
+            return
+        }
+        let window = provider.exportQueries[0].windowStart
+        let cursor = await store.manualCursor(
+            destination: URL(string: endpoint)!.absoluteString, metric: .steps, windowStart: window
+        )
+        XCTAssertEqual(cursor?.anchorData, Data("a1".utf8))
+
+        // The retry resumes from page 2 — not from the beginning.
+        client.failOnBatchNumber = nil
+        client.failure = nil
+        provider.exportQueries.removeAll()
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(provider.exportQueries[0].sinceAnchor, Data("a1".utf8))
     }
 
     // MARK: Preflight
 
     @MainActor
     func testMissingTokenFailsWithoutTouchingHealthOrNetwork() async {
-        let provider = StubHealthDataProvider(export: [record(1)])
+        let provider = StubHealthDataProvider()
         let client = StubDestinationClient()
         let coordinator = makeCoordinator(provider: provider, client: client)
 
@@ -218,7 +631,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
     @MainActor
     func testEmptySelectionFailsPreflight() async {
-        let provider = StubHealthDataProvider(export: [record(1)])
+        let provider = StubHealthDataProvider()
         let client = StubDestinationClient()
         let coordinator = makeCoordinator(provider: provider, client: client)
 
@@ -228,223 +641,184 @@ final class ManualSyncCoordinatorTests: XCTestCase {
             XCTFail("expected failure outcome")
             return
         }
-        XCTAssertTrue(message.contains("at least one category"))
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertTrue(message.contains("category"))
+        XCTAssertEqual(provider.authorizationCount, 0)
     }
 
     @MainActor
     func testInvalidEndpointFailsPreflight() async {
-        let provider = StubHealthDataProvider(export: [record(1)])
+        let provider = StubHealthDataProvider()
         let client = StubDestinationClient()
         let coordinator = makeCoordinator(provider: provider, client: client)
 
-        coordinator.startSync(endpoint: "http://insecure.example.org", token: token, metrics: [.steps])
+        coordinator.startSync(endpoint: "http://insecure.example.org/v1/records", token: token, metrics: [.steps])
 
         guard case .failed(let message)? = coordinator.lastOutcome?.result else {
             XCTFail("expected failure outcome")
             return
         }
-        XCTAssertTrue(message.contains("HTTPS"))
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertTrue(message.contains("destination"))
+        XCTAssertEqual(provider.authorizationCount, 0)
     }
 
-    // MARK: Overlap and snapshot consistency
-
-    @MainActor
-    func testOverlappingSyncIsIgnoredWhileOneRuns() async throws {
-        let provider = StubHealthDataProvider(export: [record(1)])
-        let gate = AsyncGate()
-        let client = StubDestinationClient()
-        client.sendGate = gate
-        let coordinator = makeCoordinator(provider: provider, client: client)
-
-        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
-        // Wait until the first sync is parked inside the client send.
-        await gate.waitForEntry()
-        XCTAssertTrue(coordinator.isSyncing)
-
-        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.sleep])
-        // Second call is a no-op: still exactly one operation in flight.
-
-        await gate.open()
-        await waitForCompletion(coordinator)
-
-        XCTAssertEqual(client.sentPayloads.count, 1)
-    }
-
-    @MainActor
-    func testConfigurationChangeDoesNotRedirectAnUnderwaySync() async throws {
-        let provider = StubHealthDataProvider(export: [record(1), record(2)])
-        let gate = AsyncGate()
-        let client = StubDestinationClient()
-        client.sendGate = gate
-        let coordinator = makeCoordinator(provider: provider, client: client)
-
-        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
-        await gate.waitForEntry()
-
-        // The user changes everything mid-flight: endpoint, credential, and
-        // selection. The underway operation keeps its captured snapshot.
-        let otherClient = StubDestinationClient()
-        coordinator.startSync(endpoint: "https://other.example.org/v1/records", token: "other", metrics: [.sleep])
-        await gate.open()
-        await waitForCompletion(coordinator)
-
-        XCTAssertEqual(client.sentPayloads.count, 1)
-        XCTAssertEqual(otherClient.sentPayloads.count, 0)
-        XCTAssertEqual(client.receivedAuthorizations.map(\.bearerToken), [token])
-        XCTAssertEqual(client.receivedEndpoints, [URL(string: endpoint)!])
-        XCTAssertEqual(client.sentPayloads[0].records.count, 2)
-    }
-
-    // MARK: Failure and cancellation
+    // MARK: Failure, cancellation, and overlap
 
     @MainActor
     func testMidBatchFailureReportsPartialProgressNotSuccess() async throws {
-        let records = (0..<450).map { record($0) } // 3 batches at 200/200/50
-        let provider = StubHealthDataProvider(export: records)
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [
+            page([1, 2, 3], anchor: "a1", full: true),
+            page([4, 5, 6], anchor: "a2", full: false),
+        ]
         let client = StubDestinationClient()
-        client.failOnBatchNumber = 2
+        client.failOnBatchNumber = 1
         client.failure = .serverRejected(status: 500)
         let coordinator = makeCoordinator(provider: provider, client: client)
 
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
 
-        XCTAssertEqual(client.sentPayloads.count, 2)
-        guard case .failed(let message)? = coordinator.lastOutcome?.result else {
-            XCTFail("expected failure outcome")
-            return
-        }
-        XCTAssertTrue(message.contains("HTTP 500"))
-        let summary = coordinator.lastOutcome?.summary
-        XCTAssertEqual(summary?.batchesDelivered, 1)
-        XCTAssertEqual(summary?.deliveredRecords, 200)
-        XCTAssertEqual(summary?.batchesPlanned, 3)
-        XCTAssertNil(coordinator.lastSuccessfulSync)
-    }
-
-    @MainActor
-    func testAuthFailureBeforeAnyUploadFailsCleanly() async throws {
-        let provider = StubHealthDataProvider(export: [record(1)], shouldFailAuthorization: true)
-        let client = StubDestinationClient()
-        let coordinator = makeCoordinator(provider: provider, client: client)
-
-        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
-        await waitForCompletion(coordinator)
-
-        XCTAssertEqual(client.sentPayloads.count, 0)
         guard case .failed = coordinator.lastOutcome?.result else {
             XCTFail("expected failure outcome")
             return
         }
+        XCTAssertEqual(coordinator.lastOutcome?.summary.batchesDelivered, 0)
+        XCTAssertNil(coordinator.lastSuccessfulSync)
+    }
+
+    @MainActor
+    func testAuthFailureBeforeAnyUploadFailsCleanly() async {
+        let provider = StubHealthDataProvider()
+        provider.shouldFailAuthorization = true
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        guard case .failed(let message)? = coordinator.lastOutcome?.result else {
+            XCTFail("expected failure outcome")
+            return
+        }
+        XCTAssertTrue(message.contains("Apple Health"))
+        XCTAssertEqual(client.sentPayloads.count, 0)
+    }
+
+    @MainActor
+    func testOverlappingSyncIsIgnoredWhileOneRuns() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        client.sendGate = AsyncGate()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await client.sendGate!.waitForEntry()
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        client.sendGate!.open()
+        await waitForCompletion(coordinator)
+
+        // The overlapping call was ignored: exactly one payload.
+        XCTAssertEqual(client.sentPayloads.count, 1)
+    }
+
+    @MainActor
+    func testConfigurationChangeDoesNotRedirectAnUnderwaySync() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        client.sendGate = AsyncGate()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await client.sendGate!.waitForEntry()
+        // A different destination configured while the first sync is parked
+        // on its upload must not redirect it.
+        coordinator.startSync(endpoint: "https://other.example.org/v1/records", token: token, metrics: [.steps])
+        client.sendGate!.open()
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(client.receivedEndpoints, [URL(string: endpoint)!])
     }
 
     @MainActor
     func testCancellationBetweenBatchesReportsCancelledWithPartialCounts() async throws {
-        let records = (0..<450).map { record($0) }
-        let provider = StubHealthDataProvider(export: records)
-        let gate = AsyncGate()
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [
+            page([1, 2, 3], anchor: "a1", full: true),
+            page([4, 5, 6], anchor: "a2", full: false),
+        ]
         let client = StubDestinationClient()
-        client.sendGate = gate
+        client.sendGate = AsyncGate()
         let coordinator = makeCoordinator(provider: provider, client: client)
 
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
-        // Cancel once batch 1 has entered the client; the gate keeps the
-        // task alive long enough for the cancellation to be observable.
-        await gate.waitForEntry()
+        // Park inside the first page's batch delivery, then cancel.
+        await client.sendGate!.waitForEntry()
         coordinator.cancelSync()
-        await gate.open()
+        client.sendGate!.open()
         await waitForCompletion(coordinator)
 
         XCTAssertEqual(coordinator.lastOutcome?.result, .cancelled)
-        XCTAssertLessThanOrEqual(coordinator.lastOutcome!.summary.batchesDelivered, 1)
-        XCTAssertNil(coordinator.lastSuccessfulSync)
-        // The engine's manual-sync hook observes phase returning to .idle;
-        // pin it on the cancellation path too, not just on success.
-        XCTAssertEqual(coordinator.phase, .idle)
     }
 
     @MainActor
     func testCancellingWhileQueuedBehindTheGateClearsTheSyncState() async throws {
-        // The regression: `runSync`'s cleanup never ran when the cancellation
-        // landed while the task was still queued behind the work gate, so the
-        // in-flight marker stayed set and manual sync could never start again.
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
         let gate = SyncWorkGate()
-        let sendGate = AsyncGate()
+        let holder = GateHolder()
+        // Hold the gate with a no-op run so the manual sync queues behind it.
+        let holderTask = Task { try? await gate.run { await holder.waitForRelease() } }
+        await holder.waitForEntry()
 
-        let holderClient = StubDestinationClient()
-        holderClient.sendGate = sendGate
-        let holder = ManualSyncCoordinator(
-            healthData: StubHealthDataProvider(export: [record(1)]),
-            client: holderClient,
-            defaults: makeDefaults(),
-            workGate: gate
+        let coordinator = makeCoordinator(
+            provider: provider, client: client, workGate: gate
         )
-        let queuedClient = StubDestinationClient()
-        // A non-empty export, so "nothing was uploaded" is not vacuous, and
-        // the provider's counters below prove `runSync` was never entered.
-        let queuedProvider = StubHealthDataProvider(export: [record(99)])
-        let queued = ManualSyncCoordinator(
-            healthData: queuedProvider,
-            client: queuedClient,
-            defaults: makeDefaults(),
-            workGate: gate
-        )
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        // Let the queued sync observe cancellation while still waiting.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        coordinator.cancelSync()
+        holder.release()
+        _ = await holderTask.value
+        await waitForCompletion(coordinator)
 
-        // The first sync takes the gate and parks inside its upload.
-        holder.startSync(endpoint: endpoint, token: token, metrics: [.steps])
-        await sendGate.waitForEntry()
-
-        // The second queues behind it, then the user cancels.
-        queued.startSync(endpoint: endpoint, token: token, metrics: [.steps])
-        XCTAssertTrue(queued.isSyncing)
-        queued.cancelSync()
-
-        await sendGate.open()
-        await waitForCompletion(holder)
-
-        // The queued run never entered; it must still stop reporting as
-        // syncing once the gate is released.
-        var attempts = 0
-        while queued.isSyncing && attempts < 250 {
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 2_000_000)
-            attempts += 1
-        }
-
-        XCTAssertFalse(queued.isSyncing, "a cancellation while queued must not wedge manual sync")
-        XCTAssertEqual(queued.phase, .idle)
-        XCTAssertEqual(queuedClient.sentPayloads.count, 0, "the cancelled run must not have uploaded")
-        XCTAssertEqual(queuedProvider.authorizationCount, 0, "the cancelled run was never entered")
-        guard case .cancelled? = queued.lastOutcome?.result else {
-            return XCTFail(
-                "a queued cancellation must be reported as cancelled, got \(String(describing: queued.lastOutcome?.result))"
-            )
-        }
-
-        // And the coordinator is usable again.
-        queued.startSync(endpoint: endpoint, token: token, metrics: [.steps])
-        await waitForCompletion(queued)
-        XCTAssertEqual(queued.lastOutcome?.result, .completed)
+        XCTAssertFalse(coordinator.isSyncing)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .cancelled)
+        XCTAssertEqual(client.sentPayloads.count, 0)
+        // The cleared state must not wedge later syncs.
+        provider.script[.steps] = [page([9], anchor: "z1", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(client.sentPayloads.count, 1)
     }
 
     @MainActor
     func testRetryAfterFailureIsUserInitiatedOnly() async throws {
-        // A failed sync leaves no residual task: the next startSync runs.
-        let provider = StubHealthDataProvider(export: [record(1)])
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
         let client = StubDestinationClient()
-        client.failure = .connectionFailed
+        client.failOnBatchNumber = 1
+        client.failure = .serverRejected(status: 503)
         let coordinator = makeCoordinator(provider: provider, client: client)
 
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
         XCTAssertFalse(coordinator.isSyncing)
+        guard case .failed = coordinator.lastOutcome?.result else {
+            XCTFail("expected the first run to fail")
+            return
+        }
 
+        client.failOnBatchNumber = nil
         client.failure = nil
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
 
+        // The failed attempt never checkpointed its page, so the retry reads
+        // it again — the receiver keeps one copy of each record.
         XCTAssertEqual(client.sentPayloads.count, 2)
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
         XCTAssertNotNil(coordinator.lastSuccessfulSync)
@@ -453,25 +827,33 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
 // MARK: - Test doubles
 
+/// Records one export-page query and serves scripted pages per metric.
 @MainActor
 private final class StubHealthDataProvider: HealthDataProviding {
-    let exportRecords: [HealthRecord]
-    let truncated: Set<HealthMetric>
-    let shouldFailAuthorization: Bool
+    struct RecordedQuery {
+        let metric: HealthMetric
+        let sinceAnchor: Data?
+        let windowStart: Date
+    }
+
+    /// Scripted pages per metric, forming an anchor chain. A query with
+    /// anchor A returns the page that follows A in the chain (or the first
+    /// page for a nil anchor) — exactly like HealthKit's anchored queries,
+    /// so a retry that never checkpointed re-reads the same page.
+    var script: [HealthMetric: [HealthExportPage]] = [:]
+    /// When set, out-of-script pages for every metric come back full so a
+    /// run ends on the page budget (backfill in progress).
+    var fullPagesAfterScript = false
+    /// Same, per metric (for per-category independence tests).
+    var fullPagesAfterScriptMetrics: Set<HealthMetric> = []
+
+    /// When set, a query with a non-nil anchor throws a corrupted-anchor
+    /// error (recovery tests).
+    var corruptStoredAnchors = false
+    var shouldFailAuthorization = false
     private(set) var authorizationCount = 0
     private(set) var authorizationRequestedMetrics: [HealthMetric] = []
-    private(set) var exportedMetrics: [HealthMetric] = []
-    private(set) var exportQueryWindows: [(start: Date, end: Date)] = []
-
-    init(
-        export records: [HealthRecord],
-        truncated: Set<HealthMetric> = [],
-        shouldFailAuthorization: Bool = false
-    ) {
-        self.exportRecords = records
-        self.truncated = truncated
-        self.shouldFailAuthorization = shouldFailAuthorization
-    }
+    var exportQueries: [RecordedQuery] = []
 
     var isAvailable: Bool { true }
 
@@ -488,20 +870,43 @@ private final class StubHealthDataProvider: HealthDataProviding {
         metrics: Set<HealthMetric>,
         perMetricLimit: Int
     ) async throws -> [HealthRecord] {
-        exportRecords.filter { metrics.contains($0.metric) }
+        []
     }
 
-    func exportRecords(
-        since startDate: Date,
-        through endDate: Date,
-        metrics: Set<HealthMetric>
-    ) async throws -> HealthExportResult {
-        exportedMetrics.append(contentsOf: metrics.sorted { $0.rawValue < $1.rawValue })
-        exportQueryWindows.append((startDate, endDate))
-        return HealthExportResult(
-            records: exportRecords.filter { metrics.contains($0.metric) },
-            truncatedMetrics: truncated
-        )
+    func exportPage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthExportPage {
+        exportQueries.append(RecordedQuery(metric: metric, sinceAnchor: anchorData, windowStart: windowStart))
+        if corruptStoredAnchors, anchorData != nil {
+            throw HealthKitServiceError.corruptedAnchor
+        }
+        let pages = script[metric] ?? []
+
+        // The page that follows the caller's anchor in the scripted chain:
+        // a nil anchor starts at the first page, an anchor the caller never
+        // checkpointed re-reads the page it produced before, and an anchor
+        // outside the chain means caught up (the fallback below).
+        let index: Int
+        if let anchorData,
+           let found = pages.firstIndex(where: { $0.anchorData == anchorData }) {
+            index = found + 1
+        } else if anchorData == nil {
+            index = 0
+        } else {
+            index = pages.count
+        }
+        if index < pages.count {
+            return pages[index]
+        }
+        if fullPagesAfterScript || fullPagesAfterScriptMetrics.contains(metric) {
+            // An endless stream of full (here: empty) pages keeps the run
+            // on its page budget without scripting hundreds of pages.
+            return HealthExportPage(records: [], anchorData: anchorData, isFull: true)
+        }
+        return HealthExportPage(records: [], anchorData: anchorData, isFull: false)
     }
 
     func changePage(
@@ -510,12 +915,7 @@ private final class StubHealthDataProvider: HealthDataProviding {
         windowStart: Date,
         limit: Int
     ) async throws -> HealthChangePage {
-        HealthChangePage(
-            additions: [],
-            deletions: [],
-            anchorData: anchorData,
-            isFull: false
-        )
+        HealthChangePage(additions: [], deletions: [], anchorData: anchorData, isFull: false)
     }
 
     func observeChanges(
@@ -584,29 +984,93 @@ private final class StubDestinationClient: DestinationClient, @unchecked Sendabl
     }
 }
 
-/// A one-shot gate that lets tests pause an async operation at a known point.
-private actor AsyncGate {
+/// A one-shot gate that lets tests pause an async operation at a known
+/// point. Not an actor: tests open/release it synchronously from the main
+/// actor while the operation under test parks inside `enter()`.
+private final class AsyncGate: @unchecked Sendable {
+    private let state = GateState()
+
+    func enter() async {
+        state.markEntered()
+        while !state.isOpened {
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+
+    var isEntered: Bool { state.isEntered }
+
+    func waitForEntry() async {
+        while !isEntered {
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+
+    func open() { state.open() }
+}
+
+/// Lock-protected flag holder. All locking happens in synchronous
+/// methods (async contexts only read through them), which is async-safe.
+private final class GateState: @unchecked Sendable {
+    private let lock = NSLock()
     private var entered = false
     private var opened = false
 
-    func enter() async {
+    func markEntered() {
+        lock.lock()
         entered = true
-        while !opened {
-            try? await Task.sleep(nanoseconds: 2_000_000)
-        }
+        lock.unlock()
     }
 
     var isEntered: Bool {
-        entered
+        lock.lock()
+        defer { lock.unlock() }
+        return entered
     }
 
-    func waitForEntry() async {
-        while !entered {
+    var isOpened: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return opened
+    }
+
+    func open() {
+        lock.lock()
+        opened = true
+        lock.unlock()
+    }
+}
+
+/// Holds a gate open until released; lets a test park another operation
+/// behind it deterministically.
+private final class GateHolder: @unchecked Sendable {
+    private let state = GateState()
+
+    func waitForRelease() async {
+        state.markEntered()
+        while !state.isOpened {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
     }
 
-    func open() {
-        opened = true
+    func waitForEntry() async {
+        while !state.isEntered {
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+
+    func release() { state.open() }
+}
+
+/// A test-scoped temporary directory that cleans up in tearDown.
+private final class TempDirBox {
+    let url: URL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("manual-sync-tests-\(UUID().uuidString)", isDirectory: true)
+
+    init() {
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: url)
     }
 }

@@ -131,7 +131,7 @@ struct SettingsView: View {
 
     private var historyFooter: String {
         if backfillStore.depth == .allRecords {
-            return "Every record in Apple Health is included the first time a category syncs. The initial sync can be very large, may take many passes to deliver, and the first manual sync may report truncation."
+            return "Every record in Apple Health is included the first time a category syncs. The initial backfill can be very large; it runs in resumable chunks that continue across syncs until caught up."
         }
         return "How far back the first sync of a category reaches. From then on, every change is captured going forward regardless of this setting. Choosing a deeper history re-syncs a fresh window that reaches further back; a shallower choice never discards what was already captured."
     }
