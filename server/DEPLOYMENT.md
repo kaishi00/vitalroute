@@ -131,6 +131,10 @@ rewriting of the two paths (`/v1/records`, `/v1/health`) or headers
 
 ## Agent access: the read-only MCP query service
 
+> A ready-to-hand agent briefing (connect instructions, tool semantics,
+> example calls, and a copy-paste system-prompt block) lives in
+> [AGENT.md](AGENT.md).
+
 The stack also runs `mcp_server.py` — a read-only Model Context Protocol
 server that lets an agent query your stats without SSH and without any
 write path. It opens SQLite with `mode=ro` plus `PRAGMA query_only` (the

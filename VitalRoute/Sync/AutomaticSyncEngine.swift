@@ -80,8 +80,6 @@ enum BackgroundSyncLimits {
     static let changePageSize = 500
     static let pagesPerCategoryPerPass = 20
     static let maxDeliveryBatchesPerRun = 30
-    /// The initial scope covers the same seven-day window as manual sync.
-    static let bootstrapWindowDays = 7
 }
 
 /// How a delivery failure should be handled.
@@ -819,6 +817,13 @@ final class AutomaticSyncEngine {
         try await stateStore.savePendingScope(destination)
 
         let capacity = Outbox.capacityLimit
+        // The configured backfill depth decides how far a bootstrap reaches.
+        // An existing scope survives unless the depth now reaches DEEPER
+        // than the scope's fixed window (a shallower preference never
+        // discards already-captured history), and unless destination or
+        // category changed — the identity rules below.
+        let desiredWindowStart = BackfillDepth.stored(in: defaults)
+            .windowStart(from: now())
         for metric in HealthMetric.allCases where selectedMetrics.contains(metric) {
             try Task.checkCancellation()
 
@@ -827,23 +832,22 @@ final class AutomaticSyncEngine {
             var anchorData: Data?
             if let checkpoint,
                checkpoint.scope.destination == destination,
-               checkpoint.scope.metric == metric {
+               checkpoint.scope.metric == metric,
+               checkpoint.scope.windowStart <= desiredWindowStart {
                 // The stored checkpoint's generation and window are only
-                // valid for this exact scope identity.
+                // valid for this exact scope identity, and its window is at
+                // least as deep as the current preference.
                 scope = checkpoint.scope
                 anchorData = checkpoint.anchorData
             } else {
-                // Bootstrap: fresh generation, fixed seven-day window. Never
-                // lifetime history, and never a moved predicate.
+                // Bootstrap: fresh generation, fixed window from the
+                // configured depth (down to the entire history). Never a
+                // moved predicate.
                 scope = CategoryScope(
                     destination: destination,
                     metric: metric,
                     generation: UUID(),
-                    windowStart: Calendar.current.date(
-                        byAdding: .day,
-                        value: -BackgroundSyncLimits.bootstrapWindowDays,
-                        to: now()
-                    ) ?? now()
+                    windowStart: desiredWindowStart
                 )
                 anchorData = nil
             }

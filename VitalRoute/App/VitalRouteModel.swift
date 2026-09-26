@@ -12,8 +12,14 @@ final class VitalRouteModel {
     private(set) var isLoadingHealthData = false
     private(set) var healthDataError: String?
 
-    init(healthData: any HealthDataProviding) {
+    @ObservationIgnored private let defaults: UserDefaults
+
+    init(
+        healthData: any HealthDataProviding,
+        defaults: UserDefaults = .standard
+    ) {
         self.healthData = healthData
+        self.defaults = defaults
     }
 
     var isHealthAvailable: Bool {
@@ -45,7 +51,8 @@ final class VitalRouteModel {
         do {
             try await healthData.requestReadAuthorization(for: metrics)
             authorizationRequestCompleted = true
-            let startDate = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+            let startDate = BackfillDepth.stored(in: defaults)
+                .windowStart(from: Date())
             let records = try await healthData.queryRecentRecords(
                 since: startDate,
                 metrics: metrics,

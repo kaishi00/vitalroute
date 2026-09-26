@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AutomaticSyncEngine.self) private var autoSyncEngine
+    @Environment(BackfillPreferenceStore.self) private var backfillStore
     @Environment(VitalRouteModel.self) private var model
     @Environment(DestinationConfigurationStore.self) private var destinationStore
     @Environment(DestinationCredentialStore.self) private var credentialStore
@@ -34,9 +35,24 @@ struct SettingsView: View {
 
             Section("Sync behavior") {
                 Label("Manual sync", systemImage: "arrow.triangle.2.circlepath")
-                Text("Sync Now reads the last \(SyncLimits.windowDays) days for the selected categories and uploads it in batches over HTTPS. It works with or without automatic sync.")
+                Text("Sync Now reads the configured history (currently \(backfillStore.depth.label.lowercased())) for the selected categories and uploads it in batches over HTTPS. It works with or without automatic sync.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Picker("History to sync", selection: Binding(
+                    get: { backfillStore.depth },
+                    set: { backfillStore.set($0) }
+                )) {
+                    ForEach(BackfillDepth.allCases) { depth in
+                        Text(depth.label).tag(depth)
+                    }
+                }
+            } header: {
+                Text("History to sync")
+            } footer: {
+                Text(historyFooter)
             }
 
             Section("About") {
@@ -111,6 +127,13 @@ struct SettingsView: View {
             return "exclamationmark.circle"
         }
         return "info.circle"
+    }
+
+    private var historyFooter: String {
+        if backfillStore.depth == .allRecords {
+            return "Every record in Apple Health is included the first time a category syncs. The initial sync can be very large, may take many passes to deliver, and the first manual sync may report truncation."
+        }
+        return "How far back the first sync of a category reaches. From then on, every change is captured going forward regardless of this setting. Choosing a deeper history re-syncs a fresh window that reaches further back; a shallower choice never discards what was already captured."
     }
 
     private var modeDescription: String {

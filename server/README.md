@@ -24,7 +24,8 @@ multi-user access, or any write path beyond ingestion.
 
 For production installation as a managed Docker Compose service — including
 HTTPS exposure, upgrades, token rotation, and backups — see
-[DEPLOYMENT.md](DEPLOYMENT.md).
+[DEPLOYMENT.md](DEPLOYMENT.md). Agents that query the data should be given
+[AGENT.md](AGENT.md).
 
 ## Quick start
 

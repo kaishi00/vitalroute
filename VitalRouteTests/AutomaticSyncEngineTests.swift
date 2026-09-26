@@ -165,14 +165,14 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertEqual(provider.authorizationRequests, 1)
         XCTAssertEqual(client.testConnectionCount, 1)
 
-        // Bootstrap window is the fixed seven-day scope.
+        // Bootstrap window is the fixed scope of the DEFAULT depth (7 days).
         XCTAssertEqual(provider.changeQueries.count, 1)
         let query = provider.changeQueries[0]
         XCTAssertNil(query.anchorData)
         XCTAssertEqual(query.metric, .steps)
         XCTAssertEqual(
             query.windowStart.timeIntervalSinceNow,
-            -Double(BackgroundSyncLimits.bootstrapWindowDays * 24 * 3600),
+            -7 * 24 * 3600,
             accuracy: 30
         )
 
@@ -185,6 +185,118 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
         XCTAssertEqual(checkpoint?.anchorData, Data("a1".utf8))
         XCTAssertEqual(checkpoint?.scope.destination, endpoint)
+    }
+
+    @MainActor
+    func testDeeperBackfillRebootstrapsWithWiderWindow() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)],
+                deletions: [],
+                anchorData: Data("a1".utf8),
+                isFull: false
+            )],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(provider.changeQueries.count, 1)
+        XCTAssertNil(provider.changeQueries[0].anchorData)
+
+        // Deepening the configured history must mint a fresh scope: the next
+        // capture re-bootstraps from the deeper fixed window with no anchor.
+        BackfillDepth.store(.allRecords, in: defaults)
+        provider.changeQueries.removeAll()
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.count, 1)
+        XCTAssertNil(provider.changeQueries[0].anchorData)
+        XCTAssertEqual(provider.changeQueries[0].windowStart, .distantPast)
+
+        // The new checkpoint carries the deeper window.
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.scope.windowStart, .distantPast)
+    }
+
+    @MainActor
+    func testShallowerBackfillKeepsExistingScope() async throws {
+        BackfillDepth.store(.allRecords, in: defaults)
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)],
+                deletions: [],
+                anchorData: Data("deep-anchor".utf8),
+                isFull: false
+            )],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(provider.changeQueries[0].windowStart, .distantPast)
+
+        // A shallower preference never discards captured history: the scope
+        // keeps its deeper fixed window and continues from its anchor.
+        BackfillDepth.store(.sevenDays, in: defaults)
+        provider.changeQueries.removeAll()
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.count, 1)
+        XCTAssertEqual(provider.changeQueries[0].anchorData, Data("deep-anchor".utf8))
+        XCTAssertEqual(provider.changeQueries[0].windowStart, .distantPast)
+    }
+
+    @MainActor
+    func testThirtyDayDepthShapesBootstrapWindow() async throws {
+        BackfillDepth.store(.thirtyDays, in: defaults)
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.count, 1)
+        XCTAssertEqual(
+            provider.changeQueries[0].windowStart.timeIntervalSince(
+                BackfillDepth.thirtyDays.windowStart(from: Date())
+            ),
+            0,
+            accuracy: 30
+        )
+    }
+
+    @MainActor
+    func testSameDepthSecondPassKeepsScopeAndAnchor() async throws {
+        // The everyday case: unchanged depth on a later day must keep the
+        // existing scope (its fixed window start is always at-or-earlier
+        // than today's desired start) and continue from its anchor.
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)],
+                deletions: [],
+                anchorData: Data("same-anchor".utf8),
+                isFull: false
+            )],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        let firstWindow = provider.changeQueries[0].windowStart
+
+        provider.changeQueries.removeAll()
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.count, 1)
+        XCTAssertEqual(provider.changeQueries[0].anchorData, Data("same-anchor".utf8))
+        XCTAssertEqual(provider.changeQueries[0].windowStart, firstWindow)
     }
 
     func testEnabledFlagPersistsAcrossEngineInstances() async throws {
@@ -1686,7 +1798,7 @@ private final class ScriptedHealthProvider: HealthDataProviding {
     func resetConsumption() {
         consumed.removeAll()
     }
-    private(set) var changeQueries: [RecordedQuery] = []
+    var changeQueries: [RecordedQuery] = []
     private(set) var observedMetrics: [Set<HealthMetric>] = []
     private(set) var observationStopCount = 0
     private(set) var authorizationRequests = 0
