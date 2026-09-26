@@ -14,8 +14,8 @@ final class ServerSetupTests: XCTestCase {
         // A branch name moves and an abbreviated SHA is ambiguous; the guide
         // pins an immutable revision so the instructions stay compatible.
         let ref = ServerSetup.compatibleReceiverRef
-        XCTAssertNotNil(ref.range(of: "^[0-9a-f]{64}$", options: .regularExpression),
-                        "receiver ref must be a full 40/64-char lowercase commit SHA")
+        XCTAssertNotNil(ref.range(of: "^[0-9a-f]{40}$", options: .regularExpression),
+                        "receiver ref must be a full 40-char lowercase commit SHA")
     }
 
     func testDocumentationLinksArePinnedToTheCompatibleRevision() {
