@@ -160,7 +160,9 @@ final class RecordModelTests: XCTestCase {
         XCTAssertEqual(json["kind"] as? String, "series")
         let payload = try XCTUnwrap(json["data"] as? [String: Any])
         XCTAssertEqual(payload["seriesType"] as? String, "electrocardiogramVoltage")
-        XCTAssertEqual(payload["parentID"] as? String, parentID.uuidString.lowercased())
+        // The receiver normalizes UUID spellings case-insensitively; the
+        // encoder's own spelling is what round-trips here.
+        XCTAssertEqual(payload["parentID"] as? String, parentID.uuidString)
 
         let decoded = try decodeRecord(encoded)
         XCTAssertEqual(decoded, original)

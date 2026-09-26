@@ -73,7 +73,7 @@ struct CategoryData: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard try container.decode(String.self, forKey: .type) == Self.wireType else {
-            throw Self.typeMismatch(decoder)
+            throw QuantityData.typeMismatch(decoder)
         }
         value = try container.decode(Int.self, forKey: .value)
         name = try container.decodeIfPresent(String.self, forKey: .name)

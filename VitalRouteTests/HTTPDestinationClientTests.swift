@@ -56,7 +56,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         let client = HTTPDestinationClient { request in
             box.store(request)
             return (
-                self.httpData(#"{"status":"accepted","accepted":1,"duplicates":0}"#),
+                self.httpData(#"{"status":"accepted","accepted":1,"duplicates":0,"superseded":0,"appliedDeletions":0,"duplicateDeletions":0}"#),
                 self.httpResponse(status: 200, url: request.url!)
             )
         }
@@ -113,14 +113,14 @@ final class HTTPDestinationClientTests: XCTestCase {
     func testValidAcknowledgmentDecodes() async throws {
         let client = HTTPDestinationClient { request in
             (
-                self.httpData(#"{"status":"accepted","accepted":12,"duplicates":3,"schemaVersion":1}"#),
+                self.httpData(#"{"status":"accepted","accepted":12,"duplicates":3,"superseded":0,"appliedDeletions":0,"duplicateDeletions":0,"schemaVersion":3}"#),
                 self.httpResponse(status: 200, url: request.url!)
             )
         }
 
         // Acknowledgment counts must account for the whole batch; send 15
         // upserts to match the 12 new + 3 duplicates the receiver reports.
-        let changes = (0..<15).map { index in
+        let changes: [SyncChangeEvent] = (0..<15).map { index in
             .upsert(HealthRecord(
                 metric: .steps,
                 startDate: Date(timeIntervalSince1970: 1_735_689_600),

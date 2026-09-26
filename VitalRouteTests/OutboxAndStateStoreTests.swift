@@ -90,13 +90,22 @@ final class OutboxAndStateStoreTests: XCTestCase {
         XCTAssertLessThan(first.events.count, 50, "the byte budget must end the batch early")
         XCTAssertFalse(first.events.isEmpty)
         let encodedSize = first.events.reduce(0) { total, event in
-            total + (try? JSONEncoder().encode(event).count) ?? 0
+            total + ((try? JSONEncoder().encode(event))?.count ?? 0)
         }
         XCTAssertLessThanOrEqual(encodedSize, 1_000)
-        // The rest of the queue remains pending and is delivered later.
+        // The rest of the queue remains pending and is delivered across
+        // later budget-bounded batches.
         await outbox.remove(eventIDs: first.events.map(\.eventID))
-        let second = try await outbox.nextBatch()
-        XCTAssertEqual(second.events.count + first.events.count, 50)
+        var delivered = first.events.count
+        var rounds = 0
+        while delivered < 50, rounds < 100 {
+            rounds += 1
+            let next = try await outbox.nextBatch()
+            if next.events.isEmpty { break }
+            await outbox.remove(eventIDs: next.events.map(\.eventID))
+            delivered += next.events.count
+        }
+        XCTAssertEqual(delivered, 50, "every event drains across budgeted batches")
     }
 
     func testSingleOversizedEventStillShipsAlone() async throws {

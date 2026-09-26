@@ -50,10 +50,8 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
     }
 
     private func loadElectrocardiogram(id: UUID) async throws -> HKElectrocardiogram {
-        guard let type = HKObjectType.electrocardiogramType() else {
-            throw HealthKitServiceError.unavailable
-        }
-        let predicate = HKQuery.predicateForObjects(withIdentifiers: [id])
+        let type = HKObjectType.electrocardiogramType()
+        let predicate = HKQuery.predicateForObjects(with: [id])
         return try await withCheckedThrowingContinuation { continuation in
             let query = HKSampleQuery(
                 sampleType: type,
@@ -80,17 +78,20 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
     /// callback thread's type.
     private func fetchPoints(ecg: HKElectrocardiogram) async throws -> [[Double]] {
         let collector = MeasurementCollector()
-        let microvolts = HKUnit.volts().unitMultiplied(by: .metricPrefixMicro)
+        let microvolts = HKUnit.voltUnit(with: .micro)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let query = HKElectrocardiogramQuery(ecg) { _, result in
                 switch result {
                 case .error(let error):
                     continuation.resume(throwing: error)
                 case .measurement(let measurement):
-                    collector.append(
-                        time: measurement.timeIntervalSinceSampleStart,
-                        voltage: measurement.voltage.doubleValue(for: microvolts)
-                    )
+                    // Apple Watch ECGs carry a single lead.
+                    if let voltage = measurement.quantity(for: .appleWatchSimilarToLeadI) {
+                        collector.append(
+                            time: measurement.timeSinceSampleStart,
+                            voltage: voltage.doubleValue(for: microvolts)
+                        )
+                    }
                 case .done:
                     continuation.resume()
                 @unknown default:

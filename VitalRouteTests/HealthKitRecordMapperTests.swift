@@ -87,16 +87,11 @@ final class HealthKitRecordMapperTests: XCTestCase {
         XCTAssertEqual(payload.name, "asleepCore")
     }
 
-    func testUnmappableSleepStageCarriesRawValueWithoutName() throws {
-        let type = try XCTUnwrap(HKObjectType.categoryType(forIdentifier: .sleepAnalysis))
-        let sample = HKCategorySample(type: type, value: 999, start: date, end: date)
-
-        let mapped = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: sample, metric: .sleep))
-        guard case .category(let payload) = try XCTUnwrap(mapped.record).data else {
-            return XCTFail("expected category payload")
-        }
-        XCTAssertEqual(payload.value, 999)
-        XCTAssertNil(payload.name)
+    func testUnmappableSleepStageCarriesRawValueWithoutName() {
+        // HealthKit refuses to construct samples with invalid category
+        // values, so the unmappable stage path is exercised on the naming
+        // function directly.
+        XCTAssertNil(HealthKitRecordMapper.categoryName(999, naming: .sleepAnalysis))
     }
 
     // MARK: Correlation
@@ -138,8 +133,9 @@ final class HealthKitRecordMapperTests: XCTestCase {
         guard case .correlation(let payload) = record.data else {
             return XCTFail("expected correlation payload")
         }
-        XCTAssertEqual(payload.components.map(\.metric), ["bloodPressureSystolic", "bloodPressureDiastolic"])
-        XCTAssertEqual(payload.components.map(\.value), [122, 78])
+        // Components are sorted by metric for deterministic wire output.
+        XCTAssertEqual(payload.components.map(\.metric), ["bloodPressureDiastolic", "bloodPressureSystolic"])
+        XCTAssertEqual(payload.components.map(\.value), [78, 122])
         XCTAssertEqual(payload.components.map(\.unit), ["mmHg", "mmHg"])
     }
 
@@ -163,7 +159,7 @@ final class HealthKitRecordMapperTests: XCTestCase {
             return XCTFail("expected workout payload")
         }
         XCTAssertEqual(payload.activityType, "running")
-        XCTAssertEqual(payload.activityTypeRawValue, HKWorkoutActivityType.running.rawValue)
+        XCTAssertEqual(payload.activityTypeRawValue, Int(HKWorkoutActivityType.running.rawValue))
         XCTAssertEqual(payload.duration, 30 * 60, accuracy: 0.001)
         XCTAssertEqual(payload.totalEnergyKilocalories ?? -1, 210, accuracy: 0.001)
         XCTAssertEqual(payload.totalDistanceMeters ?? -1, 5_000, accuracy: 0.001)
@@ -261,42 +257,25 @@ final class HealthKitRecordMapperTests: XCTestCase {
 
     // MARK: Clinical
 
-    func testClinicalRecordPreservesFHIRStructurally() throws {
-        let clinicalType = try XCTUnwrap(
-            HKObjectType.clinicalType(forIdentifier: HKClinicalTypeIdentifier.allergyRecord)
-        )
+    /// HKClinicalRecord exposes no constructible initializer, so the
+    /// mapper's clinical glue is exercised on-device only; here we pin the
+    /// FHIR decoding it relies on: structural preservation via FHIRJSON.
+    func testClinicalFHIRDecodingPreservesStructure() throws {
         let fhirJSON = """
         {"resourceType":"AllergyIntolerance","code":{"text":"Pollen"},
-         "clinicalStatus":{"coding":[{"code":"active"}]}}
+         "clinicalStatus":{"coding":[{"code":"active"}]},
+         "onsetDateTime":"2026-01-02","isCritical":true,"severity":{"scale":3}}
         """
-        let resource = try XCTUnwrap(
-            HKFHIRResource(
-                fhirType: "AllergyIntolerance",
-                jsonRepresentation: Data(fhirJSON.utf8),
-                sourceURL: URL(string: "https://example.org/fhir")
-            )
-        )
-        let record = HKClinicalRecord(
-            type: clinicalType,
-            fhirResource: resource,
-            metadata: nil
-        )
-
-        let mapped = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(
-            from: record,
-            metric: HealthMetric(rawValue: "bloodPressure")!
-        ))
-        guard case .clinical(let payload) = try XCTUnwrap(mapped.record).data else {
-            return XCTFail("expected clinical payload")
-        }
-        XCTAssertEqual(payload.fhirType, "AllergyIntolerance")
-        guard case .object(let fhirObject) = payload.fhirResource else {
+        let value = try JSONDecoder().decode(FHIRJSON.self, from: Data(fhirJSON.utf8))
+        guard case .object(let fhirObject) = value else {
             return XCTFail("expected a structured FHIR object")
         }
-        XCTAssertEqual(fhirObject["resourceType"], .string("AllergyIntolerance"))
+        XCTAssertEqual(fhirObject["resourceType"], FHIRJSON.string("AllergyIntolerance"))
+        XCTAssertEqual(fhirObject["isCritical"], FHIRJSON.bool(true))
+        XCTAssertEqual(fhirObject["severity"], FHIRJSON.object(["scale": .int(3)]))
         XCTAssertEqual(
-            fhirObject["code"],
-            .object(["text": .string("Pollen")])
+            fhirObject["clinicalStatus"],
+            FHIRJSON.object(["coding": .array([.object(["code": .string("active")])])])
         )
     }
 
@@ -317,7 +296,8 @@ final class HealthKitRecordMapperTests: XCTestCase {
             points: points,
             metric: metric,
             parentStart: date,
-            parentEnd: date.addingTimeInterval(24)
+            parentEnd: date.addingTimeInterval(24),
+            chunkSize: 10
         )
 
         XCTAssertEqual(records.count, 3)

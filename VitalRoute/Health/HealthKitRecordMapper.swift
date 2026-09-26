@@ -43,17 +43,25 @@ enum HealthKitRecordMapper {
     }
 
     static func sampleType(healthKitIdentifier: String) -> HKSampleType? {
-        if let suffix = suffix("HKQuantityTypeIdentifier", of: healthKitIdentifier) {
-            return HKObjectType.quantityType(forIdentifier: HKQuantityTypeIdentifier(rawValue: suffix))
+        // The HealthKit identifier enums spell their raw values with the
+        // full prefix ("HKQuantityTypeIdentifierStepCount"), matching the
+        // catalog strings; a family mismatch resolves to nil and falls
+        // through to the next family.
+        let quantity = HKQuantityTypeIdentifier(rawValue: healthKitIdentifier)
+        if let type = HKObjectType.quantityType(forIdentifier: quantity) {
+            return type
         }
-        if let suffix = suffix("HKCategoryTypeIdentifier", of: healthKitIdentifier) {
-            return HKObjectType.categoryType(forIdentifier: HKCategoryTypeIdentifier(rawValue: suffix))
+        let category = HKCategoryTypeIdentifier(rawValue: healthKitIdentifier)
+        if let type = HKObjectType.categoryType(forIdentifier: category) {
+            return type
         }
-        if let suffix = suffix("HKCorrelationTypeIdentifier", of: healthKitIdentifier) {
-            return HKObjectType.correlationType(forIdentifier: HKCorrelationTypeIdentifier(rawValue: suffix))
+        let correlation = HKCorrelationTypeIdentifier(rawValue: healthKitIdentifier)
+        if let type = HKObjectType.correlationType(forIdentifier: correlation) {
+            return type
         }
-        if let suffix = suffix("HKClinicalTypeIdentifier", of: healthKitIdentifier) {
-            return HKObjectType.clinicalType(forIdentifier: HKClinicalTypeIdentifier(rawValue: suffix))
+        let clinical = HKClinicalTypeIdentifier(rawValue: healthKitIdentifier)
+        if let type = HKObjectType.clinicalType(forIdentifier: clinical) {
+            return type
         }
         switch healthKitIdentifier {
         case "HKWorkoutTypeIdentifier":
@@ -63,11 +71,6 @@ enum HealthKitRecordMapper {
         default:
             return nil
         }
-    }
-
-    private static func suffix(_ prefix: String, of identifier: String) -> String? {
-        guard identifier.hasPrefix(prefix), identifier.count > prefix.count else { return nil }
-        return String(identifier.dropFirst(prefix.count))
     }
 
     /// Every object type that must be authorized to read the given
@@ -134,11 +137,11 @@ enum HealthKitRecordMapper {
             return MappedSample(record: envelope.record(data: .correlation(data)))
         case .workout:
             guard let workout = sample as? HKWorkout else { return nil }
-            return MappedSample(record: envelope.record(data: workoutData(workout)))
+            return MappedSample(record: envelope.record(data: .workout(workoutData(workout))))
         case .electrocardiogram:
             guard let ecg = sample as? HKElectrocardiogram else { return nil }
             return MappedSample(
-                record: envelope.record(data: electrocardiogramData(ecg)),
+                record: envelope.record(data: .electrocardiogram(electrocardiogramData(ecg))),
                 seriesRequest: SeriesRequest(
                     seriesID: ecg.uuid,
                     parentID: ecg.uuid,
@@ -239,7 +242,9 @@ enum HealthKitRecordMapper {
             ))
         }
         guard !components.isEmpty else { return nil }
-        return CorrelationData(components: components)
+        // HealthKit correlations carry their objects as a set; a stable
+        // order keeps the encoded payload deterministic.
+        return CorrelationData(components: components.sorted { $0.metric < $1.metric })
     }
 
     // MARK: - Workouts
@@ -247,7 +252,7 @@ enum HealthKitRecordMapper {
     static func workoutData(_ workout: HKWorkout) -> WorkoutData {
         WorkoutData(
             activityType: activityTypeName(workout.workoutActivityType),
-            activityTypeRawValue: workout.workoutActivityType.rawValue,
+            activityTypeRawValue: Int(workout.workoutActivityType.rawValue),
             duration: workout.duration,
             totalEnergyKilocalories: workoutStatistics(workout, quantityTypeIdentifier: "HKQuantityTypeIdentifierActiveEnergyBurned")?
                 .doubleValue(for: HKUnit.kilocalorie()),
@@ -344,7 +349,6 @@ enum HealthKitRecordMapper {
         case .skatingSports: "skatingSports"
         case .snowSports: "snowSports"
         case .soccer: "soccer"
-        case .socialDancing: "socialDancing"
         case .softball: "softball"
         case .squash: "squash"
         case .stairClimbing: "stairClimbing"
@@ -376,11 +380,6 @@ enum HealthKitRecordMapper {
         case .stairs: "stairs"
         case .wheelchairWalkPace: "wheelchairWalkPace"
         case .wheelchairRunPace: "wheelchairRunPace"
-        case .taiChiFromCustom: "taiChiFromCustom"
-        case .mixedCardioFromCustom: "mixedCardioFromCustom"
-        case .hiitFromCustom: "hiitFromCustom"
-        case .walkRunTreadmillFromCustom: "walkRunTreadmillFromCustom"
-        case .cardioDanceFromCustom: "cardioDanceFromCustom"
         @unknown default:
             "hkActivityType\(type.rawValue)"
         }
@@ -392,8 +391,8 @@ enum HealthKitRecordMapper {
         ElectrocardiogramData(
             classification: ecgClassificationName(ecg.classification),
             classificationRawValue: ecg.classification.rawValue,
-            symptomStatus: ecgSymptomStatusName(ecg.symptomStatus),
-            symptomStatusRawValue: ecg.symptomStatus.flatMap { Optional($0.rawValue) },
+            symptomStatus: ecgSymptomStatusName(ecg.symptomsStatus),
+            symptomStatusRawValue: ecg.symptomsStatus.rawValue,
             averageHeartRate: ecg.averageHeartRate?.doubleValue(for: HKUnit.count().unitDivided(by: .minute())),
             samplingFrequency: ecg.samplingFrequency?.doubleValue(for: .hertz()),
             voltageSeriesID: ecg.uuid,
@@ -408,19 +407,20 @@ enum HealthKitRecordMapper {
         case .atrialFibrillation: "atrialFibrillation"
         case .inconclusiveLowHeartRate: "inconclusiveLowHeartRate"
         case .inconclusiveHighHeartRate: "inconclusiveHighHeartRate"
-        case .inconclusive: "inconclusive"
+        case .inconclusivePoorReading: "inconclusivePoorReading"
+        case .inconclusiveOther: "inconclusiveOther"
         @unknown default:
             "hkECGClassification\(classification.rawValue)"
         }
     }
 
-    static func ecgSymptomStatusName(_ status: HKElectrocardiogram.SymptomStatus?) -> String? {
+    /// HealthKit spells this "SymptomsStatus" and never leaves it unset
+    /// optionals: notSet/none/present are the documented values.
+    static func ecgSymptomStatusName(_ status: HKElectrocardiogram.SymptomsStatus) -> String? {
         switch status {
-        case .some(.none): "none"
-        case .some(.notPresent): "notPresent"
-        case .some(.present): "present"
-        case .some(.autoOnly): "autoOnly"
-        case .none: nil
+        case .notSet: "notSet"
+        case .none: "none"
+        case .present: "present"
         @unknown default:
             nil
         }
@@ -436,8 +436,8 @@ enum HealthKitRecordMapper {
               case .object = value
         else { return nil }
         return ClinicalData(
-            fhirType: resource.fhirType,
-            fhirIdentifier: resource.identifier,
+            fhirType: resource.resourceType.rawValue,
+            fhirIdentifier: resource.identifier.isEmpty ? nil : resource.identifier,
             fhirResource: value
         )
     }
@@ -478,11 +478,13 @@ enum HealthKitRecordMapper {
         points: [[Double]],
         metric: HealthMetric,
         parentStart: Date,
-        parentEnd: Date
+        parentEnd: Date,
+        chunkSize: Int = SeriesLimits.pointsPerChunk
     ) -> [HealthRecord] {
+        precondition(chunkSize > 0, "chunk size must be positive")
         precondition(!points.isEmpty, "series chunking requires at least one point")
-        let chunks = stride(from: 0, to: points.count, by: SeriesLimits.pointsPerChunk).map { offset in
-            Array(points[offset..<Swift.min(offset + SeriesLimits.pointsPerChunk, points.count)])
+        let chunks = stride(from: 0, to: points.count, by: chunkSize).map { offset in
+            Array(points[offset..<Swift.min(offset + chunkSize, points.count)])
         }
         return chunks.enumerated().map { index, chunkPoints in
             let firstOffset = chunkPoints.first?.first ?? 0
@@ -515,6 +517,7 @@ extension CanonicalUnit {
         case .countPerMinute: HKUnit.count().unitDivided(by: .minute())
         case .milliseconds: HKUnit.secondUnit(with: .milli)
         case .kilocalories: .kilocalorie()
+        case .millimetersOfMercury: .millimeterOfMercury()
         }
     }
 
@@ -526,6 +529,7 @@ extension CanonicalUnit {
         case .countPerMinute: "count/min"
         case .milliseconds: "ms"
         case .kilocalories: "kcal"
+        case .millimetersOfMercury: "mmHg"
         }
     }
 }

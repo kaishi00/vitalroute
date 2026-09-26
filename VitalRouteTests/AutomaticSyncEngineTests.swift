@@ -2750,7 +2750,17 @@ private final class ManualStubClient: DestinationClient, @unchecked Sendable {
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ChangeAcknowledgment {
-        ChangeAcknowledgment(accepted: 0, duplicates: 0, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0)
+        if let sendGate {
+            await sendGate.enter()
+        }
+        let upserts = changes.filter { if case .upsert = $0 { return true } else { return false } }.count
+        return ChangeAcknowledgment(
+            accepted: upserts,
+            duplicates: changes.count - upserts,
+            superseded: 0,
+            appliedDeletions: 0,
+            duplicateDeletions: 0
+        )
     }
 }
 

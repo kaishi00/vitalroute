@@ -17,7 +17,11 @@ final class ExportSelectionStore {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let rawValues = defaults.stringArray(forKey: storageKey) ?? []
+        // Only user-selectable metrics are valid selections; unknown
+        // identifiers and component-only metrics (which exist to describe
+        // parts of other records) are dropped at load.
         selectedMetrics = Set(rawValues.compactMap(HealthMetric.init(rawValue:)))
+            .filter { $0.descriptor.userSelectable }
     }
 
     var hasSelection: Bool {

@@ -1536,6 +1536,8 @@ final class AutomaticSyncEngine {
                 return .deferred("background observation was replaced.")
             case .authorizationFailed, .noMetricsRequested:
                 return .deferred(healthError.localizedDescription)
+            case .seriesFetcherUnavailable(let metric):
+                return .actionable(.protocolFailure("the \(metric) series loader is not configured."))
             }
         }
         if error is CocoaError {

@@ -60,6 +60,21 @@ struct HealthMetric: Hashable, Codable, Identifiable, Sendable, Comparable {
     }
 }
 
+/// Ergonomic constants for the current catalog. New metrics need no
+/// addition here — `HealthMetric(rawValue:)` and the descriptor cover them.
+extension HealthMetric {
+    static let steps = HealthMetric(unchecked: "steps")
+    static let heartRate = HealthMetric(unchecked: "heartRate")
+    static let restingHeartRate = HealthMetric(unchecked: "restingHeartRate")
+    static let heartRateVariability = HealthMetric(unchecked: "heartRateVariability")
+    static let sleep = HealthMetric(unchecked: "sleep")
+    static let activeEnergy = HealthMetric(unchecked: "activeEnergy")
+    static let workouts = HealthMetric(unchecked: "workouts")
+    static let bloodPressure = HealthMetric(unchecked: "bloodPressure")
+    static let bloodPressureSystolic = HealthMetric(unchecked: "bloodPressureSystolic")
+    static let bloodPressureDiastolic = HealthMetric(unchecked: "bloodPressureDiastolic")
+}
+
 /// What an ordinary quantity/category conversion looks like. Closed and
 /// static: a new conversion joins this enum and the mapper's single switch
 /// over it, rather than growing switches across the app.
@@ -68,6 +83,7 @@ enum CanonicalUnit: String, Hashable, Sendable {
     case countPerMinute
     case milliseconds
     case kilocalories
+    case millimetersOfMercury
 }
 
 /// How a category sample's raw value becomes a stable value name.
@@ -240,7 +256,7 @@ enum MetricCatalog {
             symbolName: "stethoscope",
             group: .vitals,
             healthKitIdentifier: "HKQuantityTypeIdentifierBloodPressureSystolic",
-            extraction: .quantity(canonicalUnit: .countPerMinute),
+            extraction: .quantity(canonicalUnit: .millimetersOfMercury),
             userSelectable: false
         ),
         MetricDescriptor(
@@ -250,7 +266,7 @@ enum MetricCatalog {
             symbolName: "stethoscope",
             group: .vitals,
             healthKitIdentifier: "HKQuantityTypeIdentifierBloodPressureDiastolic",
-            extraction: .quantity(canonicalUnit: .countPerMinute),
+            extraction: .quantity(canonicalUnit: .millimetersOfMercury),
             userSelectable: false
         ),
         MetricDescriptor(

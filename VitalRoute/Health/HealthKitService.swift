@@ -355,6 +355,7 @@ final class HealthKitService: HealthDataProviding {
             ascending: false
         )
         let fetchers = seriesFetchers
+        let store = healthStore
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HealthRecord], Error>) in
             let once = ContinuationGuard()
             let query = HKSampleQuery(
@@ -380,7 +381,7 @@ final class HealthKitService: HealthDataProviding {
                         let records = try await Self.expandSeries(
                             mapped,
                             metric: metric,
-                            using: healthStore,
+                            using: store,
                             seriesFetchers: fetchers
                         )
                         continuation.resume(returning: records)
@@ -389,7 +390,7 @@ final class HealthKitService: HealthDataProviding {
                     }
                 }
             }
-            healthStore.execute(query)
+            store.execute(query)
         }
     }
 
