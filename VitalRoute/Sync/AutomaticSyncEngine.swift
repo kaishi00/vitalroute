@@ -290,7 +290,7 @@ final class AutomaticSyncEngine {
 
     /// Enables automatic sync. Foreground user action: requests HealthKit
     /// authorization for the selection and verifies the receiver supports
-    /// contract v2 (deletions) before any background work is armed.
+    /// contract v3 (deletions) before any background work is armed.
     func enable(
         destination endpoint: String,
         token bearerToken: String?,
@@ -351,7 +351,7 @@ final class AutomaticSyncEngine {
             )
             guard health.supportsDeletions else {
                 guard isCurrent(generation) else { return superseded("the capability check") }
-                let message = "The destination receiver does not support deletions (contract v2). Update it to a v2 receiver, then try again. Manual sync keeps working."
+                let message = "The destination receiver does not support deletions (contract v3). Update it to a v3 receiver, then try again. Manual sync keeps working."
                 lastStatusMessage = message
                 return .failed(message: message)
             }
@@ -1027,7 +1027,7 @@ final class AutomaticSyncEngine {
         let desiredWindowStart = BackfillDepth.stored(in: defaults)
             .windowStart(from: now())
         var backfillPending = ((try? await outbox.laneCounts())?.backfill) ?? 0
-        for metric in HealthMetric.allCases where selectedMetrics.contains(metric) {
+        for metric in MetricCatalog.metrics.map(\.metric) where selectedMetrics.contains(metric) {
             try Task.checkCancellation()
 
             let checkpoint = await stateStore.loadCheckpoint(for: metric)
@@ -1083,7 +1083,15 @@ final class AutomaticSyncEngine {
                         // the outbox dedupes by event identity and the
                         // receiver answers idempotently. Deletions for these
                         // samples are captured by that same later read.
-                        _ = try await outbox.append(fresh.map { SyncChangeEvent.upsert($0) }, lane: .live)
+                        // No skip count surfaced here: the unthrottled
+                        // anchored read re-reports these same samples and
+                        // its path surfaces the skip; this head read is
+                        // only an optimization over it.
+                        _ = try await outbox.append(
+                            fresh.map { SyncChangeEvent.upsert($0) }
+                                .filter(RecordWireLimits.isTransmittableChangeEvent),
+                            lane: .live
+                        )
                     }
                 } catch let cancellation as CancellationError {
                     throw cancellation
@@ -1123,7 +1131,16 @@ final class AutomaticSyncEngine {
                 // A full page belongs to the historical catch-up; the page
                 // that drains the stream to its head is live data.
                 let lane: Outbox.Lane = isCaughtUp || !page.isFull ? .live : .backfill
-                var events: [SyncChangeEvent] = page.additions.map { .upsert($0) }
+                // Records exceeding the receiver's structural limits can
+                // never be delivered and would poison their whole batch
+                // (the receiver rejects batches atomically). Skip them and
+                // surface the count instead of queueing doomed data.
+                let deliverableAdditions = page.additions.filter(RecordWireLimits.isTransmittable)
+                let undeliverable = page.additions.count - deliverableAdditions.count
+                if undeliverable > 0 {
+                    lastStatusMessage = "\(undeliverable) captured record(s) from \(metric.displayName) exceed the destination's size limits and were not queued."
+                }
+                var events: [SyncChangeEvent] = deliverableAdditions.map { .upsert($0) }
                 events.append(contentsOf: page.deletions.map { .delete($0) })
                 if !events.isEmpty {
                     let written = try await outbox.append(events, lane: lane)
@@ -1197,13 +1214,17 @@ final class AutomaticSyncEngine {
         }
 
         var quarantinedDuringRun = 0
+        var skippedDuringRun = 0
         for _ in 0..<BackgroundSyncLimits.maxDeliveryBatchesPerRun {
             try Task.checkCancellation()
             let snapshot = try await outbox.nextBatch()
             pendingCount = snapshot.totalPending
             quarantinedDuringRun += snapshot.quarantinedCount
+            skippedDuringRun += snapshot.skippedOversizedCount
             if quarantinedDuringRun > 0 {
                 lastStatusMessage = "Some captured changes were unreadable and were set aside (\(quarantinedDuringRun)). Delivery of the remaining changes continues."
+            } else if snapshot.skippedOversizedCount > 0 {
+                lastStatusMessage = "\(snapshot.skippedOversizedCount) queued change(s) waited on this batch's size budget and are delivered separately."
             }
             if snapshot.events.isEmpty {
                 break
@@ -1228,7 +1249,7 @@ final class AutomaticSyncEngine {
                 retryState.lastSuccessAt = now()
                 await stateStore.saveRetryState(retryState)
                 nextRetryAt = nil
-                if quarantinedDuringRun == 0 {
+                if quarantinedDuringRun == 0 && skippedDuringRun == 0 {
                     lastStatusMessage = discardedWorkNotice
                 }
             } catch let cancellation as CancellationError {
@@ -1536,6 +1557,12 @@ final class AutomaticSyncEngine {
                 return .deferred("background observation was replaced.")
             case .authorizationFailed, .noMetricsRequested:
                 return .deferred(healthError.localizedDescription)
+            case .seriesFetcherUnavailable(let metric):
+                return .actionable(.protocolFailure("the \(metric) series loader is not configured."))
+            case .seriesSampleUnavailable:
+                // The sample vanished between the page read and the series
+                // fetch; the next anchored read reconciles.
+                return .transient
             }
         }
         if error is CocoaError {

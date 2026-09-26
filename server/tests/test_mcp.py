@@ -32,24 +32,29 @@ def make_record(**overrides):
     record = {
         "id": str(uuid.uuid4()),
         "metric": "steps",
-        "value": 1000,
-        "unit": "count",
+        "kind": "quantity",
         "startDate": "2026-09-20T10:00:00.000Z",
         "endDate": "2026-09-20T10:01:00.000Z",
         "sourceName": "Synthetic Source",
         "deviceName": "Synthetic Device",
         "metadata": {},
+        "data": {"type": "quantity", "value": 1000, "unit": "count"},
     }
     record.update(overrides)
     return record
 
 
 def prepared(record):
-    from validation import validate_payload
-    batch_created_at, prepared_records = validate_payload(
-        {"schemaVersion": 1, "createdAt": "2026-09-23T12:00:00.000Z", "records": [record]}, 500
-    )
-    return batch_created_at, prepared_records
+    from validation import validate_change_payload
+
+    payload = {
+        "schemaVersion": 3,
+        "createdAt": "2026-09-23T12:00:00.000Z",
+        "batchId": str(uuid.uuid4()),
+        "changes": [{"kind": "upsert", "record": record}],
+    }
+    batch_created_at, prepared_changes = validate_change_payload(payload, 500)
+    return batch_created_at, prepared_changes
 
 
 class QueryServerTestCase(unittest.TestCase):
@@ -59,21 +64,20 @@ class QueryServerTestCase(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tempdir.name, "records.sqlite3")
         self.store = storage.RecordStore(self.db_path)
-        self.applier = storage.ChangeApplier(self.db_path)
 
-        self.r1 = make_record(id=str(uuid.uuid4()), value=1000,
+        self.r1 = make_record(id=str(uuid.uuid4()), data={"type": "quantity", "value": 1000, "unit": "count"},
                               startDate="2026-09-20T10:00:00.000Z",
                               endDate="2026-09-20T10:01:00.000Z")
-        self.r2 = make_record(id=str(uuid.uuid4()), value=2000,
+        self.r2 = make_record(id=str(uuid.uuid4()), data={"type": "quantity", "value": 2000, "unit": "count"},
                               startDate="2026-09-21T09:00:00.000Z",
                               endDate="2026-09-21T09:01:00.000Z")
-        self.h1 = make_record(id=str(uuid.uuid4()), metric="heartRate", value=60,
-                              unit="count/min",
+        self.h1 = make_record(id=str(uuid.uuid4()), metric="heartRate",
+                              data={"type": "quantity", "value": 60, "unit": "count/min"},
                               startDate="2026-09-21T12:00:00.000Z",
                               endDate="2026-09-21T12:01:00.000Z")
         for record in (self.r1, self.r2, self.h1):
-            batch_created_at, prepared_records = prepared(record)
-            self.store.ingest(prepared_records, batch_created_at)
+            batch_created_at, prepared_changes = prepared(record)
+            self.store.apply(prepared_changes, batch_created_at)
 
         self.server = mcp_server.make_server(HOST, 0, self.db_path, TOKEN)
         self.port = self.server.server_address[1]
@@ -167,15 +171,19 @@ class ToolTests(QueryServerTestCase):
         payload = json.loads(result["content"][0]["text"])
         by_metric = {m["metric"]: m for m in payload["metrics"]}
         self.assertEqual(by_metric["steps"]["records"], 2)
+        self.assertEqual(by_metric["steps"]["kind"], "quantity")
+        self.assertEqual(by_metric["steps"]["unit"], "count")
         self.assertEqual(by_metric["heartRate"]["records"], 1)
+        self.assertEqual(by_metric["heartRate"]["unit"], "count/min")
 
     def test_daily_stats_days_and_range(self):
         result = self._call("daily_stats", {"days": 7})
         payload = json.loads(result["content"][0]["text"])
-        days = {(d["date"], d["metric"]): d for d in payload["days"]}
-        self.assertEqual(days[("2026-09-20", "steps")]["sum"], 1000)
-        self.assertEqual(days[("2026-09-21", "steps")]["sum"], 2000)
-        self.assertEqual(days[("2026-09-21", "heartRate")]["avg"], 60)
+        days = {(d["date"], d["metric"], d["kind"]): d for d in payload["days"]}
+        self.assertEqual(days[("2026-09-20", "steps", "quantity")]["sum"], 1000)
+        self.assertEqual(days[("2026-09-20", "steps", "quantity")]["unit"], "count")
+        self.assertEqual(days[("2026-09-21", "steps", "quantity")]["sum"], 2000)
+        self.assertEqual(days[("2026-09-21", "heartRate", "quantity")]["avg"], 60)
         result = self._call("daily_stats", {"metric": "steps", "from": "2026-09-21", "to": "2026-09-21"})
         payload = json.loads(result["content"][0]["text"])
         self.assertEqual([d["sum"] for d in payload["days"]], [2000])
@@ -190,7 +198,10 @@ class ToolTests(QueryServerTestCase):
         result = self._call("recent_records", {"metric": "steps", "limit": 1})
         payload = json.loads(result["content"][0]["text"])
         self.assertEqual(len(payload["records"]), 1)
-        self.assertEqual(payload["records"][0]["value"], 2000)  # newest first
+        # Newest first; the typed payload travels intact.
+        record = payload["records"][0]
+        self.assertEqual(record["data"]["value"], 2000)
+        self.assertEqual(record["kind"], "quantity")
 
     def test_malformed_jsonrpc_shapes_never_drop_the_connection(self):
         # params as a non-dict must yield a JSON-RPC error, not a closed
@@ -296,9 +307,9 @@ class ToolTests(QueryServerTestCase):
 
     def test_deleted_records_are_excluded_from_every_tool(self):
         # Delete r1 through the receiver's own validation + change pipeline,
-        # exactly as a v2 sync batch would.
+        # exactly as a schema-3 sync batch would.
         payload = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "createdAt": "2026-09-23T12:00:00.000Z",
             "batchId": str(uuid.uuid4()),
             "changes": [{
@@ -309,7 +320,7 @@ class ToolTests(QueryServerTestCase):
         }
         from validation import validate_change_payload
         _, prepared = validate_change_payload(payload, 500)
-        counts = self.applier.apply(prepared, payload["createdAt"])
+        counts = self.store.apply(prepared, payload["createdAt"])
         self.assertEqual(counts.applied_deletions, 1)
 
         result = self._call("list_metrics")
@@ -368,11 +379,96 @@ class QueryLayerTests(unittest.TestCase):
         with self.assertRaises(sqlite3.Error):
             self.connection.execute("DELETE FROM records")
 
-    def test_known_metrics_cover_every_ingestible_metric(self):
-        # If the receiver ever accepts a new metric, the query layer must
-        # document its semantics rather than silently degrade.
-        from validation import ALLOWED_METRICS
-        self.assertLessEqual(set(ALLOWED_METRICS), set(queries.KNOWN_METRICS))
+    def test_recent_records_response_budget_truncates(self):
+        # The response budget bounds one answer even when single records
+        # carry large typed payloads.
+        from validation import PreparedChange, PreparedRecord
+
+        def store_big():
+            record = make_record(
+                id=str(uuid.uuid4()),
+                metric="clinicalNote",
+                kind="clinical",
+                data={
+                    "type": "clinical",
+                    "fhirType": "DocumentReference",
+                    "fhirResource": {"text": "x" * 900_000},
+                },
+            )
+            prepared = PreparedChange(
+                "upsert",
+                record["id"],
+                record["metric"],
+                record=PreparedRecord(
+                    id=record["id"], metric=record["metric"], kind=record["kind"],
+                    start_date=record["startDate"], end_date=record["endDate"],
+                    source_name=None, device_name=None,
+                    metadata_json="{}", data_json=json.dumps(record["data"]),
+                    parent_id=None,
+                ),
+            )
+            self.store.apply([prepared], "2026-09-23T12:00:00.000Z")
+
+        for _ in range(6):
+            store_big()
+        original_budget = queries.MAX_RECENT_RESPONSE_BYTES
+        try:
+            queries.MAX_RECENT_RESPONSE_BYTES = 2_000_000
+            result = queries.recent_records(self.connection, limit=200)
+            self.assertLess(len(result["records"]), 6)
+            self.assertTrue(result["truncated"])
+        finally:
+            queries.MAX_RECENT_RESPONSE_BYTES = original_budget
+        # With the real budget, 6 x ~900 KB records truncate again — and a
+        # small result under the budget is not truncated.
+        result = queries.recent_records(self.connection, limit=200)
+        self.assertEqual(len(result["records"]), 4)
+        self.assertTrue(result["truncated"])
+        result = queries.recent_records(self.connection, metric="steps")
+        self.assertFalse(result["truncated"])
+
+    def test_non_quantity_kinds_are_counted_not_aggregated(self):
+        # A workout (kind workout) must never feed a numeric aggregate.
+        workout = make_record(
+            id=str(uuid.uuid4()),
+            metric="workouts",
+            kind="workout",
+            startDate="2026-09-21T08:00:00.000Z",
+            endDate="2026-09-21T08:30:00.000Z",
+            data={
+                "type": "workout",
+                "activityType": "running",
+                "activityTypeRawValue": 52,
+                "duration": 1800.0,
+            },
+        )
+        batch_created_at, prepared_changes = prepared(workout)
+        self.store.apply(prepared_changes, batch_created_at)
+
+        listing = queries.list_metrics(self.connection)
+        workout_row = next(m for m in listing["metrics"] if m["metric"] == "workouts")
+        self.assertEqual(workout_row["kind"], "workout")
+        self.assertIsNone(workout_row["unit"])
+
+        stats = queries.daily_stats(self.connection, metric="workouts", days=7)
+        day = stats["days"][0]
+        self.assertEqual(day["count"], 1)
+        self.assertIsNone(day["sum"])
+        self.assertIsNone(day["avg"])
+
+        recent = queries.recent_records(self.connection, metric="workouts")
+        self.assertEqual(recent["records"][0]["data"]["activityType"], "running")
+
+    def test_unknown_metrics_surface_without_a_catalog(self):
+        # The receiver has no metric catalog: an unknown-but-well-formed
+        # metric appears in listings like any other.
+        record = make_record(id=str(uuid.uuid4()), metric="someFutureMetric",
+                             data={"type": "quantity", "value": 7, "unit": "parrot"})
+        batch_created_at, prepared_changes = prepared(record)
+        self.store.apply(prepared_changes, batch_created_at)
+        listing = queries.list_metrics(self.connection)
+        row = next(m for m in listing["metrics"] if m["metric"] == "someFutureMetric")
+        self.assertEqual(row["unit"], "parrot")
 
     def test_range_cap(self):
         with self.assertRaises(queries.QueryError):

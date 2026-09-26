@@ -6,6 +6,13 @@ this module can never write and never mutate health data. All queries
 exclude tombstoned ids, so a sample deleted on the phone never resurfaces
 in an answer.
 
+The receiver stores record envelopes: common searchable columns (metric,
+kind, dates, source) plus the record's typed ``data`` payload as JSON.
+There is deliberately no receiver-side metric catalog — the iOS client owns
+the metric identifiers. Scalar aggregation reads ``data.value`` through
+``json_extract`` and is meaningful only for ``quantity`` rows; other kinds
+are counted, never numerically aggregated.
+
 Intended consumers: the MCP query server (mcp_server.py) and tests. There
 is deliberately no arbitrary-SQL entry point — only the fixed, bounded
 queries below.
@@ -19,17 +26,10 @@ import sqlite3
 # the whole database; it is generous for human-scale questions.
 MAX_RANGE_DAYS = 366
 MAX_RECORDS = 200
-
-KNOWN_METRICS = {
-    # metric -> aggregation semantics for documentation/consumers
-    "steps": "sum per day (count)",
-    "activeEnergy": "sum per day (kcal)",
-    "sleep": "sum per day (s)",
-    "heartRate": "instantaneous samples (count/min): min/avg/max",
-    "restingHeartRate": "daily samples (count/min): avg",
-    "heartRateVariability": "samples (ms): avg",
-    "workouts": "sum per day (s); 'count' is the number of workout entries",
-}
+# Bounded response for recent_records: with typed payloads one record can
+# carry up to 1 MiB of data, so the 200-row cap alone no longer bounds an
+# answer.
+MAX_RECENT_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
 class QueryError(ValueError):
@@ -90,19 +90,24 @@ def _live_only(sql):
 
 
 def list_metrics(connection):
+    """Inventory of live data: counts per (metric, kind), with the unit
+    quantity rows were stored in, when they have one."""
     rows = connection.execute(_live_only(
-        "SELECT r.metric AS metric, COUNT(*) AS n, MIN(r.start_date) AS earliest, MAX(r.end_date) AS latest "
-        "FROM records r WHERE __LIVE__ GROUP BY r.metric ORDER BY r.metric"
+        "SELECT r.metric AS metric, r.kind AS kind, COUNT(*) AS n, "
+        "MIN(r.start_date) AS earliest, MAX(r.end_date) AS latest, "
+        "MIN(json_extract(r.data_json, '$.unit')) AS unit "
+        "FROM records r WHERE __LIVE__ GROUP BY r.metric, r.kind ORDER BY r.metric, r.kind"
     )).fetchall()
     tombstones = connection.execute("SELECT COUNT(*) FROM deleted_ids").fetchone()[0]
     return {
         "metrics": [
             {
                 "metric": row["metric"],
+                "kind": row["kind"],
                 "records": row["n"],
                 "earliest": row["earliest"],
                 "latest": row["latest"],
-                "semantics": KNOWN_METRICS.get(row["metric"], "unknown metric; inspect raw records"),
+                "unit": row["unit"],
             }
             for row in rows
         ],
@@ -111,7 +116,13 @@ def list_metrics(connection):
 
 
 def daily_stats(connection, metric=None, from_date=None, to_date=None, days=None):
-    """Per-UTC-day aggregates for one metric (or every metric when None)."""
+    """Per-UTC-day aggregates for one metric (or every metric when None).
+
+    Rows group by (day, metric, kind). Numeric aggregation (sum/avg/min/max)
+    applies to quantity rows through ``data.value``; every other kind is
+    counted only, because a count alone is honest about a workout, a sleep
+    stage, or a clinical document.
+    """
     metric = _validate_metric(metric)
     from_date = _validate_date("from", from_date)
     to_date = _validate_date("to", to_date)
@@ -159,19 +170,24 @@ def daily_stats(connection, metric=None, from_date=None, to_date=None, days=None
         clauses.append("substr(r.start_date, 1, 10) <= ?")
         params.append(to_date)
     rows = connection.execute(_live_only(
-        "SELECT substr(r.start_date, 1, 10) AS day, r.metric AS metric, COUNT(*) AS n, "
-        "SUM(r.value) AS total, AVG(r.value) AS avg_value, MIN(r.value) AS min_value, MAX(r.value) AS max_value "
+        "SELECT substr(r.start_date, 1, 10) AS day, r.metric AS metric, r.kind AS kind, "
+        "COUNT(*) AS n, "
+        "SUM(CASE WHEN r.kind = 'quantity' THEN json_extract(r.data_json, '$.value') END) AS total, "
+        "AVG(CASE WHEN r.kind = 'quantity' THEN json_extract(r.data_json, '$.value') END) AS avg_value, "
+        "MIN(CASE WHEN r.kind = 'quantity' THEN json_extract(r.data_json, '$.value') END) AS min_value, "
+        "MAX(CASE WHEN r.kind = 'quantity' THEN json_extract(r.data_json, '$.value') END) AS max_value, "
+        "MIN(json_extract(r.data_json, '$.unit')) AS unit "
         "FROM records r WHERE " + " AND ".join(clauses) + " "
-        "GROUP BY day, r.metric ORDER BY day, r.metric"
+        "GROUP BY day, r.metric, r.kind ORDER BY day, r.metric, r.kind"
     ), params).fetchall()
     return {
-        "semantics": {m: KNOWN_METRICS[m] for m in
-                      sorted({row["metric"] for row in rows} & set(KNOWN_METRICS))},
         "days": [
             {
                 "date": row["day"],
                 "metric": row["metric"],
+                "kind": row["kind"],
                 "count": row["n"],
+                "unit": row["unit"],
                 "sum": round(row["total"], 2) if row["total"] is not None else None,
                 "avg": round(row["avg_value"], 2) if row["avg_value"] is not None else None,
                 "min": row["min_value"],
@@ -183,6 +199,8 @@ def daily_stats(connection, metric=None, from_date=None, to_date=None, days=None
 
 
 def recent_records(connection, metric=None, limit=20, offset=0):
+    """Newest live records as full envelopes: envelope columns plus the
+    typed data payload, parsed back into JSON."""
     metric = _validate_metric(metric)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > MAX_RECORDS:
         raise QueryError(f"limit must be an integer in 1..{MAX_RECORDS}")
@@ -195,23 +213,36 @@ def recent_records(connection, metric=None, limit=20, offset=0):
         params.append(metric)
     params.extend([limit, offset])
     rows = connection.execute(_live_only(
-        "SELECT r.id, r.metric, r.value, r.unit, r.start_date, r.end_date, r.source_name, r.device_name, r.metadata "
+        "SELECT r.id, r.metric, r.kind, r.start_date, r.end_date, r.source_name, "
+        "r.device_name, r.metadata_json, r.data_json "
         "FROM records r WHERE " + " AND ".join(clauses) + " "
         "ORDER BY r.start_date DESC, r.id LIMIT ? OFFSET ?"
     ), params).fetchall()
-    return {
-        "records": [
+    records = []
+    response_bytes = 0
+    truncated = False
+    for row in rows:
+        data_bytes = len((row["data_json"] or "").encode("utf-8"))
+        metadata_bytes = len((row["metadata_json"] or "").encode("utf-8"))
+        size = data_bytes + metadata_bytes + 256
+        if response_bytes + size > MAX_RECENT_RESPONSE_BYTES:
+            truncated = True
+            break
+        records.append(
             {
                 "id": row["id"],
                 "metric": row["metric"],
-                "value": row["value"],
-                "unit": row["unit"],
+                "kind": row["kind"],
                 "start": row["start_date"],
                 "end": row["end_date"],
                 "source": row["source_name"],
                 "device": row["device_name"],
-                "metadata": json.loads(row["metadata"] or "null"),
+                "metadata": json.loads(row["metadata_json"] or "null"),
+                "data": json.loads(row["data_json"] or "null"),
             }
-            for row in rows
-        ]
+        )
+        response_bytes += size
+    return {
+        "records": records,
+        "truncated": truncated,
     }

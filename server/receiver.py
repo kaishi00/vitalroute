@@ -52,6 +52,11 @@ def _env_int(name, default):
     return value
 
 
+def _reject_nonfinite_constant(name):
+    """Rejects NaN/Infinity JSON literals outright (never valid payloads)."""
+    raise ValueError("Non-finite JSON constant: %s" % name)
+
+
 class InvalidContentLength(Exception):
     """Content-Length was present but malformed (non-integer or negative)."""
 
@@ -82,10 +87,6 @@ class ReceiverHandler(BaseHTTPRequestHandler):
     @property
     def record_store(self):
         return self.server.record_store
-
-    @property
-    def change_applier(self):
-        return self.server.change_applier
 
     # ---- plumbing -------------------------------------------------------
 
@@ -323,46 +324,34 @@ class ReceiverHandler(BaseHTTPRequestHandler):
 
         body = self.rfile.read(content_length) if content_length > 0 else b""
         try:
-            payload = json.loads(body.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+            payload = json.loads(
+                body.decode("utf-8"),
+                parse_constant=_reject_nonfinite_constant,
+            )
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError: adversarially deep nesting during JSON parse.
             self._send_error_json(400, "invalid_json", "The request body is not valid JSON.")
             return
 
-        # Contract dispatch: schemaVersion 2 carries additions and deletions;
-        # schemaVersion 1 is the original records-only payload. The versions
-        # have distinct shapes and are never reinterpreted as each other.
-        schema_version = payload.get("schemaVersion") if isinstance(payload, dict) else None
-        if schema_version == 2:
-            self._apply_change_batch(payload, config)
+        if not isinstance(payload, dict):
+            self._send_error_json(400, "invalid_json", "The request body must be a JSON object.")
             return
 
-        try:
-            batch_created_at, prepared = validation.validate_payload(
-                payload, config.max_records_per_batch
-            )
-        except validation.ValidationError as error:
-            self._send_error_json(400, error.code, error.message)
+        # Single contract: schemaVersion 3 change batches. Older schema
+        # versions are rejected with an explicit version error so an old
+        # client learns the receiver moved, not that its shape was wrong.
+        # Non-integer values are described, never echoed: the raw value is
+        # client-controlled and must not be reflected into responses.
+        schema_version = payload.get("schemaVersion")
+        if schema_version != validation.SUPPORTED_SCHEMA_VERSION:
+            if isinstance(schema_version, int) and not isinstance(schema_version, bool):
+                detail = "Unsupported schemaVersion %d; this receiver supports %d." % (
+                    schema_version, validation.SUPPORTED_SCHEMA_VERSION)
+            else:
+                detail = "schemaVersion must be the integer %d." % validation.SUPPORTED_SCHEMA_VERSION
+            self._send_error_json(400, "unsupported_schema_version", detail)
             return
 
-        try:
-            accepted, duplicates = self.record_store.ingest(prepared, batch_created_at)
-        except Exception:  # noqa: BLE001 - never leak internals to the client
-            logger.exception("Ingestion failed with an internal error.")
-            self._send_error_json(500, "internal_error", "Ingestion failed.")
-            return
-
-        self._send_json(
-            200,
-            {
-                "status": "accepted",
-                "accepted": accepted,
-                "duplicates": duplicates,
-                "schemaVersion": validation.SUPPORTED_SCHEMA_VERSION,
-            },
-        )
-        self._log_request(200, records=accepted + duplicates)
-
-    def _apply_change_batch(self, payload, config):
         try:
             batch_created_at, prepared = validation.validate_change_payload(
                 payload, config.max_records_per_batch
@@ -372,9 +361,9 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            counts = self.change_applier.apply(prepared, batch_created_at)
+            counts = self.record_store.apply(prepared, batch_created_at)
         except Exception:  # noqa: BLE001 - never leak internals to the client
-            logger.exception("Change batch failed with an internal error.")
+            logger.exception("Ingestion failed with an internal error.")
             self._send_error_json(500, "internal_error", "Ingestion failed.")
             return
 
@@ -387,7 +376,8 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "superseded": counts.superseded,
                 "appliedDeletions": counts.applied_deletions,
                 "duplicateDeletions": counts.duplicate_deletions,
-                "schemaVersion": 2,
+                "cascadedDeletions": counts.cascaded_deletions,
+                "schemaVersion": validation.SUPPORTED_SCHEMA_VERSION,
             },
         )
         self._log_request(
@@ -450,6 +440,7 @@ def make_server(
     max_records_per_batch=validation.DEFAULT_MAX_RECORDS_PER_BATCH,
     tls_cert=None,
     tls_key=None,
+    allow_schema_reset=False,
 ):
     """Builds a ThreadingHTTPServer. Raises ValueError on unsafe config."""
     if not token or len(token) < _MIN_TOKEN_LENGTH:
@@ -459,16 +450,15 @@ def make_server(
             % _MIN_TOKEN_LENGTH
         )
 
-    record_store = storage.RecordStore(db_path)
-
-    change_applier = storage.ChangeApplier(db_path)
+    record_store = storage.RecordStore(
+        db_path, logger=logger, allow_schema_reset=allow_schema_reset
+    )
 
     server = ReceiverServer((host, port), ReceiverHandler)
     server.receiver_config = ReceiverConfig(
         token, db_path, max_body_bytes, max_records_per_batch
     )
     server.record_store = record_store
-    server.change_applier = change_applier
 
     if tls_cert or tls_key:
         if not (tls_cert and tls_key):
@@ -527,8 +517,9 @@ def main(argv=None):
             ),
             tls_cert=args.tls_cert,
             tls_key=args.tls_key,
+            allow_schema_reset=os.environ.get("VITALROUTE_ALLOW_SCHEMA_RESET") in ("1", "true", "yes"),
         )
-    except ValueError as error:
+    except (ValueError, storage.IncompatibleSchema) as error:
         raise SystemExit(str(error))
 
     scheme = "https" if (args.tls_cert and args.tls_key) else "http"

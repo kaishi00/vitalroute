@@ -32,10 +32,9 @@ final class VitalRouteModelTests: XCTestCase {
     func testFailedRefreshClearsPreviouslyLoadedRecords() async {
         let record = HealthRecord(
             metric: .steps,
-            value: 42,
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600),
-            endDate: Date(timeIntervalSince1970: 1_735_689_600)
+            endDate: Date(timeIntervalSince1970: 1_735_689_600),
+            data: .quantity(QuantityData(value: 42, unit: "count"))
         )
         let provider = StubHealthDataProvider(records: [record])
         let model = VitalRouteModel(healthData: provider)

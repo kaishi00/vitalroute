@@ -378,7 +378,10 @@ struct OverviewView: View {
             if outcome.summary.recordsFound == 0 {
                 return "Sync finished: no records were found in the window for the selected categories. Nothing was sent."
             }
-            return "Sync finished: \(outcome.summary.deliveredRecords) records acknowledged (\(outcome.summary.acceptedRecords) new, \(outcome.summary.duplicateRecords) already present) — \(outcome.summary.breakdownText)."
+            let skipped = outcome.summary.skippedRecords > 0
+                ? " \(outcome.summary.skippedRecords) record(s) were skipped because they exceed the destination's size limits."
+                : ""
+            return "Sync finished: \(outcome.summary.deliveredRecords) records acknowledged (\(outcome.summary.acceptedRecords) new, \(outcome.summary.duplicateRecords) already present) — \(outcome.summary.breakdownText).\(skipped)"
         case .backfilling(let metrics):
             let names = metrics.map(\.displayName).sorted().joined(separator: ", ")
             return "History backfill in progress for \(names): \(outcome.summary.deliveredRecords) records acknowledged in this run and progress saved. Tap Sync Now to continue where it left off."

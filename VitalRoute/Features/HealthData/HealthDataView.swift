@@ -39,7 +39,7 @@ struct HealthDataView: View {
             }
 
             Section {
-                ForEach(HealthMetric.allCases) { metric in
+                ForEach(MetricCatalog.selectableMetrics.map(\.metric)) { metric in
                     metricRow(for: metric)
                 }
             } header: {

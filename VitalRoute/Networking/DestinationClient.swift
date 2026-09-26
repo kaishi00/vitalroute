@@ -8,15 +8,6 @@ struct DestinationAuthorization {
 /// (`server/API.md`). Implementations send credential-bearing and
 /// health-data requests only to the exact endpoint they are given.
 protocol DestinationClient: Sendable {
-    /// Sends one batch and returns the receiver's acknowledgment. A return
-    /// without throwing means the receiver committed the batch and its
-    /// acknowledgment was validated.
-    func send(
-        _ payload: SyncPayload,
-        to endpoint: URL,
-        authorization: DestinationAuthorization
-    ) async throws -> SyncAcknowledgment
-
     /// Verifies reachability, TLS, and the credential without sending or
     /// returning health records.
     func testConnection(
@@ -24,9 +15,11 @@ protocol DestinationClient: Sendable {
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse
 
-    /// Sends one v2 change batch (additions and deletions) and returns the
-    /// receiver's reconciled acknowledgment. A return without throwing means
-    /// the receiver committed the batch and accounted for every change.
+    /// Sends one contract-v3 change batch (additions and deletions) and
+    /// returns the receiver's reconciled acknowledgment. A return without
+    /// throwing means the receiver committed the batch and accounted for
+    /// every change. Both manual and automatic sync deliver through this
+    /// single operation: a manual batch is an additions-only change batch.
     func sendChanges(
         _ changes: [SyncChangeEvent],
         batchID: UUID,

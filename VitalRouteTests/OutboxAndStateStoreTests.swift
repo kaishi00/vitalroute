@@ -25,14 +25,14 @@ final class OutboxAndStateStoreTests: XCTestCase {
         SyncStateStore(directory: tempDirectory)
     }
 
-    private func record(_ id: Int, metric: HealthMetric = .steps) -> HealthRecord {
+    private func record(_ id: Int, metric: HealthMetric = .steps, blob: String? = nil) -> HealthRecord {
         HealthRecord(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", id))!,
             metric: metric,
-            value: Double(id),
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600),
-            endDate: Date(timeIntervalSince1970: 1_735_689_660)
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            metadata: blob.map { ["blob": $0] } ?? [:],
+            data: .quantity(QuantityData(value: Double(id), unit: "count"))
         )
     }
 
@@ -76,6 +76,80 @@ final class OutboxAndStateStoreTests: XCTestCase {
         let second = try await outbox.nextBatch()
         XCTAssertEqual(second.totalPending, 50)
         XCTAssertEqual(second.events.count, 50)
+    }
+
+    func testNextBatchRespectsTheDeliveryByteBudget() async throws {
+        // A small budget: an ordinary event is a few hundred bytes, so the
+        // batch must stop before exceeding it even though the count limit
+        // (200) is far away.
+        let outbox = Outbox(directory: tempDirectory, deliveryByteLimit: 1_000)
+        try await outbox.prepare()
+        let events = (1...50).map { SyncChangeEvent.upsert(record($0)) }
+        _ = try await outbox.append(events, lane: .backfill)
+
+        let first = try await outbox.nextBatch()
+        XCTAssertLessThan(first.events.count, 50, "the byte budget must end the batch early")
+        XCTAssertFalse(first.events.isEmpty)
+        let encodedSize = first.events.reduce(0) { total, event in
+            total + ((try? JSONEncoder().encode(event))?.count ?? 0)
+        }
+        XCTAssertLessThanOrEqual(encodedSize, 1_000)
+        // The rest of the queue remains pending and is delivered across
+        // later budget-bounded batches.
+        await outbox.remove(eventIDs: first.events.map(\.eventID))
+        var delivered = first.events.count
+        var rounds = 0
+        while delivered < 50, rounds < 100 {
+            rounds += 1
+            let next = try await outbox.nextBatch()
+            if next.events.isEmpty { break }
+            await outbox.remove(eventIDs: next.events.map(\.eventID))
+            delivered += next.events.count
+        }
+        XCTAssertEqual(delivered, 50, "every event drains across budgeted batches")
+    }
+
+    func testSingleOversizedEventStillShipsAlone() async throws {
+        // A series chunk larger than the whole budget must not be stuck
+        // forever: an empty batch takes it as a legal batch of one.
+        let outbox = Outbox(directory: tempDirectory, deliveryByteLimit: 500)
+        try await outbox.prepare()
+        let hugeRecord = HealthRecord(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000009999")!,
+            metric: .heartRate,
+            startDate: Date(timeIntervalSince1970: 1_735_689_600),
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            metadata: ["blob": String(repeating: "x", count: 2_000)],
+            data: .quantity(QuantityData(value: 60, unit: "count/min"))
+        )
+        _ = try await outbox.append([.upsert(hugeRecord)], lane: .backfill)
+
+        let snapshot = try await outbox.nextBatch()
+        XCTAssertEqual(snapshot.events.count, 1)
+        XCTAssertEqual(snapshot.totalPending, 1)
+    }
+
+    func testByteBudgetMissSkipsOversizedEntryAndKeepsScanning() async throws {
+        // An entry that does not fit the budget is skipped, not fatal:
+        // smaller events behind it still make this batch, and the
+        // oversized one ships alone later. The oversized fixture uses a
+        // metadata blob for size; a real capture cannot produce one (the
+        // transport-limit filter drops it), but the file-size budgeting
+        // under test is identical.
+        let outbox = Outbox(directory: tempDirectory, deliveryByteLimit: 1_000)
+        try await outbox.prepare()
+        let big = SyncChangeEvent.upsert(record(1, blob: String(repeating: "x", count: 4_000)))
+        let small = SyncChangeEvent.upsert(record(2))
+        _ = try await outbox.append([small, big], lane: .backfill)
+
+        let first = try await outbox.nextBatch()
+        XCTAssertEqual(first.events.map(\.eventID), [small.eventID])
+        XCTAssertEqual(first.skippedOversizedCount, 1)
+
+        await outbox.remove(eventIDs: first.events.map(\.eventID))
+        let second = try await outbox.nextBatch()
+        XCTAssertEqual(second.events.map(\.eventID), [big.eventID])
+        XCTAssertEqual(second.skippedOversizedCount, 0)
     }
 
     func testRemoveOnlyAfterAcknowledgedKeepsOthers() async throws {
@@ -425,14 +499,13 @@ final class SyncChangeEventTests: XCTestCase {
     private func record() -> HealthRecord {
         HealthRecord(
             metric: .steps,
-            value: 42,
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600),
-            endDate: Date(timeIntervalSince1970: 1_735_689_660)
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            data: .quantity(QuantityData(value: 42, unit: "count"))
         )
     }
 
-    func testWireEncodingMatchesContractV2Shape() throws {
+    func testWireEncodingMatchesContractV3Shape() throws {
         let deleted = DeletedRecord(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000009")!,
             metric: .sleep,
@@ -446,7 +519,7 @@ final class SyncChangeEventTests: XCTestCase {
         )
 
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(json["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(json["schemaVersion"] as? Int, 3)
         XCTAssertNotNil(json["batchId"])
         XCTAssertNotNil(json["createdAt"])
         let changes = try XCTUnwrap(json["changes"] as? [[String: Any]])
@@ -479,10 +552,10 @@ final class SyncChangeEventTests: XCTestCase {
     }
 
     func testAcknowledgmentReconciliation() {
-        let full = ChangeAcknowledgment(accepted: 1, duplicates: 1, superseded: 1, appliedDeletions: 1, duplicateDeletions: 1)
+        let full = ChangeAcknowledgment(accepted: 1, duplicates: 1, superseded: 1, appliedDeletions: 1, duplicateDeletions: 1, cascadedDeletions: 0)
         XCTAssertTrue(full.reconciles(upsertsSent: 3, deletesSent: 2))
 
-        let short = ChangeAcknowledgment(accepted: 0, duplicates: 0, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0)
+        let short = ChangeAcknowledgment(accepted: 0, duplicates: 0, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0, cascadedDeletions: 0)
         XCTAssertFalse(short.reconciles(upsertsSent: 1, deletesSent: 0))
         XCTAssertFalse(short.reconciles(upsertsSent: 0, deletesSent: 1))
         XCTAssertTrue(short.reconciles(upsertsSent: 0, deletesSent: 0))

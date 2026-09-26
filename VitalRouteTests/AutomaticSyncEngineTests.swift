@@ -71,10 +71,9 @@ final class AutomaticSyncEngineTests: XCTestCase {
         HealthRecord(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", id))!,
             metric: metric,
-            value: Double(id),
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600),
-            endDate: Date(timeIntervalSince1970: 1_735_689_660)
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            data: .quantity(QuantityData(value: Double(id), unit: "count"))
         )
     }
 
@@ -157,7 +156,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertTrue(message.contains("does not support deletions"))
         XCTAssertFalse(engine.isEnabled)
         XCTAssertEqual(provider.observedMetrics.count, 0)
-        // A v1 receiver must never receive a v2 change batch.
+        // An incompatible receiver must never receive a v3 change batch.
         XCTAssertEqual(client.sentChangeBatches.count, 0)
     }
 
@@ -2601,7 +2600,7 @@ final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
     }
 
     var healthResponse = ReceiverHealthResponse(
-        status: "ok", service: "vitalroute-receiver", apiVersion: 2,
+        status: "ok", service: "vitalroute-receiver", apiVersion: 3,
         capabilities: ["additions", "deletions"]
     )
     var nextAcknowledgment: ChangeAcknowledgment?
@@ -2630,14 +2629,6 @@ final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return body()
-    }
-
-    func send(
-        _ payload: SyncPayload,
-        to endpoint: URL,
-        authorization: DestinationAuthorization
-    ) async throws -> SyncAcknowledgment {
-        SyncAcknowledgment(accepted: payload.records.count, duplicates: 0)
     }
 
     func testConnection(
@@ -2746,22 +2737,11 @@ private final class ManualStubHealthProvider: HealthDataProviding {
 private final class ManualStubClient: DestinationClient, @unchecked Sendable {
     var sendGate: AsyncGate?
 
-    func send(
-        _ payload: SyncPayload,
-        to endpoint: URL,
-        authorization: DestinationAuthorization
-    ) async throws -> SyncAcknowledgment {
-        if let sendGate {
-            await sendGate.enter()
-        }
-        return SyncAcknowledgment(accepted: 0, duplicates: 0)
-    }
-
     func testConnection(
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse {
-        ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 2, capabilities: ["additions", "deletions"])
+        ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 3, capabilities: ["additions", "deletions"])
     }
 
     func sendChanges(
@@ -2770,7 +2750,17 @@ private final class ManualStubClient: DestinationClient, @unchecked Sendable {
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ChangeAcknowledgment {
-        ChangeAcknowledgment(accepted: 0, duplicates: 0, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0)
+        if let sendGate {
+            await sendGate.enter()
+        }
+        let upserts = changes.filter { if case .upsert = $0 { return true } else { return false } }.count
+        return ChangeAcknowledgment(
+            accepted: upserts,
+            duplicates: changes.count - upserts,
+            superseded: 0,
+            appliedDeletions: 0,
+            duplicateDeletions: 0
+        )
     }
 }
 

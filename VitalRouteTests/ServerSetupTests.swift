@@ -19,11 +19,11 @@ final class ServerSetupTests: XCTestCase {
     }
 
     func testContractConstantMatchesTheAutomaticSyncGate() {
-        // The pin exists so automatic sync works: contract v2 with
-        // additions and deletions — the same predicate the engine checks
-        // when automatic sync is enabled. Exercised at the pinned version
-        // and one below, across both capability cells.
-        XCTAssertEqual(ServerSetup.compatibleContractVersion, 2)
+        // The pin exists so sync works: contract v3 with additions and
+        // deletions — the same predicate the engine checks, and the only
+        // contract both manual and automatic sync speak. Exercised at the
+        // pinned version and one below, across both capability cells.
+        XCTAssertEqual(ServerSetup.compatibleContractVersion, 3)
         let atPin = ReceiverHealthResponse(
             status: "ok", service: "x",
             apiVersion: ServerSetup.compatibleContractVersion,
@@ -34,16 +34,16 @@ final class ServerSetupTests: XCTestCase {
             apiVersion: ServerSetup.compatibleContractVersion - 1,
             capabilities: ["additions"])
         XCTAssertFalse(belowPin.supportsDeletions)
-        let v2WithoutDeletions = ReceiverHealthResponse(
+        let v3WithoutDeletions = ReceiverHealthResponse(
             status: "ok", service: "x",
             apiVersion: ServerSetup.compatibleContractVersion,
             capabilities: ["additions"])
-        XCTAssertFalse(v2WithoutDeletions.supportsDeletions)
-        let v1WithDeletions = ReceiverHealthResponse(
+        XCTAssertFalse(v3WithoutDeletions.supportsDeletions)
+        let olderWithDeletions = ReceiverHealthResponse(
             status: "ok", service: "x",
             apiVersion: ServerSetup.compatibleContractVersion - 1,
             capabilities: ["deletions"])
-        XCTAssertFalse(v1WithDeletions.supportsDeletions)
+        XCTAssertFalse(olderWithDeletions.supportsDeletions)
         // The prompt teaches the same contract version the constant pins.
         XCTAssertTrue(ServerSetup.agentSetupPrompt
             .contains("contract v\(ServerSetup.compatibleContractVersion)"))
