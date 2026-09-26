@@ -15,9 +15,13 @@ struct DestinationView: View {
 
     var body: some View {
         Form {
+            if !destinationStore.isConfigured {
+                setupGuidePromoSection
+            }
             endpointSection
             authenticationSection
             connectionSection
+            setupGuideSection
 
             if let storageError = destinationStore.storageError {
                 Section {
@@ -82,6 +86,51 @@ struct DestinationView: View {
     }
 
     // MARK: Sections
+
+    /// Prominent while no destination is configured: a new user's first
+    /// question is where an endpoint and API key come from.
+    private var setupGuidePromoSection: some View {
+        Section {
+            NavigationLink {
+                ServerSetupGuideView()
+            } label: {
+                HStack(alignment: .top) {
+                    Image(systemName: "book.circle")
+                        .font(.title2)
+                        .foregroundStyle(.tint)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Setting up a server?")
+                            .font(.headline)
+                        Text(
+                            "Read the server setup guide: what an endpoint and API key are, how to run your own receiver, and how syncing works."
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.vertical, 4)
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    /// Always available, configured or not.
+    private var setupGuideSection: some View {
+        Section {
+            NavigationLink {
+                ServerSetupGuideView()
+            } label: {
+                Label("Server setup guide", systemImage: "book")
+            }
+            .accessibilityHint("Explains endpoints, API tokens, running your own server, and managing your data")
+        } header: {
+            Text("Server setup")
+        } footer: {
+            Text("Read-only guide. Nothing here changes your configuration or sends data.")
+        }
+    }
 
     private var endpointSection: some View {
         Section {
