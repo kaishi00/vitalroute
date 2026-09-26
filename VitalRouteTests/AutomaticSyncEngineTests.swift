@@ -2170,7 +2170,7 @@ final class ScriptedHealthProvider: HealthDataProviding {
 
     /// One fired notification: the completion the app must release, and a
     /// counter of how many times it was actually released.
-    struct FiredNotification {
+    fileprivate struct FiredNotification {
         let completion: ObserverCompletion
         let releases: ReleaseCounter
     }
