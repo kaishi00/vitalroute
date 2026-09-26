@@ -60,10 +60,58 @@ enum RecordWireLimits {
             if value.count > Metadata.maxValueLength { return false }
         }
         guard isTransmittable(record.data) else { return false }
-        // The receiver caps the canonical encoded data payload; measure the
-        // same bytes here. An unencodable payload can never be delivered.
-        guard let encoded = try? JSONEncoder().encode(record.data) else { return false }
-        return encoded.count <= maxEncodedDataBytes
+        // The receiver caps the CANONICAL data JSON it re-serializes with
+        // Python's ensure_ascii escaping (non-ASCII scalars become 6-byte
+        // uXXXX escapes, astral ones 12), which is not our UTF-8 byte
+        // count. Only clinical (free-form FHIR text) and series (many
+        // numeric rows) can approach the cap; every other kind is bounded
+        // far below it by short-string limits, so the encoding cost is
+        // paid only where it can matter. An unencodable payload can never
+        // be delivered.
+        switch record.data {
+        case .clinical, .series:
+            guard let encoded = try? JSONEncoder().encode(record.data) else {
+                return false
+            }
+            return canonicalByteCount(of: encoded) <= maxEncodedDataBytes
+        default:
+            return true
+        }
+    }
+
+    /// Upper bound of the byte length the receiver measures: Python's
+    /// json.dumps with ensure_ascii escapes every non-ASCII scalar
+    /// (6 bytes; astral surrogate pairs, 12) and expands quotes,
+    /// backslashes, and control characters. ASCII payloads measure
+    /// identically to UTF-8; non-ASCII measures conservatively larger than
+    /// our encoding, so the mirror errs toward rejecting rather than
+    /// toward poisoning a batch server-side.
+    static func canonicalByteCount(of encoded: Data) -> Int {
+        var count = 0
+        var index = 0
+        let bytes = [UInt8](encoded)
+        while index < bytes.count {
+            let byte = bytes[index]
+            switch byte {
+            case 0x80...0xBF:
+                // UTF-8 continuation byte: its lead byte already accounted
+                // for the whole escaped scalar.
+                break
+            case 0xC2...0xDF:
+                count += 6 // 2-byte scalar -> short unicode escape
+            case 0xE0...0xEF:
+                count += 6 // 3-byte scalar -> short unicode escape
+            case 0xF0...0xF4:
+                count += 12 // astral scalar -> surrogate pair escape
+            default:
+                // ASCII printable counts 1; quote, backslash, and control
+                // characters escape to at most 6 bytes.
+                count += (byte >= 0x20 && byte <= 0x7E && byte != 0x22 && byte != 0x5C)
+                    ? 1 : 6
+            }
+            index += 1
+        }
+        return count
     }
 
     static func isTransmittable(_ data: RecordData) -> Bool {

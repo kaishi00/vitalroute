@@ -315,6 +315,21 @@ class RecordKindTests(ReceiverServerTestCase):
         record = make_record(metric="someFutureMetric.v2", data={"type": "quantity", "value": 1, "unit": "count"})
         self.post_and_expect_accepted(make_changes(make_upsert(record)), 1)
 
+    def test_empty_fhir_identifier_accepted(self):
+        # Mirrors the receiver's optional-string rule the client's
+        # RecordWireLimits also mirrors: empty is accepted, over-long is not.
+        record = make_record(
+            metric="clinicalCondition",
+            kind="clinical",
+            data={"type": "clinical", "fhirType": "Condition",
+                  "fhirIdentifier": "", "fhirResource": {"resourceType": "Condition"}},
+        )
+        status, body = self.post(
+            "/v1/records", make_payload(make_changes(make_upsert(record)))
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["accepted"], 1)
+
     def test_category_without_name_accepted(self):
         record = make_record(metric="sleep", kind="category", data={"type": "category", "value": 0})
         self.post_and_expect_accepted(make_changes(make_upsert(record)), 1)
@@ -1211,6 +1226,30 @@ class ValidationUnitTests(unittest.TestCase):
     def test_metric_pattern_accepts_catalog_style_identifiers(self):
         for value in ("steps", "heartRate", "bloodPressureSystolic", "someFutureMetric.v2", "a" * 64):
             self.assertEqual(validation.parse_metric(value, "test"), value)
+
+    def test_wire_limit_boundaries_mirror_the_client(self):
+        # Server-side pins for the limits RecordWireLimits (iOS) mirrors:
+        # drift in either direction is caught by one of the two suites.
+        with self.assertRaises(validation.ValidationError):
+            validation.canonicalize_data(
+                {"type": "category", "value": 2**31}, "category", "test"
+            )
+        canonical, _ = validation.canonicalize_data(
+            {"type": "category", "value": 2**31 - 1}, "category", "test"
+        )
+        self.assertEqual(canonical["value"], 2**31 - 1)
+        # Non-ASCII channel names fail the ASCII-only pattern (the client
+        # mirror rejects them before they are ever sent).
+        with self.assertRaises(validation.ValidationError):
+            validation.canonicalize_data(
+                {
+                    "type": "series", "seriesType": "workoutRoute",
+                    "seriesID": str(uuid.uuid4()), "chunkIndex": 0,
+                    "channels": ["t", "canalé"], "points": [[0.0, 1.0]],
+                },
+                "series",
+                "test",
+            )
 
     def test_metric_pattern_rejects_unsafe_identifiers(self):
         for value in ("", "has space", "-leading", "a" * 65, None, 5, "../traversal"):

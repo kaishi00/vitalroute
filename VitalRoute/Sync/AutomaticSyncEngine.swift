@@ -1214,16 +1214,17 @@ final class AutomaticSyncEngine {
         }
 
         var quarantinedDuringRun = 0
+        var skippedDuringRun = 0
         for _ in 0..<BackgroundSyncLimits.maxDeliveryBatchesPerRun {
             try Task.checkCancellation()
             let snapshot = try await outbox.nextBatch()
             pendingCount = snapshot.totalPending
             quarantinedDuringRun += snapshot.quarantinedCount
+            skippedDuringRun += snapshot.skippedOversizedCount
             if quarantinedDuringRun > 0 {
                 lastStatusMessage = "Some captured changes were unreadable and were set aside (\(quarantinedDuringRun)). Delivery of the remaining changes continues."
-            }
-            if snapshot.skippedOversizedCount > 0 {
-                lastStatusMessage = "\(snapshot.skippedOversizedCount) queued change(s) exceed this delivery batch's size budget and will be delivered separately."
+            } else if snapshot.skippedOversizedCount > 0 {
+                lastStatusMessage = "\(snapshot.skippedOversizedCount) queued change(s) waited on this batch's size budget and are delivered separately."
             }
             if snapshot.events.isEmpty {
                 break
@@ -1248,7 +1249,7 @@ final class AutomaticSyncEngine {
                 retryState.lastSuccessAt = now()
                 await stateStore.saveRetryState(retryState)
                 nextRetryAt = nil
-                if quarantinedDuringRun == 0 {
+                if quarantinedDuringRun == 0 && skippedDuringRun == 0 {
                     lastStatusMessage = discardedWorkNotice
                 }
             } catch let cancellation as CancellationError {
