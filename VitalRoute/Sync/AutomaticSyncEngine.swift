@@ -518,6 +518,12 @@ final class AutomaticSyncEngine {
     /// observers and resumes passes without user interaction.
     func restorePausedOnSecureStorage() async {
         guard mode != .disabled else { return }
+        // A configuration re-report that already applied a real destination
+        // wins: this launch decision was evaluated against unsettled stores
+        // and is stale by the time it lands. Overwriting a recovered engine
+        // with the wait would leave it paused until the next report — and a
+        // background launch has no scene to produce one.
+        guard destination.isEmpty else { return }
         mode = .paused(.secureStorageUnavailable)
         lastStatusMessage = AutomaticSyncPauseReason.secureStorageUnavailable.userMessage
         // The launch pass will not run (nothing is loaded to capture), so

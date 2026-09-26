@@ -24,6 +24,10 @@ final class DestinationRecoveryCoordinator {
     private let secureStore: any SecureValueStoring
     private let notificationCenter: NotificationCenter
     private var observers: [NSObjectProtocol] = []
+    /// Set once the accessibility migration has succeeded for this process;
+    /// until then every recovery trigger retries it (it fails while the
+    /// device is locked, and converges on the first unlock).
+    private var migrationConverged = false
 
     init(
         destinationStore: DestinationConfigurationStore,
@@ -56,19 +60,34 @@ final class DestinationRecoveryCoordinator {
         })
     }
 
+    /// Upgrades the Keychain items' accessibility class once per process
+    /// until it succeeds; items written by earlier builds stay unreadable
+    /// from locked-device launches until this converges on first unlock.
+    func migrateSecureStorageIfNeeded() {
+        guard !migrationConverged else { return }
+        do {
+            try secureStore.migrateToBackgroundAccessibility()
+            migrationConverged = true
+        } catch {
+            // Locked device: retried on the next recovery trigger.
+        }
+    }
+
     /// One recovery attempt: upgrade Keychain accessibility (first unlock
     /// after this update), retry the stores that have not settled, and —
     /// only once endpoint and credential describe the same destination —
     /// report the configuration to the engine so a waiting engine resumes
     /// without user interaction.
     func recoverNow() async {
-        // The migration itself needs an unlocked keychain, so it belongs in
-        // the same retry path as the loads.
-        try? secureStore.migrateToBackgroundAccessibility()
+        migrateSecureStorageIfNeeded()
 
         await destinationStore.loadSavedEndpoint()
         guard destinationStore.isLoaded else { return }
         let endpoint = destinationStore.savedEndpoint
+        // Recovery exists to re-arm a waiting engine; an empty endpoint has
+        // nothing to report, and reporting "" would relabel the wait as
+        // "destination missing".
+        guard !endpoint.isEmpty else { return }
 
         await credentialStore.loadCredential(for: endpoint)
         // An endpoint may only be paired with its own credential: reporting

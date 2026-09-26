@@ -167,6 +167,10 @@ struct SettingsView: View {
         model.isHealthAvailable
             && destinationStore.isConfigured
             && credentialStore.hasCredential
+            // Same invariant manual sync enforces: never arm a destination
+            // with another destination's key. `hasCredential` alone stays
+            // true while a loaded key still describes the previous endpoint.
+            && credentialStore.credentialEndpoint == destinationStore.savedEndpoint
             && selectionStore.hasSelection
     }
 

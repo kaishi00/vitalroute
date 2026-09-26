@@ -154,6 +154,8 @@ final class DestinationConfigurationTests: XCTestCase {
         XCTAssertTrue(configurationStore.isLoaded)
         XCTAssertTrue(configurationStore.isConfigured)
         XCTAssertNil(configurationStore.storageError)
+        // The gate was released by the defer, not the fail-safe deadline.
+        XCTAssertFalse(secureStore.hitFailSafe, "gated read hit its fail-safe deadline")
     }
 
     @MainActor

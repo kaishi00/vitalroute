@@ -2121,6 +2121,84 @@ final class AutomaticSyncEngineTests: XCTestCase {
             "recovery is not a destination change: \(relaunched.lastStatusMessage ?? "")"
         )
     }
+
+    func testStaleLaunchWaitDoesNotClobberRecoveredEngine() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // The recovery path lands first (the device unlocked before the
+        // launch task's wait decision was applied).
+        await relaunched.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        // The launch task's stale wait decision then lands: it must not
+        // overwrite a recovered, running engine — a background launch has no
+        // scene to produce the report that would clear the pause again.
+        await relaunched.restorePausedOnSecureStorage()
+
+        XCTAssertEqual(relaunched.mode, .active)
+        XCTAssertFalse(relaunchedProvider.observedMetrics.isEmpty)
+    }
+
+    func testWaitingEngineStaysOffAfterUserDisables() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+        XCTAssertTrue(relaunched.isEnabled)
+
+        // The user turns automatic sync off while it waits; nothing about
+        // the wait (or a later recovery report) turns it back on.
+        await relaunched.disable()
+        await relaunched.restorePausedOnSecureStorage()
+        await relaunched.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        XCTAssertFalse(relaunched.isEnabled)
+        XCTAssertTrue(
+            relaunchedProvider.observedMetrics.isEmpty,
+            "a disabled engine must not arm observers, recovery report or not"
+        )
+    }
+
+    func testDestinationChangeWhileWaitingPurgesWithHonestNoticeNotCrossDelivery() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunchedClient = ScriptedSyncClient()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: relaunchedClient)
+        await relaunched.restorePausedOnSecureStorage()
+
+        // While waiting, the destination changed (the endpoint saved before
+        // the lock is not the endpoint configured now). The queue captured
+        // for the old destination must be discarded — never delivered to the
+        // new one — with a visible notice.
+        await relaunched.configurationChanged(
+            destination: otherEndpoint,
+            token: "other-token-0002",
+            metrics: [.steps]
+        )
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .active)
+        let delivered = relaunchedClient.sentChangeBatches.flatMap(\.changes)
+        XCTAssertEqual(
+            delivered,
+            [],
+            "work captured for the pre-lock destination must never reach the new one"
+        )
+        XCTAssertTrue(
+            relaunched.lastStatusMessage?.contains("discarded") == true,
+            relaunched.lastStatusMessage ?? ""
+        )
+    }
 }
 
 // MARK: - Test doubles

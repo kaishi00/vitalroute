@@ -233,10 +233,12 @@ final class DestinationRecoveryTests: XCTestCase {
         await coordinator.recoverNow()
         await relaunched.waitUntilIdle()
         let batchesAfterFirst = relaunchedClient.sentChangeBatches.count
+        XCTAssertEqual(secureStore.migrateCallCount, 1, "a converged migration is not repeated")
 
         await coordinator.recoverNow()
         await relaunched.waitUntilIdle()
 
+        XCTAssertEqual(secureStore.migrateCallCount, 1, "an idempotent re-run skips the keychain write")
         XCTAssertEqual(relaunched.mode, .active)
         XCTAssertEqual(
             relaunchedClient.sentChangeBatches.count,

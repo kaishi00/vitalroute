@@ -76,6 +76,12 @@ final class KeychainValueStore: SecureValueStoring {
     /// inserted by earlier builds carried `WhenUnlockedThisDeviceOnly`, which
     /// is unreadable from a locked-device launch; upgrading in place is what
     /// makes the stored configuration reachable before the next save.
+    ///
+    /// Scope invariant: every generic-password item under this service is a
+    /// destination item (the endpoint or a per-destination API key), and all
+    /// of them must be background-readable. A future secret that needs
+    /// stricter (or migratable) semantics must use a different service
+    /// string, or this update would silently reclassify it.
     func migrateToBackgroundAccessibility() throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

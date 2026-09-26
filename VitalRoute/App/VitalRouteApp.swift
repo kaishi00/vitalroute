@@ -96,7 +96,7 @@ struct VitalRouteApp: App {
         // onChange hooks can observe a settled store — so a duplicate pass
         // is redundant work at worst, never lost work.
         Task { @MainActor in
-            try? secureStore.migrateToBackgroundAccessibility()
+            recovery.migrateSecureStorageIfNeeded()
             await destinationStore.loadSavedEndpoint()
             if destinationStore.isLoaded {
                 await credentialStore.loadCredential(for: destinationStore.savedEndpoint)
@@ -198,12 +198,13 @@ struct VitalRouteApp: App {
     }
 
     private func syncConfigurationWithEngine() {
-        // Only report a credential that belongs to this endpoint: a
-        // transient read failure while the endpoint changed must never pair
-        // the previous destination's key with the new destination. The
-        // recovery coordinator re-reports once the matching credential
-        // settles.
-        guard credentialStore.credentialEndpoint == destinationStore.savedEndpoint else { return }
+        // Only report a credential that belongs to a real, settled endpoint:
+        // a transient read failure must never pair the previous
+        // destination's key with the new destination, and an empty report
+        // must not relabel a waiting engine's honest pause. The recovery
+        // coordinator re-reports once the matching credential settles.
+        guard !destinationStore.savedEndpoint.isEmpty,
+              credentialStore.credentialEndpoint == destinationStore.savedEndpoint else { return }
         let engine = autoSyncEngine
         let endpoint = destinationStore.savedEndpoint
         let token = credentialStore.loadedToken

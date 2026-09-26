@@ -84,8 +84,10 @@ final class KeychainValueStoreTests: XCTestCase {
         let account = "test.accessibility.empty"
         cleanup(account)
 
-        // Nothing is seeded: migration across an empty keychain (a fresh
-        // install, or nothing configured yet) must be a no-op, not an error.
+        // With nothing seeded under this account, the migration must take
+        // its not-found path and succeed — the not-throwing contract for a
+        // fresh install. (Other items may exist under the shared test
+        // service; the service-scoped update covers them idempotently.)
         let store = KeychainValueStore()
         try store.migrateToBackgroundAccessibility()
     }
