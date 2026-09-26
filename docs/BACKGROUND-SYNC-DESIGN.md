@@ -225,35 +225,53 @@ failing on an oversized read:
   after pass. Capacity backpressure and delivery backoff still bound the
   chain naturally.
 
-## 5. Receiver contract v2 (deletions)
+## 5. Receiver contract v3 (typed records + deletions)
 
-Same endpoint, explicit new payload version. A v1-only receiver rejects a v2
-body outright — with `invalid_payload`, because the shape does not match its
-contract — so nothing is silently reinterpreted.
+One payload version, one ingestion operation. Manual and automatic sync both
+deliver `schemaVersion: 3` change batches; a receiver that answers `schemaVersion: 3`-era
+health with `apiVersion >= 3` and `["additions", "deletions"]` capabilities
+supports everything the app can do. Older receivers (apiVersion < 3) reject
+the body with `unsupported_schema_version`, so drift fails loudly in both
+directions.
 
-- **Capability detection**: `GET` the configured endpoint. v2 receivers
-  return `"apiVersion": 2` plus `"capabilities": ["additions", "deletions"]`.
-  The client requires both before automatic sync can be enabled. v1 health
-  responses (no capabilities / apiVersion 1) → automatic sync unavailable
-  with guidance to update the receiver; manual v1 sync keeps working.
-- **`schemaVersion: 2` body**: `{"schemaVersion": 2, "createdAt", "batchId",
-  "changes": [{"kind":"upsert","record":{…v1 record…}} | {"kind":"delete",
-  "id","metric","startDate","endDate"}]}` — same per-record validation as v1,
-  ≤ 500 changes per batch, 10 MiB cap, one transaction per batch.
+- **Capability detection**: `GET` the configured endpoint. A current
+  receiver returns `"apiVersion": 3` plus
+  `"capabilities": ["additions", "deletions"]`. The client requires both
+  before automatic sync can be enabled.
+- **`schemaVersion: 3` body**: `{"schemaVersion": 3, "createdAt", "batchId",
+  "changes": [{"kind":"upsert","record":{…envelope…}} | {"kind":"delete",
+  "id","metric","startDate","endDate"}]}` — records are envelopes carrying a
+  typed `data` payload (`docs/RECORD-ARCHITECTURE.md`); ≤ 500 changes per
+  batch, 10 MiB body cap, one transaction per batch.
 - **Server semantics**: upserts are `INSERT OR IGNORE` (first-write-wins)
   **unless a tombstone exists** for the id, in which case the upsert is
   counted as `superseded` and ignored — an older queued or retried addition
   can never resurrect a deleted sample. Deletes upsert a tombstone
-  (`deleted_ids` table) and remove any live row. Retrying a deletion is
-  idempotent (`duplicateDeletions`).
-- **Acknowledgment v2**: `{"status":"accepted","accepted","duplicates",
-  "appliedDeletions","duplicateDeletions","superseded","schemaVersion":2}`.
-  The client reconciles: upserts + duplicates + superseded == upserts sent;
-  appliedDeletions + duplicateDeletions == deletes sent; anything else is
+  (`deleted_ids` table), remove any live row, and cascade to live rows
+  whose `parent_id` references the deleted id (series chunks), tombstoning
+  their ids too (`cascadedDeletions`, informational). Retrying a deletion
+  is idempotent (`duplicateDeletions`).
+- **Acknowledgment v3**: `{"status":"accepted","accepted","duplicates",
+  "appliedDeletions","duplicateDeletions","superseded","cascadedDeletions",
+  "schemaVersion":3}`. The client reconciles: accepted + duplicates +
+  superseded == upserts sent; appliedDeletions + duplicateDeletions ==
+  deletes sent; cascadedDeletions is informational only. Anything else is
   treated as delivery failure (retry-safe).
-- **Migration**: additive schema (`deleted_ids` table + schema_info row) via
-  `CREATE TABLE IF NOT EXISTS` on open; existing v1 databases and rows are
-  untouched; no data rewrite. v1 ingestion behavior is unchanged.
+- **Schema policy**: no migration machinery. A database whose declared
+  schema version differs from the receiver's is recreated empty (one log
+  line, no data exposure) — the documented pre-release reset policy.
+
+## 5b. Large records and series
+
+Series-shaped data (ECG voltage, workout routes) never rides in one giant
+record. The client chunks at the source: each `series` record carries at
+most 2048 points in a fixed channel layout, and its `id` is derived
+deterministically from `(seriesID, chunkIndex)`, so a retried capture
+re-derives the same ids and receiver idempotency applies unchanged. The
+outbox batches by both count (200) and a byte budget (8 MiB), so
+chunk-heavy batches stay under the receiver's body limit while a single
+oversized event still ships alone. Parent deletes cascade server-side, so
+chunk cleanup never depends on the client remembering chunk ids.
 
 ## 6. Testing strategy
 

@@ -203,6 +203,14 @@ The checkout moves to the new revision, the image is rebuilt, and the
 container is recreated in place. The data volume and the token are not
 touched. The revision file is updated.
 
+**Schema compatibility (pre-release policy).** There is no migration
+machinery between storage-schema generations. When the receiver opens a
+database whose schema version differs from its own, it logs one line and
+recreates the database empty. Upgrading a deployment that still runs a
+pre-3 schema therefore discards stored records; re-sync from the device
+afterwards (or restore from a backup taken before the upgrade). Verify
+afterwards with the connection test (`apiVersion >= 3`).
+
 ### Token rotation
 
 1. Generate a replacement with the receiver's ownership and permissions:
@@ -269,7 +277,7 @@ hdr="$(mktemp)"; chmod 600 "$hdr"
 printf 'header = "Authorization: Bearer %s"\n' "$(sudo cat /srv/vitalroute/token)" >"$hdr"
 
 curl -s -o /dev/null -w '%{http_code}\n' "$URL/v1/health"        # 401 unauthorized
-curl -s -K "$hdr" "$URL/v1/health"                                # 200 + apiVersion 2 + capabilities
+curl -s -K "$hdr" "$URL/v1/health"                                # 200 + apiVersion 3 + capabilities
 rm -f "$hdr"
 # The synthetic sender has no token-file option; run it from an admin
 # machine where the token is already protected.
