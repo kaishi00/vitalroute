@@ -18,6 +18,19 @@ final class ServerSetupTests: XCTestCase {
                         "receiver ref must be a full 40-char lowercase commit SHA")
     }
 
+    func testPinnedContractMatchesTheAutomaticSyncGate() {
+        // The pin exists so automatic sync works: contract v2 with
+        // additions and deletions — the same predicate the engine checks
+        // when automatic sync is enabled.
+        XCTAssertEqual(ServerSetup.compatibleContractVersion, 2)
+        let v2 = ReceiverHealthResponse(status: "ok", service: "x", apiVersion: 2,
+                                        capabilities: ["additions", "deletions"])
+        XCTAssertTrue(v2.supportsDeletions)
+        let v1 = ReceiverHealthResponse(status: "ok", service: "x", apiVersion: 1,
+                                        capabilities: ["additions"])
+        XCTAssertFalse(v1.supportsDeletions)
+    }
+
     func testDocumentationLinksArePinnedToTheCompatibleRevision() {
         let links: [(URL, String)] = [
             (ServerSetup.receiverREADMEURL, "server/README.md"),
@@ -80,12 +93,12 @@ final class ServerSetupTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Never log or echo credentials"))
     }
 
-    func testAgentPromptPlaceholdersAreFromTheDocumentedSet() {
+    func testAgentPromptPlaceholdersAreFromTheDocumentedSet() throws {
         // Every <placeholder> in the prompt must be one the guide documents;
         // anything else suggests runtime interpolation crept in.
         let allowed: Set<String> = ["<your-server>"]
         let prompt = ServerSetup.agentSetupPrompt
-        let regex = try! NSRegularExpression(pattern: "<[^<>\\n]{1,60}>")
+        let regex = try NSRegularExpression(pattern: "<[^<>\\n]{1,60}>")
         let range = NSRange(location: 0, length: prompt.utf16.count)
         let found = regex.matches(in: prompt, range: range).map {
             (prompt as NSString).substring(with: $0.range)

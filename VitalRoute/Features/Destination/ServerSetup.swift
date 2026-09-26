@@ -14,12 +14,20 @@ enum ServerSetup {
     /// The app's own repository, which contains the reference receiver.
     static let repositoryURL = URL(string: "https://github.com/kaishi00/vitalroute")!
 
+    /// Contract this app's automatic sync requires: `apiVersion >= 2` with
+    /// `["additions", "deletions"]` capabilities — keep in sync with
+    /// `ReceiverHealthResponse.supportsDeletions`.
+    ///
+    /// Last verified 2026-09-25 against `server/API.md` at the revision
+    /// below. Maintainers: when the receiver contract changes, update the
+    /// SHA to a revision implementing the new contract, re-read every
+    /// document linked here at that revision, and re-verify the links
+    /// resolve (HTTP 200).
+    static let compatibleContractVersion = 2
+
     /// Receiver revision this app's documentation and setup prompt are
-    /// written for: contract v2 (additions and deletions), the contract this
-    /// app requires for automatic sync (`apiVersion >= 2` plus a
-    /// `deletions` capability). A full commit SHA is used on purpose —
-    /// branch names move and `main` may not be compatible; deploy exactly
-    /// this revision.
+    /// written for. A full commit SHA is used on purpose — branch names
+    /// move and `main` may not be compatible; deploy exactly this revision.
     static let compatibleReceiverRef = "959ee7833e906281716b480a805d96b0e1736998"
 
     /// The URL shape the app expects. The configured endpoint is the exact
@@ -35,7 +43,10 @@ enum ServerSetup {
     static var receiverInstallScriptURL: URL { documentationURL("server/deploy/install.sh") }
 
     private static func documentationURL(_ path: String) -> URL {
-        URL(string: "\(repositoryURL.absoluteString)/blob/\(compatibleReceiverRef)/\(path)")!
+        guard let url = URL(string: "\(repositoryURL.absoluteString)/blob/\(compatibleReceiverRef)/\(path)") else {
+            preconditionFailure("ServerSetup: invalid documentation URL for \(path)")
+        }
+        return url
     }
 
     // MARK: Reusable agent setup prompt
@@ -87,9 +98,11 @@ enum ServerSetup {
     - Let the installer generate and store the bearer token its documented
       way. Never invent, embed, print, or commit a token, and never put one
       in a URL.
-    - Verify access through the exact phone-facing route (not just on the
-      host): the health endpoint must return 200 with apiVersion >= 2 and
-      the capabilities above, and 401 without the token.
+    - Verify access through the exact phone-facing endpoint URL: GET the
+      full https://<your-server>/v1/records value the owner will enter (not
+      just the host, and not just /v1/health). It must return 200 with
+      apiVersion >= 2 and capabilities ["additions", "deletions"], and 401
+      without the token.
     - Prove ingestion with the receiver's synthetic-data sender
       (server/send_synthetic_data.py) only. Never use real health data
       during setup, and remember the connection test itself sends nothing.

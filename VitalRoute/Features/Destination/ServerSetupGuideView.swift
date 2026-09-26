@@ -104,7 +104,7 @@ struct ServerSetupGuideView: View {
                     Text("Test Connection")
                         .font(.headline)
                     paragraph(
-                        "The “Test connection” button on the Destination screen checks that the endpoint is reachable, that its HTTPS certificate is valid, and that your API token is accepted — and that the receiver speaks the contract version automatic sync needs (v2, with additions and deletions). The test is a single read-only request: it never sends or returns health records."
+                        "The “Test connection” button on the Destination screen checks that the endpoint is reachable, that its HTTPS certificate is valid, and that your API token is accepted. It is a single read-only request: it never sends or returns health records. It succeeds on both older (v1) and current receivers — turning on Automatic Sync separately requires the current contract (v2, with additions and deletions), and that check happens when you enable it."
                     )
                 }
 
@@ -128,7 +128,7 @@ struct ServerSetupGuideView: View {
         section("2. Install your own server") {
             VStack(alignment: .leading, spacing: 12) {
                 paragraph(
-                    "The repository includes a small reference receiver: a minimal service that receives your records over HTTPS, stores them in a single SQLite database, and answers a read-only query service for your own agents. It has no accounts, no dashboard, and no third-party dependencies."
+                    "The repository includes a small reference receiver: a minimal service that receives your records over HTTPS, stores them in a single SQLite database, and answers a read-only query service for your own agents. It has no accounts, no dashboard, and no third-party services."
                 )
                 bullets([
                     "Runs on any always-on machine you control — a home server, VM, or cloud host — with Linux, Docker Compose, and persistent disk for the database.",
@@ -166,9 +166,16 @@ struct ServerSetupGuideView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .accessibilityLabel("Setup prompt to give to an AI agent")
                 HStack {
+                    // Safety invariant: both actions below must place
+                    // ServerSetup.agentSetupPrompt verbatim — never any
+                    // store value, credential, or device configuration.
                     Button {
                         UIPasteboard.general.string = ServerSetup.agentSetupPrompt
                         copiedPrompt = true
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .seconds(2))
+                            copiedPrompt = false
+                        }
                     } label: {
                         Label(copiedPrompt ? "Copied" : "Copy setup prompt",
                               systemImage: copiedPrompt ? "checkmark" : "doc.on.doc")
