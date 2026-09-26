@@ -47,10 +47,10 @@ final class DestinationConfigurationStore {
         case .success(let endpoint):
             savedEndpoint = endpoint ?? ""
             storageError = nil
+            isLoaded = true
         case .failure:
             storageError = "The saved destination could not be read from secure storage. VitalRoute will retry when secure storage is available."
         }
-        isLoaded = outcome.isSuccess
     }
 
     func save(endpoint rawValue: String) throws {

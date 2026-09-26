@@ -77,11 +77,11 @@ final class KeychainValueStore: SecureValueStoring {
     /// is unreadable from a locked-device launch; upgrading in place is what
     /// makes the stored configuration reachable before the next save.
     func migrateToBackgroundAccessibility() throws {
-        let query = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service
         ]
-        let attributes = [kSecAttrAccessible as String: vitalRouteKeychainAccessibility]
+        let attributes: [String: Any] = [kSecAttrAccessible as String: vitalRouteKeychainAccessibility]
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainValueStoreError.status(status)

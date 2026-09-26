@@ -2141,7 +2141,7 @@ final class ClockBox: @unchecked Sendable {
 
 /// Counts releases of an observer completion. Lock-backed because the
 /// release closure runs wherever the release happens, not on the main actor.
-private final class ReleaseCounter: @unchecked Sendable {
+final class ReleaseCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
 
@@ -2519,7 +2519,7 @@ private final class ManualStubClient: DestinationClient, @unchecked Sendable {
 }
 
 /// One-shot async gate used to park scripted deliveries.
-private final class AsyncGate: @unchecked Sendable {
+final class AsyncGate: @unchecked Sendable {
     private let lock = NSLock()
     private var opened = false
 
