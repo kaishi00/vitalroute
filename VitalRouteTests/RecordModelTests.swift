@@ -224,6 +224,27 @@ final class RecordModelTests: XCTestCase {
         XCTAssertEqual(decoded, original)
     }
 
+    /// Pins the shared derivation so the Swift client and the Python
+    /// synthetic sender cannot drift: SHA-256 of
+    /// "series:<lowercased uuid>:<index>", first 16 bytes, v4 formatting.
+    func testDeterministicChunkIDMatchesTheCrossImplementationKnownAnswer() {
+        let fixed = UUID(uuidString: "6f9619ff-8b86-d011-b42d-00c04fc964ff")!
+        XCTAssertEqual(
+            HealthKitRecordMapper.deterministicChunkID(seriesID: fixed, chunkIndex: 0)
+                .uuidString.lowercased(),
+            "a9d90958-56a1-4238-9979-764a7d550194"
+        )
+    }
+
+    /// JSON has one number spelling: integral doubles encode as integers
+    /// and re-decode as `.int`. Contractual, not accidental (see FHIRJSON's
+    /// number-fidelity note).
+    func testFHIRIntegralDoubleCoercesToIntOnRoundTrip() throws {
+        let encoded = try JSONEncoder().encode(Wrap(value: .double(2.0)))
+        let decoded = try JSONDecoder().decode(Wrap.self, from: encoded)
+        XCTAssertEqual(decoded.value, .int(2))
+    }
+
     func testFHIRValueRoundTripsScalarCases() throws {
         for value in [FHIRJSON.null, .bool(true), .int(-3), .double(2.5), .string("hi")] {
             let data = try JSONEncoder().encode(Wrap(value: value))

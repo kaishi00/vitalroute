@@ -345,6 +345,24 @@ class TypedDataValidationTests(ReceiverServerTestCase):
     def test_rejects_malformed_json(self):
         self.post_expect("invalid_json", raw=b"{not json")
 
+    def test_rejects_non_object_json_body(self):
+        for raw in (b"[]", b'"hello"', b"123", b"null"):
+            self.post_expect("invalid_json", raw=raw)
+
+    def test_schema_version_error_does_not_echo_client_values(self):
+        # A hostile multi-kilobyte "schemaVersion" must not be reflected
+        # into the response.
+        payload = json.dumps({
+            "schemaVersion": "x" * 4096,
+            "createdAt": "2026-09-23T12:00:00.000Z",
+            "batchId": str(uuid.uuid4()),
+            "changes": [],
+        }).encode("utf-8")
+        status, body = self.post("/v1/records", payload)
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["code"], "unsupported_schema_version")
+        self.assertNotIn("xxxx", body["error"]["message"])
+
     def test_rejects_non_finite_constant(self):
         raw = json.dumps(make_payload(make_changes(make_upsert(make_record())))).replace("8000", "NaN").encode("utf-8")
         self.post_expect("invalid_json", raw=raw)
@@ -424,6 +442,19 @@ class TypedDataValidationTests(ReceiverServerTestCase):
                 "chunkIndex": 0,
                 "channels": ["t", "lat"],
                 "points": [[0.0, 1.0]] * (validation._MAX_SERIES_POINTS_PER_CHUNK + 1),
+            })))),
+        )
+
+    def test_rejects_series_with_empty_points(self):
+        self.post_expect(
+            "invalid_record_data",
+            make_payload(make_changes(make_upsert(make_record(kind="series", data={
+                "type": "series",
+                "seriesType": "workoutRoute",
+                "seriesID": str(uuid.uuid4()),
+                "chunkIndex": 0,
+                "channels": ["t"],
+                "points": [],
             })))),
         )
 
@@ -884,6 +915,47 @@ class ChangeBatchTests(ReceiverServerTestCase):
         self.assertEqual(body["duplicateDeletions"], 1)
         self.assertEqual(body["cascadedDeletions"], 0)
 
+    def test_chunk_upsert_after_parent_delete_is_suppressed_not_stored(self):
+        # Live-before-backfill lane order means a parent delete can commit
+        # before its chunk upserts arrive. The chunk row must never be
+        # stored as an orphan: the tombstone of the parent suppresses it.
+        parent = make_record()
+        chunk = make_record(metric="workoutRoute", kind="series", data={
+            "type": "series", "seriesType": "workoutRoute", "seriesID": str(uuid.uuid4()),
+            "parentID": parent["id"], "chunkIndex": 0, "channels": ["t"], "points": [[0.0]],
+        })
+        # 1) Delete the parent (which was never stored): creates the tombstone.
+        self.post(
+            "/v1/records",
+            make_payload(make_changes(make_delete(parent["id"], metric=parent["metric"]))),
+        )
+        # 2) The chunk arrives afterwards (stale outbox event, cross-lane order).
+        status, body = self.post(
+            "/v1/records",
+            make_payload(make_changes(make_upsert(chunk))),
+        )
+        self.assertEqual(body["superseded"], 1)
+        self.assertEqual(body["accepted"], 0)
+        self.assertEqual(self.stored_count(), 0)
+
+    def test_same_batch_upsert_then_delete_is_delete_wins(self):
+        # The receiver applies upserts before deletes regardless of wire
+        # order, so a batch carrying both for one id ends deleted. Pin the
+        # behavior: clients never send this, but the outcome must not be
+        # accidental.
+        record = make_record()
+        status, body = self.post(
+            "/v1/records",
+            make_payload(make_changes(
+                make_upsert(record),
+                make_delete(record["id"], metric=record["metric"]),
+            )),
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["accepted"], 1)
+        self.assertEqual(body["appliedDeletions"], 1)
+        self.assertEqual(self.stored_count(), 0)
+
     def test_series_chunk_resurrection_suppressed_after_parent_delete(self):
         parent = make_record()
         chunk = make_record(metric="workoutRoute", kind="series", data={
@@ -944,7 +1016,10 @@ class SchemaResetTests(unittest.TestCase):
 
     def test_legacy_database_is_reset_for_v3(self):
         self._write_legacy_database(1)
-        store = storage.RecordStore(self.db_path)
+        # Resetting is destructive: it must be explicitly allowed.
+        with self.assertRaises(SystemExit):
+            storage.RecordStore(self.db_path)
+        store = storage.RecordStore(self.db_path, allow_schema_reset=True)
         self.assertEqual(store.schema_version(), "3")
         self.assertEqual(store.record_count(), 0)
         # The new schema is fully usable afterwards.
@@ -953,14 +1028,40 @@ class SchemaResetTests(unittest.TestCase):
             "upsert",
             record["id"].lower(),
             record["metric"],
-            record_tuple=(
-                record["id"].lower(), record["metric"], record["kind"],
-                "2026-09-20T00:00:00.000Z", "2026-09-20T23:59:59.000Z",
-                "source", "device", "{}", '{"type":"quantity","unit":"count","value":1}', None,
+            record=validation.PreparedRecord(
+                id=record["id"].lower(), metric=record["metric"], kind=record["kind"],
+                start_date="2026-09-20T00:00:00.000Z",
+                end_date="2026-09-20T23:59:59.000Z",
+                source_name="source", device_name="device",
+                metadata_json="{}",
+                data_json='{"type":"quantity","unit":"count","value":1}',
+                parent_id=None,
             ),
         )
         counts = store.apply([prepared], "2026-09-23T00:00:00.000Z")
         self.assertEqual(counts.accepted, 1)
+
+    def test_unversioned_records_table_is_reset_only_with_opt_in(self):
+        # A records table with no declared version (partial restore, crash
+        # of a pre-versioning build) is an incompatible generation too: the
+        # store must refuse to start without the explicit opt-in, and reset
+        # cleanly when allowed.
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE records (id TEXT PRIMARY KEY, value REAL NOT NULL);
+                INSERT INTO records VALUES ('legacy', 1.0);
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(SystemExit):
+            storage.RecordStore(self.db_path)
+        store = storage.RecordStore(self.db_path, allow_schema_reset=True)
+        self.assertEqual(store.record_count(), 0)
+        self.assertEqual(store.schema_version(), "3")
 
     def test_matching_schema_is_untouched(self):
         store = storage.RecordStore(self.db_path)
@@ -969,10 +1070,14 @@ class SchemaResetTests(unittest.TestCase):
             "upsert",
             record["id"].lower(),
             record["metric"],
-            record_tuple=(
-                record["id"].lower(), record["metric"], record["kind"],
-                "2026-09-20T00:00:00.000Z", "2026-09-20T23:59:59.000Z",
-                None, None, "{}", '{"type":"quantity","unit":"count","value":1}', None,
+            record=validation.PreparedRecord(
+                id=record["id"].lower(), metric=record["metric"], kind=record["kind"],
+                start_date="2026-09-20T00:00:00.000Z",
+                end_date="2026-09-20T23:59:59.000Z",
+                source_name=None, device_name=None,
+                metadata_json="{}",
+                data_json='{"type":"quantity","unit":"count","value":1}',
+                parent_id=None,
             ),
         )
         store.apply([prepared], "2026-09-23T00:00:00.000Z")

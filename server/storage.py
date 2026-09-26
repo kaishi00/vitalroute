@@ -19,7 +19,6 @@ parent, so a deleted parent can never leave orphaned chunks behind.
 """
 
 import datetime
-import json
 import os
 import sqlite3
 
@@ -62,10 +61,6 @@ def _utc_now_text():
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (now.microsecond // 1000)
 
 
-def _canonical_json(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
 class StorageError(Exception):
     pass
 
@@ -97,11 +92,21 @@ class ChangeCounts:
 
 
 class RecordStore:
-    """Owns the SQLite file. One instance per server; connections per call."""
+    """Owns the SQLite file. One instance per server; connections per call.
 
-    def __init__(self, db_path, logger=None):
+    Reset policy (pre-release, documented in DEPLOYMENT.md): there is no
+    migration machinery. When the on-disk database does not match this
+    module's schema generation — a different declared version, or record
+    tables with no declared version — the store refuses to touch it unless
+    ``allow_schema_reset`` is set, in which case it drops and recreates the
+    tables empty. Health data is never destroyed as a side effect of an
+    ordinary start.
+    """
+
+    def __init__(self, db_path, logger=None, allow_schema_reset=False):
         self.db_path = db_path
         self._logger = logger
+        self._allow_schema_reset = allow_schema_reset
         directory = os.path.dirname(os.path.abspath(db_path))
         os.makedirs(directory, exist_ok=True)
         self._initialize()
@@ -126,9 +131,30 @@ class RecordStore:
         connection = self._connect()
         try:
             existing = self._read_schema_version(connection)
-            if existing is not None and str(existing) != str(_SCHEMA_VERSION):
-                # Development reset policy: an incompatible database is
-                # recreated, not migrated. Nothing is logged but the fact.
+            records_table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'records'"
+            ).fetchone() is not None
+            version_mismatch = (
+                existing is not None and str(existing) != str(_SCHEMA_VERSION)
+            )
+            # A records table with no declared version is a partial or
+            # pre-versioning database: the same incompatible-generation
+            # treatment, because its shape cannot be trusted.
+            unversioned_tables = existing is None and records_table_exists
+            if (version_mismatch or unversioned_tables) and not self._allow_schema_reset:
+                raise SystemExit(
+                    "The database at %s is not schema version %s; refusing to "
+                    "start rather than discard health data. Re-sync from the "
+                    "device or restore a backup, or explicitly allow the "
+                    "reset by setting VITALROUTE_ALLOW_SCHEMA_RESET=1 "
+                    "(the database will be recreated empty)."
+                    % (self.db_path, _SCHEMA_VERSION)
+                )
+            if version_mismatch or unversioned_tables:
+                # Documented development reset policy: an incompatible
+                # database is recreated, never migrated. Nothing is logged
+                # but the fact. VACUUM afterwards so the dropped rows do
+                # not linger as recoverable free pages.
                 if self._logger is not None:
                     self._logger.warning(
                         "Database schema version %s is incompatible with the "
@@ -149,6 +175,8 @@ class RecordStore:
                 (str(_SCHEMA_VERSION),),
             )
             connection.commit()
+            if version_mismatch or unversioned_tables:
+                connection.execute("VACUUM")
         finally:
             connection.close()
 
@@ -156,9 +184,12 @@ class RecordStore:
         """Applies one change batch atomically with tombstone semantics.
 
         - upsert: INSERT OR IGNORE, first-write-wins — unless a tombstone
-          exists for the id, in which case the addition is counted as
-          superseded and ignored (an older queued addition can never
-          resurrect a deleted sample).
+          exists for the id, or for an id the record references as parent
+          (a series chunk of a deleted workout/route/ECG must not
+          resurrect as an orphan), in which case the addition is counted
+          as superseded and ignored. An older queued or retried addition
+          can therefore never resurrect a deleted sample or leave its
+          chunks behind.
         - delete: upserts a tombstone, removes any live row, and cascades
           to live rows whose parent_id references the deleted id (their
           ids are tombstoned too, so a replayed chunk cannot resurrect).
@@ -184,6 +215,21 @@ class RecordStore:
                             upsert_ids,
                         ).fetchall()
                     }
+                    # Chunks whose parent (or series head) was deleted are
+                    # suppressed the same way as the parent itself, even
+                    # when the chunk row itself was never stored.
+                    parent_refs = {
+                        c.record.parent_id for c in upserts if c.record.parent_id
+                    }
+                    if parent_refs:
+                        ref_placeholders = ",".join("?" * len(parent_refs))
+                        tombstoned |= {
+                            row[0]
+                            for row in connection.execute(
+                                "SELECT id FROM deleted_ids WHERE id IN (%s)" % ref_placeholders,
+                                list(parent_refs),
+                            ).fetchall()
+                        }
 
                 accepted = 0
                 duplicates = 0
@@ -192,20 +238,21 @@ class RecordStore:
                     fresh = [
                         (
                             c.record_id,
-                            c.record_tuple[1],
-                            c.record_tuple[2],
-                            c.record_tuple[3],
-                            c.record_tuple[4],
-                            c.record_tuple[5],
-                            c.record_tuple[6],
-                            c.record_tuple[7],
-                            c.record_tuple[8],
-                            c.record_tuple[9],
+                            c.record.metric,
+                            c.record.kind,
+                            c.record.start_date,
+                            c.record.end_date,
+                            c.record.source_name,
+                            c.record.device_name,
+                            c.record.metadata_json,
+                            c.record.data_json,
+                            c.record.parent_id,
                             batch_created_at_text,
                             now_text,
                         )
                         for c in upserts
                         if c.record_id not in tombstoned
+                        and c.record.parent_id not in tombstoned
                     ]
                     before = connection.total_changes
                     connection.executemany(
@@ -228,6 +275,10 @@ class RecordStore:
                 for change in deletes:
                     # Cascade first: live children of this id are removed
                     # and tombstoned so a replayed chunk cannot resurrect.
+                    # Child tombstone rows carry the parent delete's metric
+                    # and interval: tombstones are consulted by id only,
+                    # and the deleted object's own dates are the audit
+                    # truth for the whole cascade.
                     children = [
                         row[0]
                         for row in connection.execute(
@@ -236,7 +287,6 @@ class RecordStore:
                         ).fetchall()
                     ]
                     if children:
-                        child_placeholders = ",".join("?" * len(children))
                         connection.execute(
                             "DELETE FROM records WHERE parent_id = ?",
                             (change.record_id,),
@@ -306,14 +356,6 @@ class RecordStore:
         try:
             row = connection.execute("SELECT COUNT(*) FROM records").fetchone()
             return int(row[0])
-        finally:
-            connection.close()
-
-    def record_ids(self):
-        connection = self._connect()
-        try:
-            rows = connection.execute("SELECT id FROM records").fetchall()
-            return {row[0] for row in rows}
         finally:
             connection.close()
 

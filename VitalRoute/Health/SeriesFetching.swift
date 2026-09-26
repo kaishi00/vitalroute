@@ -66,7 +66,7 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
                 if let ecg = samples?.first as? HKElectrocardiogram {
                     continuation.resume(returning: ecg)
                 } else {
-                    continuation.resume(throwing: HealthKitServiceError.corruptedAnchor)
+                    continuation.resume(throwing: HealthKitServiceError.seriesSampleUnavailable(metric: "electrocardiogram"))
                 }
             }
             healthStore.execute(query)

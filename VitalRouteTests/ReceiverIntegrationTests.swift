@@ -42,6 +42,12 @@ final class ReceiverIntegrationTests: XCTestCase {
     private func syntheticChanges(count: Int) -> [SyncChangeEvent] {
         let base = Date(timeIntervalSince1970: 1_760_000_000)
         let seriesID = UUID()
+        // Per-cycle workout ids: the series chunk of a cycle references its
+        // cycle's workout as parent, so a real-server cascade delete is
+        // exercised end to end by the lifecycle test.
+        let workoutIDs = Dictionary(uniqueKeysWithValues: (0..<count).map { index in
+            (index / 6, UUID())
+        })
         var changes: [SyncChangeEvent] = []
         changes.reserveCapacity(count)
         for index in 0..<count {
@@ -71,7 +77,7 @@ final class ReceiverIntegrationTests: XCTestCase {
                     ])))
             case 4:
                 record = HealthRecord(
-                    id: UUID(), metric: .workouts, startDate: start, endDate: end,
+                    id: workoutIDs[index / 6]!, metric: .workouts, startDate: start, endDate: end,
                     data: .workout(WorkoutData(
                         activityType: "running",
                         activityTypeRawValue: 52,
@@ -85,7 +91,7 @@ final class ReceiverIntegrationTests: XCTestCase {
                     data: .series(SeriesData(
                         seriesType: "syntheticSeries",
                         seriesID: seriesID,
-                        parentID: nil,
+                        parentID: workoutIDs[index / 6],
                         chunkIndex: index / 6,
                         channels: ["t", "v"],
                         points: [[0, 1], [0.5, 2], [1, 3]])))

@@ -10,6 +10,11 @@ import Foundation
 /// exists so a FHIR document is preserved *structurally* — never flattened
 /// into strings — without requiring the app to model every FHIR resource
 /// type.
+///
+/// Number fidelity note: JSON has one number spelling, so a decoded
+/// integral value always comes back as `.int` — `double(2.0)` encodes as
+/// `2` and re-decodes as `.int(2)`. This only matters if the client ever
+/// re-decodes its own FHIR output; the receiver stores the encoded bytes.
 enum FHIRJSON: Equatable, Sendable {
     case null
     case bool(Bool)
@@ -66,6 +71,14 @@ extension FHIRJSON: Codable {
         } else if let value = try? container.decode(Int64.self) {
             self = .int(value)
         } else if let value = try? container.decode(Double.self) {
+            // Non-finite numbers are invalid FHIR values; catching them at
+            // decode keeps the failure at the edge instead of mid-encode.
+            guard value.isFinite else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Non-finite numbers are not valid FHIR values."
+                )
+            }
             self = .double(value)
         } else if let value = try? container.decode(String.self) {
             self = .string(value)

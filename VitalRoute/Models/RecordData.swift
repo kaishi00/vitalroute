@@ -33,7 +33,7 @@ struct QuantityData: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard try container.decode(String.self, forKey: .type) == Self.wireType else {
-            throw Self.typeMismatch(decoder)
+            throw RecordData.typeMismatch(decoder)
         }
         value = try container.decode(Double.self, forKey: .value)
         unit = try container.decode(String.self, forKey: .unit)
@@ -46,12 +46,6 @@ struct QuantityData: Codable, Equatable, Sendable {
         try container.encode(unit, forKey: .unit)
     }
 
-    static func typeMismatch(_ decoder: Decoder) -> DecodingError {
-        .dataCorrupted(DecodingError.Context(
-            codingPath: decoder.codingPath,
-            debugDescription: "Data payload type does not match its record kind."
-        ))
-    }
 }
 
 /// A categorical sample, e.g. a sleep stage. `value` is the client's raw
@@ -73,7 +67,7 @@ struct CategoryData: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard try container.decode(String.self, forKey: .type) == Self.wireType else {
-            throw QuantityData.typeMismatch(decoder)
+            throw RecordData.typeMismatch(decoder)
         }
         value = try container.decode(Int.self, forKey: .value)
         name = try container.decodeIfPresent(String.self, forKey: .name)
@@ -116,7 +110,7 @@ struct CorrelationData: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard try container.decode(String.self, forKey: .type) == Self.wireType else {
-            throw QuantityData.typeMismatch(decoder)
+            throw RecordData.typeMismatch(decoder)
         }
         components = try container.decode([CorrelationComponent].self, forKey: .components)
     }
@@ -164,7 +158,7 @@ struct WorkoutData: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard try container.decode(String.self, forKey: .type) == Self.wireType else {
-            throw QuantityData.typeMismatch(decoder)
+            throw RecordData.typeMismatch(decoder)
         }
         activityType = try container.decode(String.self, forKey: .activityType)
         activityTypeRawValue = try container.decode(Int.self, forKey: .activityTypeRawValue)
@@ -235,7 +229,7 @@ struct ActivitySummaryData: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard try container.decode(String.self, forKey: .type) == Self.wireType else {
-            throw QuantityData.typeMismatch(decoder)
+            throw RecordData.typeMismatch(decoder)
         }
         activeEnergyBurnedKilocalories = try container.decodeIfPresent(Double.self, forKey: .activeEnergyBurnedKilocalories)
         activeEnergyBurnedGoalKilocalories = try container.decodeIfPresent(Double.self, forKey: .activeEnergyBurnedGoalKilocalories)
@@ -306,7 +300,7 @@ struct SeriesData: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard try container.decode(String.self, forKey: .type) == Self.wireType else {
-            throw QuantityData.typeMismatch(decoder)
+            throw RecordData.typeMismatch(decoder)
         }
         seriesType = try container.decode(String.self, forKey: .seriesType)
         seriesID = try container.decode(UUID.self, forKey: .seriesID)
@@ -375,7 +369,7 @@ struct ElectrocardiogramData: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard try container.decode(String.self, forKey: .type) == Self.wireType else {
-            throw QuantityData.typeMismatch(decoder)
+            throw RecordData.typeMismatch(decoder)
         }
         classification = try container.decode(String.self, forKey: .classification)
         classificationRawValue = try container.decodeIfPresent(Int.self, forKey: .classificationRawValue)
@@ -423,7 +417,7 @@ struct ClinicalData: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard try container.decode(String.self, forKey: .type) == Self.wireType else {
-            throw QuantityData.typeMismatch(decoder)
+            throw RecordData.typeMismatch(decoder)
         }
         fhirType = try container.decode(String.self, forKey: .fhirType)
         fhirIdentifier = try container.decodeIfPresent(String.self, forKey: .fhirIdentifier)
@@ -451,6 +445,13 @@ enum RecordData: Equatable, Sendable {
     case series(SeriesData)
     case electrocardiogram(ElectrocardiogramData)
     case clinical(ClinicalData)
+
+    static func typeMismatch(_ decoder: Decoder) -> DecodingError {
+        .dataCorrupted(DecodingError.Context(
+            codingPath: decoder.codingPath,
+            debugDescription: "Data payload type does not match its record kind."
+        ))
+    }
 
     var kind: RecordKind {
         switch self {

@@ -1083,7 +1083,11 @@ final class AutomaticSyncEngine {
                         // the outbox dedupes by event identity and the
                         // receiver answers idempotently. Deletions for these
                         // samples are captured by that same later read.
-                        _ = try await outbox.append(fresh.map { SyncChangeEvent.upsert($0) }, lane: .live)
+                        _ = try await outbox.append(
+                            fresh.map { SyncChangeEvent.upsert($0) }
+                                .filter(RecordWireLimits.isTransmittableChangeEvent),
+                            lane: .live
+                        )
                     }
                 } catch let cancellation as CancellationError {
                     throw cancellation
@@ -1123,7 +1127,16 @@ final class AutomaticSyncEngine {
                 // A full page belongs to the historical catch-up; the page
                 // that drains the stream to its head is live data.
                 let lane: Outbox.Lane = isCaughtUp || !page.isFull ? .live : .backfill
-                var events: [SyncChangeEvent] = page.additions.map { .upsert($0) }
+                // Records exceeding the receiver's structural limits can
+                // never be delivered and would poison their whole batch
+                // (the receiver rejects batches atomically). Skip them and
+                // surface the count instead of queueing doomed data.
+                let deliverableAdditions = page.additions.filter(RecordWireLimits.isTransmittable)
+                let undeliverable = page.additions.count - deliverableAdditions.count
+                if undeliverable > 0 {
+                    lastStatusMessage = "\(undeliverable) captured record(s) from \(metric.displayName) exceed the destination's size limits and were not queued."
+                }
+                var events: [SyncChangeEvent] = deliverableAdditions.map { .upsert($0) }
                 events.append(contentsOf: page.deletions.map { .delete($0) })
                 if !events.isEmpty {
                     let written = try await outbox.append(events, lane: lane)
@@ -1538,6 +1551,10 @@ final class AutomaticSyncEngine {
                 return .deferred(healthError.localizedDescription)
             case .seriesFetcherUnavailable(let metric):
                 return .actionable(.protocolFailure("the \(metric) series loader is not configured."))
+            case .seriesSampleUnavailable:
+                // The sample vanished between the page read and the series
+                // fetch; the next anchored read reconciles.
+                return .transient
             }
         }
         if error is CocoaError {

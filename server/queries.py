@@ -26,6 +26,10 @@ import sqlite3
 # the whole database; it is generous for human-scale questions.
 MAX_RANGE_DAYS = 366
 MAX_RECORDS = 200
+# Bounded response for recent_records: with typed payloads one record can
+# carry up to 1 MiB of data, so the 200-row cap alone no longer bounds an
+# answer.
+MAX_RECENT_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
 class QueryError(ValueError):
@@ -214,8 +218,15 @@ def recent_records(connection, metric=None, limit=20, offset=0):
         "FROM records r WHERE " + " AND ".join(clauses) + " "
         "ORDER BY r.start_date DESC, r.id LIMIT ? OFFSET ?"
     ), params).fetchall()
-    return {
-        "records": [
+    records = []
+    response_bytes = 0
+    truncated = False
+    for row in rows:
+        size = len(row["data_json"] or "") + len(row["metadata_json"] or "") + 256
+        if response_bytes + size > MAX_RECENT_RESPONSE_BYTES:
+            truncated = True
+            break
+        records.append(
             {
                 "id": row["id"],
                 "metric": row["metric"],
@@ -227,6 +238,9 @@ def recent_records(connection, metric=None, limit=20, offset=0):
                 "metadata": json.loads(row["metadata_json"] or "null"),
                 "data": json.loads(row["data_json"] or "null"),
             }
-            for row in rows
-        ]
+        )
+        response_bytes += size
+    return {
+        "records": records,
+        "truncated": truncated,
     }

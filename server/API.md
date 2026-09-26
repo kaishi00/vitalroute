@@ -429,10 +429,13 @@ reject other versions with `unsupported_schema_version` rather than guessing.
 ### Database reset policy (pre-release)
 
 There is no migration machinery from earlier development schemas. When the
-receiver opens a database whose declared schema version differs from its own,
-it drops and recreates the tables and starts empty, logging a single line
-(never any data). Operators upgrading a pre-3 deployment must therefore
-re-sync from the device (or restore from a backup) after upgrading.
+receiver opens a database that does not match its schema generation — a
+different declared `schema_version`, or record tables with no declared
+version — it refuses to start rather than discard health data. Starting it
+with `VITALROUTE_ALLOW_SCHEMA_RESET=1` (environment variable, one boot)
+recreates the database empty instead, logging a single line (never any
+data). Operators upgrading a pre-3 deployment therefore either re-sync from
+the device afterwards or restore from a backup taken before the upgrade.
 
 ## Operational guarantees
 

@@ -44,7 +44,7 @@ def deterministic_chunk_id(series_id, chunk_index):
     idempotent even though HealthKit does not assign them identities.
     """
     digest = hashlib.sha256(
-        ("series:" + str(series_id) + ":" + str(chunk_index)).encode("utf-8")
+        ("series:" + str(series_id).lower() + ":" + str(chunk_index)).encode("utf-8")
     ).digest()[:16]
     variant = bytearray(digest)
     variant[6] = (variant[6] & 0x0F) | 0x40

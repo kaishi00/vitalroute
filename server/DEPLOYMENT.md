@@ -205,11 +205,14 @@ touched. The revision file is updated.
 
 **Schema compatibility (pre-release policy).** There is no migration
 machinery between storage-schema generations. When the receiver opens a
-database whose schema version differs from its own, it logs one line and
-recreates the database empty. Upgrading a deployment that still runs a
-pre-3 schema therefore discards stored records; re-sync from the device
-afterwards (or restore from a backup taken before the upgrade). Verify
-afterwards with the connection test (`apiVersion >= 3`).
+database that does not match its schema generation, it refuses to start
+rather than discard health data. To proceed with a reset, start the
+container once with `VITALROUTE_ALLOW_SCHEMA_RESET=1` in the environment
+(e.g. add it to the compose environment for one `up -d --force-recreate`,
+then remove it): the database is recreated empty and the receiver logs one
+line. Then re-sync from the device, or restore from a backup taken before
+the upgrade. Verify afterwards with the connection test
+(`apiVersion >= 3`).
 
 ### Token rotation
 

@@ -252,7 +252,7 @@ def _validate_quantity_data(data, where):
     _require_keys(data, {"type", "value", "unit"}, set(), where)
     _require_finite_number(data["value"], "%s value" % where)
     _require_string(data["unit"], "%s unit" % where, _MAX_UNIT_LENGTH)
-    return {"type": "quantity", "value": data["value"], "unit": data["unit"]}
+    return {"type": "quantity", "value": data["value"], "unit": data["unit"]}, None
 
 
 def _validate_category_data(data, where):
@@ -271,7 +271,7 @@ def _validate_category_data(data, where):
     canonical = {"type": "category", "value": data["value"]}
     if name is not None:
         canonical["name"] = name
-    return canonical
+    return canonical, None
 
 
 def _validate_correlation_data(data, where):
@@ -311,7 +311,7 @@ def _validate_correlation_data(data, where):
                 ),
             }
         )
-    return {"type": "correlation", "components": canonical_components}
+    return {"type": "correlation", "components": canonical_components}, None
 
 
 def _validate_workout_data(data, where):
@@ -351,7 +351,7 @@ def _validate_workout_data(data, where):
                     "%s %s must not be negative." % (where, field),
                 )
             canonical[field] = value
-    return canonical
+    return canonical, None
 
 
 _ACTIVITY_SUMMARY_NUMERIC_FIELDS = (
@@ -386,7 +386,7 @@ def _validate_activity_summary_data(data, where):
             "%s dateComponentsUTC" % where,
             _MAX_SHORT_STRING_LENGTH,
         )
-    return canonical
+    return canonical, None
 
 
 def _validate_series_data(data, where):
@@ -422,10 +422,13 @@ def _validate_series_data(data, where):
                 "%s channel %d has an invalid name." % (where, index),
             )
     points = data["points"]
-    if not isinstance(points, list) or len(points) > _MAX_SERIES_POINTS_PER_CHUNK:
+    if (
+        not isinstance(points, list)
+        or not 1 <= len(points) <= _MAX_SERIES_POINTS_PER_CHUNK
+    ):
         raise ValidationError(
             "invalid_record_data",
-            "%s points must be an array of at most %d rows."
+            "%s points must be an array of 1 to %d rows."
             % (where, _MAX_SERIES_POINTS_PER_CHUNK),
         )
     width = len(channels)
@@ -532,7 +535,7 @@ def _validate_electrocardiogram_data(data, where):
             data["voltageChunkCount"], "%s voltageChunkCount" % where, 1_000_000
         )
         canonical["voltageChunkCount"] = data["voltageChunkCount"]
-    return canonical
+    return canonical, None
 
 
 def _validate_fhir_value(value, where):
@@ -615,7 +618,7 @@ def _validate_clinical_data(data, where):
             "%s fhirIdentifier" % where,
             _MAX_FHIR_IDENTIFIER_LENGTH,
         )
-    return canonical
+    return canonical, None
 
 
 _DATA_VALIDATORS = {
@@ -651,11 +654,10 @@ def canonicalize_data(data, kind, where):
             "invalid_record_data",
             "%s data type does not match the record kind." % where,
         )
-    result = _DATA_VALIDATORS[kind](data, where)
-    if kind == "series":
-        canonical, parent_id = result
-        return canonical, parent_id
-    return result, None
+    # Every kind validator returns (canonical_object, extra) where extra is
+    # the parent reference for series chunks and None otherwise.
+    canonical, parent_id = _DATA_VALIDATORS[kind](data, where)
+    return canonical, parent_id
 
 
 # ---- payload validation ----------------------------------------------------
@@ -705,16 +707,46 @@ def validate_change_payload(payload, max_changes):
     return batch_created_at_text, prepared
 
 
+class PreparedRecord:
+    """One validated record, ready for storage. Attribute access over
+    positional tuples: the storage layer reads these by name, so inserting
+    a field cannot silently shift columns."""
+
+    __slots__ = (
+        "id",
+        "metric",
+        "kind",
+        "start_date",
+        "end_date",
+        "source_name",
+        "device_name",
+        "metadata_json",
+        "data_json",
+        "parent_id",
+    )
+
+    def __init__(self, id, metric, kind, start_date, end_date,
+                 source_name, device_name, metadata_json, data_json, parent_id):
+        self.id = id
+        self.metric = metric
+        self.kind = kind
+        self.start_date = start_date
+        self.end_date = end_date
+        self.source_name = source_name
+        self.device_name = device_name
+        self.metadata_json = metadata_json
+        self.data_json = data_json
+        self.parent_id = parent_id
+
+
 class PreparedChange:
     """One validated change, ready for transactional application."""
 
-    def __init__(self, kind, record_id, metric, record_tuple=None, dates=None):
+    def __init__(self, kind, record_id, metric, record=None, dates=None):
         self.kind = kind  # "upsert" | "delete"
         self.record_id = record_id
         self.metric = metric
-        # (id, metric, record_kind, start_text, end_text, source, device,
-        #  metadata_json, data_json, parent_id) for upserts
-        self.record_tuple = record_tuple
+        self.record = record  # PreparedRecord for upserts
         self.dates = dates  # (start_text, end_text) for deletes
 
 
@@ -764,17 +796,17 @@ def _validate_record(record, index):
             % (where, _MAX_DATA_JSON_BYTES),
         )
 
-    return (
-        parse_record_id(record["id"], "%s id" % where),
-        metric,
-        record_kind,
-        format_timestamp_utc(start_date),
-        format_timestamp_utc(end_date),
-        _require_optional_string(record.get("sourceName"), "%s sourceName" % where),
-        _require_optional_string(record.get("deviceName"), "%s deviceName" % where),
-        json_dumps_sorted(metadata),
-        data_json,
-        parent_id,
+    return PreparedRecord(
+        id=parse_record_id(record["id"], "%s id" % where),
+        metric=metric,
+        kind=record_kind,
+        start_date=format_timestamp_utc(start_date),
+        end_date=format_timestamp_utc(end_date),
+        source_name=_require_optional_string(record.get("sourceName"), "%s sourceName" % where),
+        device_name=_require_optional_string(record.get("deviceName"), "%s deviceName" % where),
+        metadata_json=json_dumps_sorted(metadata),
+        data_json=data_json,
+        parent_id=parent_id,
     )
 
 
@@ -798,8 +830,8 @@ def _validate_change(change, index):
         record = change["record"]
         if not isinstance(record, dict):
             raise ValidationError("invalid_record", "%s record must be an object." % where)
-        record_tuple = _validate_record(record, index)
-        return PreparedChange("upsert", record_tuple[0], record_tuple[1], record_tuple=record_tuple)
+        prepared_record = _validate_record(record, index)
+        return PreparedChange("upsert", prepared_record.id, prepared_record.metric, record=prepared_record)
     if kind == "delete":
         if _DELETE_KEYS != keys - _CHANGE_KEYS:
             raise ValidationError(

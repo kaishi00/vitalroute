@@ -61,6 +61,12 @@ struct SyncSummary: Equatable {
     /// (the sample was deleted through the automatic change stream before
     /// this manual batch arrived). Accounted for, but not stored.
     var supersededRecords = 0
+    /// Records read from HealthKit but not sent because they exceed the
+    /// receiver's structural limits (oversized metadata, non-finite
+    /// values, …). They can never be delivered, so retrying them would
+    /// poison their whole batch forever; they are skipped and surfaced
+    /// instead.
+    var skippedRecords = 0
 
     var deliveredRecords: Int {
         acceptedRecords + duplicateRecords + supersededRecords
@@ -434,9 +440,18 @@ final class ManualSyncCoordinator {
             // the next sync (the receiver keeps one copy of each record).
             // Manual sync shares the automatic path's single v3 operation:
             // an additions-only change batch.
-            let batches = page.records
+            let sendableRecords = page.records.filter(RecordWireLimits.isTransmittable)
+            let skipped = page.records.count - sendableRecords.count
+            if skipped > 0 {
+                // A record the receiver would always reject must not poison
+                // its batch: skipping it (with the cursor advancing past it)
+                // is the only way this category keeps syncing.
+                summary.skippedRecords += skipped
+                currentSummary = summary
+            }
+            let batches = sendableRecords
                 .map(SyncChangeEvent.upsert)
-                .batched(into: SyncLimits.recordsPerUploadBatch)
+                .batchedForDelivery(maxCount: SyncLimits.recordsPerUploadBatch)
             summary.batchesPlanned += batches.count
             for batch in batches {
                 try Task.checkCancellation()
@@ -529,11 +544,32 @@ final class ManualSyncCoordinator {
     }
 }
 
-private extension Array {
-    func batched(into size: Int) -> [[Element]] {
-        precondition(size > 0)
-        return stride(from: 0, to: count, by: size).map {
-            Array(self[$0..<Swift.min($0 + size, count)])
+private extension Array where Element == SyncChangeEvent {
+    /// Delivery batches bounded by both count and the same byte budget the
+    /// outbox path enforces, so a series-chunk-heavy page cannot exceed the
+    /// receiver's body limit (which the receiver rejects atomically, and a
+    /// resumable cursor would then retry forever). A single element larger
+    /// than the whole budget still ships alone — a legal batch of one.
+    func batchedForDelivery(maxCount: Int) -> [[Element]] {
+        precondition(maxCount > 0)
+        let encoder = JSONEncoder()
+        var batches: [[Element]] = []
+        var current: [Element] = []
+        var bytes = 0
+        for element in self {
+            let size = (try? encoder.encode(element))?.count ?? Outbox.unknownFileSizeEstimate
+            if current.count == maxCount
+                || (!current.isEmpty && bytes + size > Outbox.deliveryBatchByteLimit) {
+                batches.append(current)
+                current = []
+                bytes = 0
+            }
+            current.append(element)
+            bytes += size
         }
+        if !current.isEmpty {
+            batches.append(current)
+        }
+        return batches
     }
 }

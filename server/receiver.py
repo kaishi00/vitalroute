@@ -62,11 +62,13 @@ class InvalidContentLength(Exception):
 
 
 class ReceiverConfig:
-    def __init__(self, token, db_path, max_body_bytes, max_records_per_batch):
+    def __init__(self, token, db_path, max_body_bytes, max_records_per_batch,
+                 allow_schema_reset=False):
         self.token = token
         self.db_path = db_path
         self.max_body_bytes = max_body_bytes
         self.max_records_per_batch = max_records_per_batch
+        self.allow_schema_reset = allow_schema_reset
 
 
 class ReceiverHandler(BaseHTTPRequestHandler):
@@ -333,17 +335,23 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, "invalid_json", "The request body is not valid JSON.")
             return
 
+        if not isinstance(payload, dict):
+            self._send_error_json(400, "invalid_json", "The request body must be a JSON object.")
+            return
+
         # Single contract: schemaVersion 3 change batches. Older schema
         # versions are rejected with an explicit version error so an old
         # client learns the receiver moved, not that its shape was wrong.
-        schema_version = payload.get("schemaVersion") if isinstance(payload, dict) else None
+        # Non-integer values are described, never echoed: the raw value is
+        # client-controlled and must not be reflected into responses.
+        schema_version = payload.get("schemaVersion")
         if schema_version != validation.SUPPORTED_SCHEMA_VERSION:
-            self._send_error_json(
-                400,
-                "unsupported_schema_version",
-                "Unsupported schemaVersion %s; this receiver supports %d."
-                % (schema_version, validation.SUPPORTED_SCHEMA_VERSION),
-            )
+            if isinstance(schema_version, int) and not isinstance(schema_version, bool):
+                detail = "Unsupported schemaVersion %d; this receiver supports %d." % (
+                    schema_version, validation.SUPPORTED_SCHEMA_VERSION)
+            else:
+                detail = "schemaVersion must be the integer %d." % validation.SUPPORTED_SCHEMA_VERSION
+            self._send_error_json(400, "unsupported_schema_version", detail)
             return
 
         try:
@@ -434,6 +442,7 @@ def make_server(
     max_records_per_batch=validation.DEFAULT_MAX_RECORDS_PER_BATCH,
     tls_cert=None,
     tls_key=None,
+    allow_schema_reset=False,
 ):
     """Builds a ThreadingHTTPServer. Raises ValueError on unsafe config."""
     if not token or len(token) < _MIN_TOKEN_LENGTH:
@@ -443,11 +452,14 @@ def make_server(
             % _MIN_TOKEN_LENGTH
         )
 
-    record_store = storage.RecordStore(db_path, logger=logger)
+    record_store = storage.RecordStore(
+        db_path, logger=logger, allow_schema_reset=allow_schema_reset
+    )
 
     server = ReceiverServer((host, port), ReceiverHandler)
     server.receiver_config = ReceiverConfig(
-        token, db_path, max_body_bytes, max_records_per_batch
+        token, db_path, max_body_bytes, max_records_per_batch,
+        allow_schema_reset=allow_schema_reset,
     )
     server.record_store = record_store
 
@@ -508,6 +520,7 @@ def main(argv=None):
             ),
             tls_cert=args.tls_cert,
             tls_key=args.tls_key,
+            allow_schema_reset=os.environ.get("VITALROUTE_ALLOW_SCHEMA_RESET") in ("1", "true", "yes"),
         )
     except ValueError as error:
         raise SystemExit(str(error))

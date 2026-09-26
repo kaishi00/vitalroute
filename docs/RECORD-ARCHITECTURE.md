@@ -77,8 +77,12 @@ the system.
 Adding an ordinary quantity or category metric means adding one
 descriptor entry — no other switch in the app changes. The extraction
 switches are per-*plan* (`CanonicalUnit`, `CategoryNaming`) and
-per-*kind*, shared by every metric of that structure. Component metrics
-(e.g. systolic/diastolic) exist in the catalog with
+per-*kind*, shared by every metric of that structure. A metric whose
+records need a *new* structural path (activity summaries and generic
+series heads, whose HealthKit queries are not sample-anchored) also needs
+an `ExtractionPlan` case and its query adapter — that is the remaining
+per-kind work the model deliberately keeps in one place. Component
+metrics (e.g. systolic/diastolic) exist in the catalog with
 `userSelectable: false` so correlation records can attribute them while
 they stay invisible to selection and export.
 
@@ -124,7 +128,15 @@ Receiver rows are envelopes too: searchable envelope columns (`metric`,
 `json_extract`; other kinds are counted, never averaged.
 
 There is no migration machinery between schema generations: a database
-whose declared `schema_version` differs from the receiver's is recreated
-empty (one log line, no data exposure). This is a deliberate pre-release
-policy — it trades a disposable development database for a clean
-contract.
+that does not match the receiver's schema generation is not touched on
+start — the receiver refuses to boot, and only an explicit
+`VITALROUTE_ALLOW_SCHEMA_RESET=1` boot recreates it empty (one log line,
+no data exposure). This is a deliberate pre-release policy — it trades a
+disposable development database for a clean contract.
+
+One client-side consequence of the same policy: outbox event files
+written by a pre-v3 build fail the new record decoding and are
+quarantined on upgrade (the standard quarantine path; the count is
+surfaced in sync status). Captured-but-undelivered pre-upgrade changes
+are recovered by re-reading from the persisted anchors, whose data still
+decodes.

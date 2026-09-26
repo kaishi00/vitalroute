@@ -53,12 +53,17 @@ actor Outbox {
 
     static let capacityLimit = 10_000
     static let deliveryBatchSize = 200
-    /// Byte budget for one delivery batch. Event files are exactly the
-    /// encoded wire changes, so file size is the wire contribution; the
-    /// budget keeps series-chunk batches (whose records are far larger than
-    /// ordinary samples) from exceeding the receiver's body limit. Headroom
-    /// covers batch framing and per-change wrappers.
+    /// Byte budget for one delivery batch. Event files hold the outbox
+    /// spelling of an event — a few bytes different from the wire spelling
+    /// of a batch change (deletes nest differently) — which is close enough
+    /// for budgeting with the 2 MiB of headroom below the receiver's 10 MiB
+    /// body limit. The budget keeps series-chunk batches (whose records are
+    /// far larger than ordinary samples) from exceeding that limit.
     static let deliveryBatchByteLimit = 8 * 1024 * 1024
+    /// Conservative stand-in for an unreadable file size: the event is
+    /// treated as budget-consuming as possible, so it ships alone instead
+    /// of silently riding in a batch that might overflow.
+    static let unknownFileSizeEstimate = deliveryBatchByteLimit
 
     private struct Entry {
         let sequence: UInt64
@@ -216,10 +221,11 @@ actor Outbox {
     private func pickBatchEntries() -> [Entry] {
         var chosen: [Entry] = []
         var bytes = 0
-        func admit(_ entry: Entry) -> Bool {
-            if chosen.count == Self.deliveryBatchSize {
-                return false
-            }
+        // Admitting fails for exactly two reasons: the batch is full
+        // (assembly is over) or the entry does not fit the byte budget
+        // (skip it; smaller events later in the queue may still fit).
+        func isFull() -> Bool { chosen.count == Self.deliveryBatchSize }
+        func admits(_ entry: Entry) -> Bool {
             if !chosen.isEmpty, bytes + entry.fileSize > deliveryByteLimit {
                 return false
             }
@@ -228,17 +234,19 @@ actor Outbox {
             return true
         }
         for entry in index where entry.lane == .live {
-            if !admit(entry) { return chosen }
+            if isFull() { return chosen }
+            _ = admits(entry)
         }
         for entry in index where entry.lane == .backfill {
-            if !admit(entry) { break }
+            if isFull() { break }
+            _ = admits(entry)
         }
         return chosen
     }
 
     private static func fileSize(of url: URL) -> Int {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        return (attributes?[.size] as? NSNumber)?.intValue ?? 0
+        return (attributes?[.size] as? NSNumber)?.intValue ?? unknownFileSizeEstimate
     }
 
     /// Keeps a corrupt file for inspection without letting it block the

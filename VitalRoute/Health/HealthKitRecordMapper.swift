@@ -396,6 +396,10 @@ enum HealthKitRecordMapper {
             averageHeartRate: ecg.averageHeartRate?.doubleValue(for: HKUnit.count().unitDivided(by: .minute())),
             samplingFrequency: ecg.samplingFrequency?.doubleValue(for: .hertz()),
             voltageSeriesID: ecg.uuid,
+            // The parent is emitted before its voltage fetch runs, so this
+            // client cannot know the total up front and deliberately omits
+            // the field (contract-optional). Receivers must not read it as
+            // a completeness signal.
             voltageChunkCount: nil
         )
     }
@@ -448,8 +452,10 @@ enum HealthKitRecordMapper {
     /// below the receiver's per-record limit, and the outbox's byte-budget
     /// batching keeps chunk-heavy batches under the body limit.
     enum SeriesLimits {
-        static let pointsPerChunk = 2048
-        static let maxChannels = 16
+        // Mirrors RecordWireLimits (Models cannot import HealthKit): the
+        // receiver rejects both bounds, so the chunker pre-enforces them.
+        static let pointsPerChunk = RecordWireLimits.maxSeriesPointsPerChunk
+        static let maxChannels = RecordWireLimits.maxSeriesChannels
     }
 
     /// Deterministic chunk identity: the same series and chunk index always
@@ -482,6 +488,8 @@ enum HealthKitRecordMapper {
         chunkSize: Int = SeriesLimits.pointsPerChunk
     ) -> [HealthRecord] {
         precondition(chunkSize > 0, "chunk size must be positive")
+        precondition((1...SeriesLimits.maxChannels).contains(channels.count),
+                     "series channel count exceeds the wire limit")
         precondition(!points.isEmpty, "series chunking requires at least one point")
         let chunks = stride(from: 0, to: points.count, by: chunkSize).map { offset in
             Array(points[offset..<Swift.min(offset + chunkSize, points.count)])

@@ -46,7 +46,9 @@ final class HealthKitService: HealthDataProviding {
     private let observers: HealthObserverCoordinator
     /// Series loaders for metrics whose records continue into a series
     /// (ECG voltage today; workout routes when cataloged). Ordinary
-    /// metrics need none. Injectable so tests can script fetches.
+    /// metrics need none. Injectable so tests can script fetches; the
+    /// default derives a loader for every cataloged series-capable metric
+    /// so adding such a descriptor cannot silently ship without one.
     private let seriesFetchers: [HealthMetric: any SeriesFetching]
 
     /// `observerBackend` defaults to the store at hand; tests inject a
@@ -55,13 +57,29 @@ final class HealthKitService: HealthDataProviding {
     init(
         observerBackend: (any HealthObserverBackend)? = nil,
         observerCompletionDeadline: TimeInterval = HealthObserverCoordinator.defaultCompletionDeadline,
-        seriesFetchers: [HealthMetric: any SeriesFetching] = [:]
+        seriesFetchers: [HealthMetric: any SeriesFetching]? = nil
     ) {
         observers = HealthObserverCoordinator(
             backend: observerBackend ?? healthStore,
             completionDeadline: observerCompletionDeadline
         )
-        self.seriesFetchers = seriesFetchers
+        self.seriesFetchers = seriesFetchers ?? Self.defaultSeriesFetchers(healthStore: healthStore)
+    }
+
+    /// A voltage loader for every catalog metric whose extraction plan
+    /// continues into a series. Today no selectable metric has one; the
+    /// day an ECG descriptor joins the catalog, its loader is wired by
+    /// construction instead of by remembered follow-up.
+    private nonisolated static func defaultSeriesFetchers(
+        healthStore: HKHealthStore
+    ) -> [HealthMetric: any SeriesFetching] {
+        var fetchers: [HealthMetric: any SeriesFetching] = [:]
+        for descriptor in MetricCatalog.metrics {
+            if descriptor.extraction == .electrocardiogram {
+                fetchers[descriptor.metric] = ECGVoltageSeriesFetcher(healthStore: healthStore)
+            }
+        }
+        return fetchers
     }
 
     var isAvailable: Bool {
@@ -502,6 +520,9 @@ enum HealthKitServiceError: LocalizedError, Equatable {
     /// A metric whose records continue into a series was read without a
     /// series loader configured — a wiring bug, not a runtime condition.
     case seriesFetcherUnavailable(metric: String)
+    /// A series continuation referenced a sample HealthKit no longer
+    /// returns (deleted between the page read and the series fetch).
+    case seriesSampleUnavailable(metric: String)
 
     var errorDescription: String? {
         switch self {
@@ -517,6 +538,8 @@ enum HealthKitServiceError: LocalizedError, Equatable {
             "Background observation was replaced before it finished starting."
         case .seriesFetcherUnavailable(let metric):
             "The \(metric) series could not be read because its loader is not configured."
+        case .seriesSampleUnavailable(let metric):
+            "A sample of \(metric) disappeared before its series data could be read."
         }
     }
 
