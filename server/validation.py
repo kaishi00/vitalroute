@@ -150,7 +150,12 @@ def parse_timestamp(value, where):
 def format_timestamp_utc(moment):
     """Formats an aware datetime as UTC with millisecond precision."""
     utc = moment.astimezone(datetime.timezone.utc)
-    return utc.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (utc.microsecond // 1000)
+    # Explicit zero-padded fields: %Y does not zero-pad small years on
+    # glibc, and year-1 records are representable and accepted.
+    return "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ" % (
+        utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second,
+        utc.microsecond // 1000,
+    )
 
 
 def parse_record_id(value, where):

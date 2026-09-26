@@ -321,7 +321,8 @@ class QueryHandler(BaseHTTPRequestHandler):
             response = handle_jsonrpc(message)
         except Exception:  # noqa: BLE001 - answer, never drop the socket
             logger.exception("JSON-RPC dispatch failed")
-            self._send_json(200, {"jsonrpc": "2.0", "id": None,
+            request_id = message.get("id") if isinstance(message, dict) else None
+            self._send_json(200, {"jsonrpc": "2.0", "id": request_id,
                                   "error": {"code": -32603, "message": "Internal error."}})
             return
         if response is None:
