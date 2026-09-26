@@ -49,13 +49,14 @@ final class DestinationRecoveryTests: XCTestCase {
     }
 
     private func makeEngine(provider: ScriptedHealthProvider, client: ScriptedSyncClient) -> AutomaticSyncEngine {
-        AutomaticSyncEngine(
+        let box = clock
+        return AutomaticSyncEngine(
             healthData: provider,
             client: client,
             stateStore: SyncStateStore(directory: tempDirectory),
             outbox: Outbox(directory: tempDirectory),
             defaults: defaults,
-            now: { clock.now }
+            now: { box.now }
         )
     }
 
