@@ -73,7 +73,7 @@ struct ServerSetupGuideView: View {
                     .foregroundStyle(.tint)
             }
         }
-        .accessibilityHint("Opens in Safari")
+        .accessibilityHint("Opens in your web browser")
     }
 
     // MARK: Sections

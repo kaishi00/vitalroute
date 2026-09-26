@@ -128,7 +128,7 @@ struct DestinationView: View {
         } header: {
             Text("Server setup")
         } footer: {
-            Text("Read-only guide. Nothing here changes your saved destination or sends health data. Documentation links open in Safari.")
+            Text("Read-only guide. Nothing here changes your saved destination or sends health data. Documentation links open in your browser.")
         }
     }
 

@@ -12,7 +12,12 @@ import Foundation
 /// documents at that revision.
 enum ServerSetup {
     /// The app's own repository, which contains the reference receiver.
-    static let repositoryURL = URL(string: "https://github.com/kaishi00/vitalroute")!
+    static let repositoryURL: URL = {
+        guard let url = URL(string: "https://github.com/kaishi00/vitalroute") else {
+            preconditionFailure("ServerSetup: invalid repository URL")
+        }
+        return url
+    }()
 
     /// Contract this app's automatic sync requires: `apiVersion >= 2` with
     /// `["additions", "deletions"]` capabilities — keep in sync with
@@ -67,8 +72,9 @@ enum ServerSetup {
 
     Repository: https://github.com/kaishi00/vitalroute
     Required receiver revision (full commit SHA): 959ee7833e906281716b480a805d96b0e1736998
-    The app's automatic sync requires contract v2: connection test plus
-    change-batch ingestion of additions and deletions (`apiVersion >= 2`,
+    The app's automatic sync requires contract v\#(compatibleContractVersion):
+    connection test plus change-batch ingestion of additions and deletions
+    (`apiVersion >= \#(compatibleContractVersion)`,
     capabilities `["additions", "deletions"]`). Manual-only sync would work
     with a v1 receiver, but deploy exactly the revision above so automatic
     sync works — do not use `main` or a branch name; they may not be
@@ -100,9 +106,10 @@ enum ServerSetup {
       in a URL.
     - Verify access through the exact phone-facing endpoint URL: GET the
       full https://<your-server>/v1/records value the owner will enter (not
-      just the host, and not just /v1/health). It must return 200 with
-      apiVersion >= 2 and capabilities ["additions", "deletions"], and 401
-      without the token.
+      just the host). It must return 200 with apiVersion >= 2 and
+      capabilities ["additions", "deletions"], and 401 without the token.
+      (/v1/health is an alias for the same check, but the exact URL is what
+      the phone will use and what any proxy in front must route.)
     - Prove ingestion with the receiver's synthetic-data sender
       (server/send_synthetic_data.py) only. Never use real health data
       during setup, and remember the connection test itself sends nothing.

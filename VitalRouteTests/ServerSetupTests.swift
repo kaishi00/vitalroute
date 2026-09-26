@@ -18,17 +18,37 @@ final class ServerSetupTests: XCTestCase {
                         "receiver ref must be a full 40-char lowercase commit SHA")
     }
 
-    func testPinnedContractMatchesTheAutomaticSyncGate() {
+    func testContractConstantMatchesTheAutomaticSyncGate() {
         // The pin exists so automatic sync works: contract v2 with
         // additions and deletions — the same predicate the engine checks
-        // when automatic sync is enabled.
+        // when automatic sync is enabled. Exercised at the pinned version
+        // and one below, across both capability cells.
         XCTAssertEqual(ServerSetup.compatibleContractVersion, 2)
-        let v2 = ReceiverHealthResponse(status: "ok", service: "x", apiVersion: 2,
-                                        capabilities: ["additions", "deletions"])
-        XCTAssertTrue(v2.supportsDeletions)
-        let v1 = ReceiverHealthResponse(status: "ok", service: "x", apiVersion: 1,
-                                        capabilities: ["additions"])
-        XCTAssertFalse(v1.supportsDeletions)
+        let atPin = ReceiverHealthResponse(
+            status: "ok", service: "x",
+            apiVersion: ServerSetup.compatibleContractVersion,
+            capabilities: ["additions", "deletions"])
+        XCTAssertTrue(atPin.supportsDeletions)
+        let belowPin = ReceiverHealthResponse(
+            status: "ok", service: "x",
+            apiVersion: ServerSetup.compatibleContractVersion - 1,
+            capabilities: ["additions"])
+        XCTAssertFalse(belowPin.supportsDeletions)
+        let v2WithoutDeletions = ReceiverHealthResponse(
+            status: "ok", service: "x",
+            apiVersion: ServerSetup.compatibleContractVersion,
+            capabilities: ["additions"])
+        XCTAssertFalse(v2WithoutDeletions.supportsDeletions)
+        let v1WithDeletions = ReceiverHealthResponse(
+            status: "ok", service: "x",
+            apiVersion: ServerSetup.compatibleContractVersion - 1,
+            capabilities: ["deletions"])
+        XCTAssertFalse(v1WithDeletions.supportsDeletions)
+        // The prompt teaches the same contract version the constant pins.
+        XCTAssertTrue(ServerSetup.agentSetupPrompt
+            .contains("contract v\(ServerSetup.compatibleContractVersion)"))
+        XCTAssertTrue(ServerSetup.agentSetupPrompt
+            .contains("apiVersion >= \(ServerSetup.compatibleContractVersion)"))
     }
 
     func testDocumentationLinksArePinnedToTheCompatibleRevision() {
