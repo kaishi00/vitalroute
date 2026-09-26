@@ -398,6 +398,37 @@ final class ManualSyncCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testNonRecoverablePageErrorPropagatesInsteadOfRecovery() async throws {
+        let provider = StubHealthDataProvider()
+        // First run completes and leaves a cursor.
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+
+        // An error the window rebuild cannot fix (HealthKit unavailable)
+        // must stop the run honestly — the recovery switch must not swallow
+        // it and must not drop the stored cursor.
+        provider.nonRecoverablePageError = .unavailable
+        provider.exportQueries.removeAll()
+        let batchesBefore = client.sentBatches.count
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
+        await waitForCompletion(coordinator)
+
+        guard case .failed(let message)? = coordinator.lastOutcome?.result else {
+            XCTFail("expected an honest failure for a non-recoverable page error")
+            return
+        }
+        XCTAssertFalse(message.isEmpty)
+        XCTAssertEqual(provider.exportQueries.count, 1) // offered the cursor once, no recovery re-read
+        XCTAssertEqual(client.sentBatches.count, batchesBefore)
+    }
+
+    @MainActor
     func testNonAdvancingFullPageFailsHonestly() async throws {
         let provider = StubHealthDataProvider()
         let client = StubDestinationClient()
@@ -916,6 +947,9 @@ private final class StubHealthDataProvider: HealthDataProviding {
     /// (recovery tests): a sample vanished between the page read and its
     /// series fetch.
     var seriesSampleUnavailableForAnchoredRead = false
+    /// When set, a query with a non-nil anchor throws this error even though
+    /// recovery cannot help (propagation tests).
+    var nonRecoverablePageError: HealthKitServiceError?
     var shouldFailAuthorization = false
     private(set) var authorizationCount = 0
     private(set) var authorizationRequestedMetrics: [HealthMetric] = []
@@ -951,6 +985,9 @@ private final class StubHealthDataProvider: HealthDataProviding {
         }
         if seriesSampleUnavailableForAnchoredRead, anchorData != nil {
             throw HealthKitServiceError.seriesSampleUnavailable(metric: metric.rawValue)
+        }
+        if let error = nonRecoverablePageError, anchorData != nil {
+            throw error
         }
         let pages = script[metric] ?? []
 
