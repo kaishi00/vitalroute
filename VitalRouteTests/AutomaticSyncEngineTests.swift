@@ -2286,28 +2286,33 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let client = ScriptedSyncClient()
         let engine = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
 
-        // A launch restoration that is still parked: the BGTask handler must
-        // wait for it rather than run a pass that finds no configuration.
+        // The BGTask handler awaits the restoration before acting. A broken
+        // wait (returning while restoration is still parked) shows up as the
+        // handler fulfilling before the restoration has finished.
         let gate = AsyncGate()
-        engine.launchRestoration = Task { [gate, engine] in
+        let restored = expectation(description: "launch restoration completed")
+        engine.launchRestoration = Task { [gate, engine, restored] in
             await gate.enter()
             await engine.restoreOnLaunch(destination: endpoint, token: token, metrics: [.steps])
+            restored.fulfill()
         }
 
-        let returned = FlagBox()
-        let waiter = Task { [engine, returned] in
+        let handled = expectation(description: "BGTask handler proceeded past the restoration wait")
+        let handler = Task { [engine, handled] in
             await engine.waitForLaunchRestoration()
-            returned.set()
+            handled.fulfill()
         }
-        // Generous window: a waiter that ignored the parked restoration
-        // would long since have returned.
-        try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertFalse(returned.isSet, "waitForLaunchRestoration must wait for the restoration task")
 
+        // fulfillment pumps the run loop, so the spawned main-actor tasks
+        // actually get to run — a plain `await handler` here can starve them
+        // until the test method has returned.
         gate.open()
-        await waiter
-        XCTAssertTrue(returned.isSet)
+        await fulfillment(of: [restored, handled], timeout: 5)
         await engine.waitUntilIdle()
+
+        // `restored` is fulfilled on the restoration task's last line, so
+        // `handled` having fulfilled proves the wait spanned the whole
+        // restoration.
         XCTAssertEqual(engine.mode, .active)
     }
 
@@ -2772,20 +2777,4 @@ private final class AsyncGate: @unchecked Sendable {
     }
 }
 
-/// Thread-safe boolean for asserting whether a detached task has returned.
-private final class FlagBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
 
-    func set() {
-        lock.lock()
-        value = true
-        lock.unlock()
-    }
-
-    var isSet: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
-    }
-}
