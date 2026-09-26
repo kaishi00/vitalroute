@@ -2189,7 +2189,7 @@ final class ScriptedHealthProvider: HealthDataProviding {
     private(set) var registrationAttempts = 0
     /// Incremented each time a capture page parks on `captureGate`.
     private(set) var parkedCaptureCount = 0
-    private(set) var firedNotifications: [FiredNotification] = []
+    fileprivate private(set) var firedNotifications: [FiredNotification] = []
     /// When set, change queries throw this instead of paging.
     var storageWriteError: Error?
     /// When set, change queries throw this before recording.
