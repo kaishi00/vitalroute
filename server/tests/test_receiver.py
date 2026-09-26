@@ -392,9 +392,10 @@ class TypedDataValidationTests(ReceiverServerTestCase):
         # An unbounded JSON integer literal reaches _require_finite_number
         # as a Python int; math.isfinite would raise OverflowError (an
         # unhandled exception that drops the connection) unless converted
-        # into the documented 400.
-        raw = json.dumps(make_payload(make_changes(make_upsert(make_record())))).replace("8000", "1" + "0" * 400).encode("utf-8")
-        self.post_expect("invalid_record_data", raw=raw)
+        # into the documented 400. Built directly (not via .replace) so a
+        # random id containing "8000" can never corrupt the fixture.
+        record = make_record(data={"type": "quantity", "value": 10 ** 400, "unit": "count"})
+        self.post_expect("invalid_record_data", make_payload(make_changes(make_upsert(record))))
 
     def test_rejects_huge_integer_inside_fhir_resource(self):
         raw = json.dumps(make_payload(make_changes(make_upsert(make_record(
@@ -761,6 +762,17 @@ class TypedDataValidationTests(ReceiverServerTestCase):
     def test_whole_second_timestamps_accepted(self):
         record = make_record(
             startDate="2026-09-20T00:00:00Z", endDate="2026-09-20T03:00:00+02:00"
+        )
+        status, body = self.post("/v1/records", make_payload(make_changes(make_upsert(record))))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["accepted"], 1)
+
+    def test_range_boundary_dates_are_representable(self):
+        # The representable-range rejection must not over-reject: year 1
+        # and year 9999 in UTC (or a UTC-normalizable offset) are legal.
+        record = make_record(
+            startDate="0001-01-01T00:00:00.000Z",
+            endDate="9999-12-31T23:59:59.999+00:00",
         )
         status, body = self.post("/v1/records", make_payload(make_changes(make_upsert(record))))
         self.assertEqual(status, 200)

@@ -317,7 +317,13 @@ class QueryHandler(BaseHTTPRequestHandler):
                                   "error": {"code": -32600,
                                             "message": "Batch requests are not supported."}})
             return
-        response = handle_jsonrpc(message)
+        try:
+            response = handle_jsonrpc(message)
+        except Exception:  # noqa: BLE001 - answer, never drop the socket
+            logger.exception("JSON-RPC dispatch failed")
+            self._send_json(200, {"jsonrpc": "2.0", "id": None,
+                                  "error": {"code": -32603, "message": "Internal error."}})
+            return
         if response is None:
             # Notification: accepted, no body.
             self.send_response(202)
