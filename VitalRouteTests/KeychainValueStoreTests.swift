@@ -8,14 +8,24 @@ import XCTest
 /// and the migration is service-wide, so tests must never touch accounts the
 /// app itself might have written.
 final class KeychainValueStoreTests: XCTestCase {
-    override func setUpWithError() throws {
-        // GitHub Actions runners deny the test host simulator-keychain
-        // access (errSecMissingEntitlement, -34018) because the hosted,
-        // ad-hoc-signed host has no keychain entitlement context. These
-        // tests exercise the real Keychain and run on signed development
-        // Macs; on CI they are skipped explicitly rather than failing.
-        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil,
-                      "real-Keychain tests require a signed local host")
+    /// Throws XCTSkip when the runner's keychain denies access. GitHub
+    /// Actions runners reject SecItemAdd from the hosted, ad-hoc-signed
+    /// test host with errSecMissingEntitlement (-34018) — the environment
+    /// flag does not reach the simulator test process, so detect the
+    /// condition directly with a throwaway write.
+    private func requireKeychainAccess() throws {
+        let probe = "test.keychain-probe.\(UUID().uuidString)"
+        defer { cleanup(probe) }
+        var add = baseQuery(probe)
+        add[kSecValueData as String] = Data("probe".utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let status = SecItemAdd(add as CFDictionary, nil)
+        if status == errSecMissingEntitlement {
+            throw XCTSkip("simulator keychain denies access on this runner (-34018)")
+        }
+        if status != errSecSuccess {
+            XCTFail("keychain probe failed with status \(status)")
+        }
     }
 
     /// Unique per run; never the app's real service.
@@ -52,6 +62,7 @@ final class KeychainValueStoreTests: XCTestCase {
     }
 
     func testSaveWritesBackgroundAccessibleDeviceOnlyItems() throws {
+        try requireKeychainAccess()
         let account = "test.accessibility.save"
         cleanup(account)
         defer { cleanup(account) }
@@ -68,6 +79,7 @@ final class KeychainValueStoreTests: XCTestCase {
     }
 
     func testMigrationUpgradesExistingItemsInPlace() throws {
+        try requireKeychainAccess()
         let account = "test.accessibility.migrate"
         cleanup(account)
         defer { cleanup(account) }
@@ -94,6 +106,7 @@ final class KeychainValueStoreTests: XCTestCase {
     }
 
     func testMigrationCoversEveryItemUnderTheService() throws {
+        try requireKeychainAccess()
         // The migration is service-scoped on purpose: the endpoint and every
         // per-destination credential need background readability. Pin that
         // both item kinds are upgraded by one call.
@@ -127,6 +140,7 @@ final class KeychainValueStoreTests: XCTestCase {
     }
 
     func testMigrationWithNoItemsDoesNotThrow() throws {
+        try requireKeychainAccess()
         let account = "test.accessibility.empty"
         cleanup(account)
 
