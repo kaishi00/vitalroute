@@ -12,10 +12,16 @@ enum AutomaticSyncPauseReason: Equatable {
     case authenticationFailed
     case protocolFailure(String)
     case deferred(String)
+    /// The persisted configuration (endpoint, credential) could not be read
+    /// from secure storage — typically a locked-device background launch.
+    /// Unlike `destinationMissing`, nothing needs the user: recovery is a
+    /// successful configuration load, reported by the app's recovery path.
+    case secureStorageUnavailable
 
     var isAutoRecoverable: Bool {
         switch self {
-        case .destinationMissing, .credentialMissing, .selectionEmpty, .deferred, .queueAtCapacity:
+        case .destinationMissing, .credentialMissing, .selectionEmpty, .deferred, .queueAtCapacity,
+             .secureStorageUnavailable:
             true
         case .receiverIncompatible, .authenticationFailed, .protocolFailure:
             false
@@ -40,6 +46,8 @@ enum AutomaticSyncPauseReason: Equatable {
             "Automatic sync is paused: \(detail) Turn automatic sync off and on again after fixing the destination."
         case .deferred(let detail):
             "Automatic sync deferred: \(detail)"
+        case .secureStorageUnavailable:
+            "Automatic sync is waiting for secure storage (the device may be locked). It resumes automatically; queued data is kept."
         }
     }
 }
@@ -501,6 +509,22 @@ final class AutomaticSyncEngine {
         startPass(trigger: .foregroundCatchUp)
     }
 
+    /// Launch restoration when the persisted configuration could not be
+    /// read — typically a locked-device background launch hitting
+    /// `WhenUnlocked` Keychain items. The engine waits instead of treating
+    /// the configuration as absent: no empty destination is claimed, queued
+    /// work and checkpoints are untouched, and the app's recovery path
+    /// (a settled load reported through `configurationChanged`) re-arms
+    /// observers and resumes passes without user interaction.
+    func restorePausedOnSecureStorage() async {
+        guard mode != .disabled else { return }
+        mode = .paused(.secureStorageUnavailable)
+        lastStatusMessage = AutomaticSyncPauseReason.secureStorageUnavailable.userMessage
+        // The launch pass will not run (nothing is loaded to capture), so
+        // the queued work is counted here rather than left at zero.
+        await refreshPendingCount()
+    }
+
     /// Configuration-change hook. Enforces the destination-identity policy:
     /// pending work and checkpoints are never moved to a different
     /// recipient; a destination change disables automatic sync and discards
@@ -838,6 +862,14 @@ final class AutomaticSyncEngine {
         // Pause re-evaluation: auto-recoverable reasons clear when their
         // prerequisite is satisfied again.
         if case .paused(let reason) = mode {
+            if case .secureStorageUnavailable = reason {
+                // Held until the app's recovery path reports a settled
+                // configuration (configurationChanged). Re-evaluating the
+                // prerequisites here would relabel the wait as
+                // destinationMissing, whose remedy — user action — is
+                // exactly what the device being locked takes away.
+                return false
+            }
             if !reason.isAutoRecoverable {
                 lastStatusMessage = reason.userMessage
                 return false

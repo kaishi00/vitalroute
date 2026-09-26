@@ -24,6 +24,13 @@ final class DestinationConfigurationStore {
     /// from the UI (e.g. a `.task` modifier) and render from `isLoaded`.
     /// No-ops once the store state has settled (load completed, or a
     /// save/clear already established authoritative state).
+    ///
+    /// A read *failure* — transient secure-storage unavailability, e.g. a
+    /// locked-device background launch — does not settle the store: the
+    /// endpoint keeps its previous value, `isLoaded` stays false so later
+    /// calls retry, and `storageError` says what is wrong. Settling a
+    /// failure as "no destination" is what erased the saved endpoint on
+    /// build 6.
     func loadSavedEndpoint() async {
         guard !isLoaded else { return }
         let secureStore = self.secureStore
@@ -41,10 +48,9 @@ final class DestinationConfigurationStore {
             savedEndpoint = endpoint ?? ""
             storageError = nil
         case .failure:
-            savedEndpoint = ""
-            storageError = "The saved destination could not be read from secure storage."
+            storageError = "The saved destination could not be read from secure storage. VitalRoute will retry when secure storage is available."
         }
-        isLoaded = true
+        isLoaded = outcome.isSuccess
     }
 
     func save(endpoint rawValue: String) throws {

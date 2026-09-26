@@ -58,7 +58,9 @@ final class DestinationCredentialStore {
     /// Loads the credential for an endpoint asynchronously (Keychain reads
     /// can block; they run off the main actor). No-ops when the store is
     /// already settled for this endpoint. A save/remove that lands while the
-    /// read is in flight wins over the read.
+    /// read is in flight wins over the read. A read that fails (locked
+    /// device) leaves the last settled state standing and keeps this
+    /// endpoint retryable instead of settling it as "no credential".
     func loadCredential(for endpoint: String) async {
         guard !isLoaded || credentialEndpoint != endpoint else {
             return
@@ -107,12 +109,18 @@ final class DestinationCredentialStore {
     }
 
     private func apply(token: String?, endpoint: String, readFailed: Bool) {
+        if readFailed {
+            // Transient secure-storage unavailability must not look like "no
+            // credential": the last settled state stands (for a fresh store
+            // that means nothing loaded yet), the store stays retryable for
+            // this endpoint, and the error is surfaced.
+            storageError = "The saved API key could not be read from secure storage. VitalRoute will retry when secure storage is available."
+            return
+        }
         loadedToken = token
         hasCredential = token != nil
         credentialEndpoint = endpoint
-        storageError = readFailed
-            ? "The saved API key could not be read from secure storage."
-            : nil
+        storageError = nil
         isLoaded = true
     }
 }

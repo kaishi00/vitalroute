@@ -2021,6 +2021,102 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertEqual(engine.mode, .paused(.credentialMissing),
                        "a whitespace-only key must not be used as a credential")
     }
+
+    // MARK: Secure storage unavailable (locked-device background launch)
+
+    /// Enables automatic sync and leaves one change queued for delivery,
+    /// the durable state a locked-device relaunch would find.
+    private func enableWithQueuedWork(provider: ScriptedHealthProvider, client: ScriptedSyncClient) async -> AutomaticSyncEngine {
+        provider.script = [.steps: [page(additions: [record(1)], anchor: "s1")]]
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 1)
+        return engine
+    }
+
+    func testRestoreWithoutReadableConfigurationWaitsInsteadOfPausingForDestination() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        // Simulated relaunch during a locked-device background wake: the
+        // persisted flag says automatic sync is on, but the Keychain read
+        // failed, so no configuration can be reported. The engine must
+        // wait — not claim an empty destination, not discard the queue.
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        XCTAssertEqual(relaunched.mode, .paused(.secureStorageUnavailable))
+        XCTAssertTrue(relaunched.isEnabled)
+        XCTAssertEqual(relaunched.pendingCount, 1, "waiting must not discard queued work")
+        XCTAssertTrue(
+            relaunched.lastStatusMessage?.contains("secure storage") == true,
+            relaunched.lastStatusMessage ?? ""
+        )
+        XCTAssertTrue(
+            relaunchedProvider.observedMetrics.isEmpty,
+            "no observers may be armed while configuration is unreadable"
+        )
+    }
+
+    func testTriggersWhileWaitingNeitherRunNorRelabelThePause() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // Every trigger a locked device can produce while waiting: the
+        // pause must survive re-evaluation without being relabeled
+        // destinationMissing (whose remedy is user action the user cannot
+        // take from a locked device).
+        relaunched.foregroundCatchUp()
+        relaunched.backgroundTaskFired()
+        relaunched.manualSyncFinished()
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .paused(.secureStorageUnavailable))
+        XCTAssertEqual(relaunched.pendingCount, 1, "waiting must not discard queued work")
+        XCTAssertTrue(relaunchedProvider.changeQueries.isEmpty, "no capture may run without configuration")
+        XCTAssertTrue(relaunchedProvider.observedMetrics.isEmpty)
+    }
+
+    func testRecoveryFromWaitingResumesOriginalQueueOnOriginalDestination() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunchedClient = ScriptedSyncClient()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: relaunchedClient)
+        await relaunched.restorePausedOnSecureStorage()
+
+        // Secure storage became readable: the recovery path reports the
+        // persisted configuration — the same destination and token the
+        // queue was captured for. New live data arrives alongside.
+        relaunchedProvider.script = [.steps: [page(additions: [record(2)], anchor: "s2")]]
+        await relaunched.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .active)
+        XCTAssertFalse(
+            relaunchedProvider.observedMetrics.isEmpty,
+            "recovery must re-arm background observers without user interaction"
+        )
+        let delivered = relaunchedClient.sentChangeBatches.flatMap(\.changes)
+        XCTAssertEqual(
+            delivered,
+            [.upsert(record(1)), .upsert(record(2))],
+            "the queue captured before the wait must survive and reach its original destination"
+        )
+        XCTAssertEqual(relaunched.pendingCount, 0)
+        XCTAssertFalse(
+            relaunched.lastStatusMessage?.contains("discarded") == true,
+            "recovery is not a destination change: \(relaunched.lastStatusMessage ?? "")"
+        )
+    }
 }
 
 // MARK: - Test doubles
@@ -2065,7 +2161,7 @@ private final class ReleaseCounter: @unchecked Sendable {
 /// Scripted health provider: pages are consumed in order per metric, and
 /// observer notifications can be fired on demand.
 @MainActor
-private final class ScriptedHealthProvider: HealthDataProviding {
+final class ScriptedHealthProvider: HealthDataProviding {
     struct RecordedQuery {
         let metric: HealthMetric
         let anchorData: Data?
@@ -2223,7 +2319,7 @@ private final class ScriptedHealthProvider: HealthDataProviding {
 }
 
 /// Scripted client with capability, delivery scripting, and gating.
-private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
+final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
     struct SentBatch {
         let changes: [SyncChangeEvent]
         let batchID: UUID
