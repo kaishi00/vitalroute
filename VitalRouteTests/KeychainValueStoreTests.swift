@@ -8,6 +8,16 @@ import XCTest
 /// and the migration is service-wide, so tests must never touch accounts the
 /// app itself might have written.
 final class KeychainValueStoreTests: XCTestCase {
+    override func setUpWithError() throws {
+        // GitHub Actions runners deny the test host simulator-keychain
+        // access (errSecMissingEntitlement, -34018) because the hosted,
+        // ad-hoc-signed host has no keychain entitlement context. These
+        // tests exercise the real Keychain and run on signed development
+        // Macs; on CI they are skipped explicitly rather than failing.
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil,
+                      "real-Keychain tests require a signed local host")
+    }
+
     /// Unique per run; never the app's real service.
     private let testService = "com.milim.vitalroute.tests.\(UUID().uuidString)"
 
