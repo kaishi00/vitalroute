@@ -26,6 +26,17 @@ enum BackgroundSyncTasks {
             scheduleNext(after: 15 * 60)
 
             let work = Task { @MainActor in
+                // Restoration may still be reading the configuration (or
+                // discovering secure storage is unavailable); waiting for it
+                // keeps this wake from completing as a no-op pass before the
+                // engine knows what to do.
+                await engine.waitForLaunchRestoration()
+                // Expiration during a slow restoration: stop here instead of
+                // starting work the budget can no longer cover.
+                guard !Task.isCancelled else {
+                    refresh.setTaskCompleted(success: false)
+                    return
+                }
                 engine.backgroundTaskFired()
                 await engine.waitUntilIdle()
                 // Expiration cancels this task: report honestly.

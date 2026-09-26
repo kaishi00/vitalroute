@@ -306,7 +306,12 @@ struct OverviewView: View {
         if !destinationStore.isConfigured {
             return "Not configured"
         }
-        return credentialStore.hasCredential ? "Configured · HTTPS" : "Endpoint saved · API key missing"
+        // Pairing matters while a credential read is still failing: the
+        // loaded key may describe the previous endpoint.
+        let credentialPaired = credentialStore.credentialEndpoint == destinationStore.savedEndpoint
+        return credentialStore.hasCredential && credentialPaired
+            ? "Configured · HTTPS"
+            : "Endpoint saved · API key missing"
     }
 
     private var destinationDetailText: String {
@@ -316,7 +321,8 @@ struct OverviewView: View {
         if !destinationStore.isConfigured {
             return "Add an endpoint you control."
         }
-        return credentialStore.hasCredential
+        let credentialPaired = credentialStore.credentialEndpoint == destinationStore.savedEndpoint
+        return credentialStore.hasCredential && credentialPaired
             ? destinationStore.savedEndpoint
             : "Add the API key for this destination to enable syncing."
     }

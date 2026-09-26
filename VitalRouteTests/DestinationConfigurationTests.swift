@@ -71,17 +71,91 @@ final class DestinationConfigurationTests: XCTestCase {
     }
 
     @MainActor
-    func testLoadSurfacesStorageReadErrors() async throws {
-        let configurationStore = DestinationConfigurationStore(secureStore: ThrowingSecureValueStore())
+    func testTransientReadFailureDoesNotSettleAsUnconfigured() async throws {
+        let secureStore = FlakySecureValueStore()
+        secureStore.values["destination.endpoint"] = "https://health.example.org/v1/ingest"
+        secureStore.failReads = true
+        let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
 
         await configurationStore.loadSavedEndpoint()
 
-        XCTAssertTrue(configurationStore.isLoaded)
+        // A locked device makes Keychain reads fail transiently. That must
+        // never settle the store as "no destination": settling here is what
+        // erased the saved endpoint from the UI on build 6 and made the
+        // engine report it missing. The store stays unsettled so a retry can
+        // recover without user action.
+        XCTAssertFalse(configurationStore.isLoaded)
         XCTAssertFalse(configurationStore.isConfigured)
+        XCTAssertEqual(configurationStore.savedEndpoint, "")
         XCTAssertEqual(
             configurationStore.storageError,
-            "The saved destination could not be read from secure storage."
+            "The saved destination could not be read from secure storage. VitalRoute will retry when secure storage is available."
         )
+    }
+
+    @MainActor
+    func testRetryAfterTransientReadFailureRecoversEndpoint() async throws {
+        let secureStore = FlakySecureValueStore()
+        secureStore.values["destination.endpoint"] = "https://health.example.org/v1/ingest"
+        secureStore.failReads = true
+        let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
+        await configurationStore.loadSavedEndpoint()
+        XCTAssertFalse(configurationStore.isLoaded)
+
+        // Protected data became available (the device was unlocked): the
+        // retried load succeeds and the endpoint reappears on its own.
+        secureStore.failReads = false
+        await configurationStore.loadSavedEndpoint()
+
+        XCTAssertTrue(configurationStore.isLoaded)
+        XCTAssertTrue(configurationStore.isConfigured)
+        XCTAssertEqual(configurationStore.savedEndpoint, "https://health.example.org/v1/ingest")
+        XCTAssertNil(configurationStore.storageError)
+    }
+
+    @MainActor
+    func testSettledStoreIsNotDisturbedByLaterFailureAttempts() async throws {
+        let secureStore = FlakySecureValueStore()
+        secureStore.values["destination.endpoint"] = "https://health.example.org/v1/ingest"
+        let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
+        await configurationStore.loadSavedEndpoint()
+        XCTAssertTrue(configurationStore.isLoaded)
+
+        secureStore.failReads = true
+        await configurationStore.loadSavedEndpoint()
+
+        XCTAssertTrue(configurationStore.isLoaded)
+        XCTAssertTrue(configurationStore.isConfigured)
+        XCTAssertEqual(configurationStore.savedEndpoint, "https://health.example.org/v1/ingest")
+        XCTAssertNil(configurationStore.storageError)
+    }
+
+    @MainActor
+    func testSaveDuringInFlightFailingReadKeepsSavedState() async throws {
+        let secureStore = FailingGatedReadStore()
+        let configurationStore = DestinationConfigurationStore(secureStore: secureStore)
+        async let loadResult = configurationStore.loadSavedEndpoint()
+        // Registered after the child: scope-exit unwinding runs in reverse
+        // registration order, so a throwing exit releases the gate before
+        // the implicit await of the async-let child.
+        defer { secureStore.releaseRead() }
+
+        let readEntered = await waitForReadEntry(secureStore, timeout: .seconds(5))
+        XCTAssertTrue(readEntered, "gated read never started")
+
+        try configurationStore.save(endpoint: "https://new.example.org/v1/ingest")
+
+        secureStore.releaseRead()
+        await loadResult
+
+        // The save settled authoritative state; the failing read that landed
+        // afterwards must neither clobber it nor surface a stale error.
+        XCTAssertEqual(configurationStore.savedEndpoint, "https://new.example.org/v1/ingest")
+        XCTAssertTrue(configurationStore.isLoaded)
+        XCTAssertTrue(configurationStore.isConfigured)
+        XCTAssertNil(configurationStore.storageError)
+        // The gate was released by the defer, not the fail-safe deadline.
+        XCTAssertFalse(secureStore.hitFailSafe, "gated read hit its fail-safe deadline")
     }
 
     @MainActor
@@ -215,6 +289,18 @@ final class DestinationConfigurationTests: XCTestCase {
         return true
     }
 
+    @MainActor
+    private func waitForReadEntry(_ secureStore: FailingGatedReadStore, timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock().now + timeout
+        while !secureStore.isReadEntered {
+            if ContinuousClock().now >= deadline {
+                return false
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return true
+    }
+
     /// Owns the gated async-let child and throws out of the scope while the
     /// read is still gated, so the caller can observe whether the deferred
     /// release ran before the child was awaited.
@@ -244,6 +330,82 @@ final class DestinationConfigurationTests: XCTestCase {
 }
 
 private struct ThrowingSecureValueStoreError: Error {}
+
+/// Fails every read until `failReads` is cleared, standing in for the
+/// locked-device Keychain state (`errSecInteractionNotAllowed`). Writes and
+/// removals keep working, as they do against real Keychain items that are
+/// already background-accessible.
+private final class FlakySecureValueStore: SecureValueStoring, @unchecked Sendable {
+    var values: [String: String] = [:]
+    var failReads = false
+
+    func readValue(forKey key: String) throws -> String? {
+        if failReads {
+            throw ThrowingSecureValueStoreError()
+        }
+        return values[key]
+    }
+
+    func saveValue(_ value: String, forKey key: String) throws {
+        values[key] = value
+    }
+
+    func removeValue(forKey key: String) throws {
+        values.removeValue(forKey: key)
+    }
+
+    func migrateToBackgroundAccessibility() throws {}
+}
+
+/// Blocks the read until released and then fails it, so a save() can be
+/// interleaved with a read that is destined to fail.
+private final class FailingGatedReadStore: SecureValueStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var readEntered = false
+    private var released = false
+    private var failSafeTripped = false
+
+    var isReadEntered: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return readEntered
+    }
+
+    var hitFailSafe: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return failSafeTripped
+    }
+
+    func releaseRead() {
+        lock.lock()
+        released = true
+        lock.unlock()
+    }
+
+    func readValue(forKey key: String) throws -> String? {
+        let failSafeDeadline = Date().addingTimeInterval(10)
+        lock.lock()
+        readEntered = true
+        while !released && Date() < failSafeDeadline {
+            lock.unlock()
+            Thread.sleep(forTimeInterval: 0.005)
+            lock.lock()
+        }
+        let wasReleased = released
+        if !wasReleased {
+            failSafeTripped = true
+        }
+        lock.unlock()
+        throw ThrowingSecureValueStoreError()
+    }
+
+    func saveValue(_ value: String, forKey key: String) throws {}
+
+    func removeValue(forKey key: String) throws {}
+
+    func migrateToBackgroundAccessibility() throws {}
+}
 
 /// Blocks the detached Keychain read until the test releases it, so a
 /// save() can be interleaved while the load is in flight. The internal wait
@@ -303,6 +465,8 @@ private final class GatedReadStore: SecureValueStoring, @unchecked Sendable {
     }
 
     func removeValue(forKey key: String) throws {}
+
+    func migrateToBackgroundAccessibility() throws {}
 }
 
 // Test doubles are only ever touched from the store's detached read task and
@@ -321,14 +485,6 @@ private final class InMemorySecureValueStore: SecureValueStoring, @unchecked Sen
     func removeValue(forKey key: String) throws {
         values.removeValue(forKey: key)
     }
-}
 
-private final class ThrowingSecureValueStore: SecureValueStoring, @unchecked Sendable {
-    func readValue(forKey key: String) throws -> String? {
-        throw ThrowingSecureValueStoreError()
-    }
-
-    func saveValue(_ value: String, forKey key: String) throws {}
-
-    func removeValue(forKey key: String) throws {}
+    func migrateToBackgroundAccessibility() throws {}
 }

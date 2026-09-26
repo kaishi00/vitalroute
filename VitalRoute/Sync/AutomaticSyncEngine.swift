@@ -12,10 +12,16 @@ enum AutomaticSyncPauseReason: Equatable {
     case authenticationFailed
     case protocolFailure(String)
     case deferred(String)
+    /// The persisted configuration (endpoint, credential) could not be read
+    /// from secure storage — typically a locked-device background launch.
+    /// Unlike `destinationMissing`, nothing needs the user: recovery is a
+    /// successful configuration load, reported by the app's recovery path.
+    case secureStorageUnavailable
 
     var isAutoRecoverable: Bool {
         switch self {
-        case .destinationMissing, .credentialMissing, .selectionEmpty, .deferred, .queueAtCapacity:
+        case .destinationMissing, .credentialMissing, .selectionEmpty, .deferred, .queueAtCapacity,
+             .secureStorageUnavailable:
             true
         case .receiverIncompatible, .authenticationFailed, .protocolFailure:
             false
@@ -40,6 +46,8 @@ enum AutomaticSyncPauseReason: Equatable {
             "Automatic sync is paused: \(detail) Turn automatic sync off and on again after fixing the destination."
         case .deferred(let detail):
             "Automatic sync deferred: \(detail)"
+        case .secureStorageUnavailable:
+            "Automatic sync is waiting for secure storage (the device may be locked). It resumes automatically; queued data is kept."
         }
     }
 }
@@ -153,6 +161,18 @@ final class AutomaticSyncEngine {
     /// wake-up was actually armed, so the engine can be honest when it was
     /// not.
     @ObservationIgnored var scheduleBackgroundRetry: (@Sendable (TimeInterval) -> Bool)?
+
+    /// The app's launch-restoration task. A BGTask can fire before
+    /// restoration has loaded the configuration; its handler awaits this so
+    /// the wake is not burned on a pass that would find no configuration
+    /// (and complete before restoration could use it).
+    @ObservationIgnored var launchRestoration: Task<Void, Never>?
+
+    /// Returns once the launch-restoration task has settled. No-op when no
+    /// restoration is pending (tests, or an engine restored earlier).
+    func waitForLaunchRestoration() async {
+        await launchRestoration?.value
+    }
 
     private(set) var mode: AutomaticSyncMode = .disabled
     private(set) var pendingCount = 0
@@ -498,7 +518,52 @@ final class AutomaticSyncEngine {
             return
         }
         guard isCurrent(generation) else { return }
+        if case .paused(let reason) = mode, reason.isAutoRecoverable {
+            mode = .active
+            lastStatusMessage = nil
+        }
         startPass(trigger: .foregroundCatchUp)
+    }
+
+    /// The settled stores report the destination was removed (an empty
+    /// endpoint). For an engine holding a destination this lands as the
+    /// destination-changed purge; for an engine waiting on secure storage —
+    /// which holds no destination, so the changed-destination purge cannot
+    /// see the removal — it ends the wait the same way: disabled, queue
+    /// discarded, visible notice. No-op when sync is already off.
+    func configurationRemoved() async {
+        guard destination.isEmpty else {
+            await configurationChanged(destination: "", token: nil, metrics: selectedMetrics)
+            return
+        }
+        guard mode != .disabled else { return }
+        await disable()
+        await discardPendingWork(
+            generation: configurationGeneration,
+            notice: .destinationRemoved
+        )
+    }
+
+    /// Launch restoration when the persisted configuration could not be
+    /// read — typically a locked-device background launch hitting
+    /// `WhenUnlocked` Keychain items. The engine waits instead of treating
+    /// the configuration as absent: no empty destination is claimed, queued
+    /// work and checkpoints are untouched, and the app's recovery path
+    /// (a settled load reported through `configurationChanged`) re-arms
+    /// observers and resumes passes without user interaction.
+    func restorePausedOnSecureStorage() async {
+        guard mode != .disabled else { return }
+        // A configuration re-report that already applied a real destination
+        // wins: this launch decision was evaluated against unsettled stores
+        // and is stale by the time it lands. Overwriting a recovered engine
+        // with the wait would leave it paused until the next report — and a
+        // background launch has no scene to produce one.
+        guard destination.isEmpty else { return }
+        mode = .paused(.secureStorageUnavailable)
+        lastStatusMessage = AutomaticSyncPauseReason.secureStorageUnavailable.userMessage
+        // The launch pass will not run (nothing is loaded to capture), so
+        // the queued work is counted here rather than left at zero.
+        await refreshPendingCount()
     }
 
     /// Configuration-change hook. Enforces the destination-identity policy:
@@ -512,6 +577,16 @@ final class AutomaticSyncEngine {
     ) async {
         let newDestination = Self.normalizedDestination(newDestinationRaw)
         let newToken = Self.normalizedToken(newToken)
+
+        // An empty report carries information only when the engine holds a
+        // destination for it to purge (the removal flow: the report then
+        // takes the destinationChanged branch below). When the engine has no
+        // destination — a waiting launch, a disabled engine — the report is
+        // a no-op, and relabeling the secure-storage wait as
+        // destinationMissing would be the same lie as acting on it.
+        if newDestination.isEmpty && destination.isEmpty {
+            return
+        }
 
         // A real change invalidates in-flight work before the first
         // suspension; an unchanged re-report (the UI re-renders) must not
@@ -838,6 +913,14 @@ final class AutomaticSyncEngine {
         // Pause re-evaluation: auto-recoverable reasons clear when their
         // prerequisite is satisfied again.
         if case .paused(let reason) = mode {
+            if case .secureStorageUnavailable = reason {
+                // Held until the app's recovery path reports a settled
+                // configuration (configurationChanged). Re-evaluating the
+                // prerequisites here would relabel the wait as
+                // destinationMissing, whose remedy — user action — is
+                // exactly what the device being locked takes away.
+                return false
+            }
             if !reason.isAutoRecoverable {
                 lastStatusMessage = reason.userMessage
                 return false
@@ -1265,6 +1348,7 @@ final class AutomaticSyncEngine {
     private enum DiscardNotice {
         case destinationChanged(passWasRunning: Bool)
         case destinationChangedWhileOff
+        case destinationRemoved
 
         /// `discarded` is reported so the user learns how much was dropped;
         /// with nothing queued the notice says only what actually happened.
@@ -1274,6 +1358,8 @@ final class AutomaticSyncEngine {
                 "Automatic sync turned off because the destination changed."
             case .destinationChangedWhileOff:
                 "The destination changed while automatic sync was off."
+            case .destinationRemoved:
+                "Automatic sync turned off because the destination was removed."
             }
             guard discarded > 0 else { return base }
             let inFlight: String

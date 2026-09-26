@@ -10,6 +10,7 @@ struct VitalRouteApp: App {
     @State private var syncCoordinator: ManualSyncCoordinator
     @State private var autoSyncEngine: AutomaticSyncEngine
     @State private var backfillStore = BackfillPreferenceStore()
+    @State private var recovery: DestinationRecoveryCoordinator
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -34,11 +35,14 @@ struct VitalRouteApp: App {
             BackgroundSyncTasks.scheduleNext(after: delay)
         }
 
+        // One shared Keychain layer for the destination's items, so the
+        // stores and the accessibility migration address the same entries.
+        let secureStore = KeychainValueStore()
         // The stores the engine's launch restoration reads. Built here as
         // locals so the restoration task below can capture them; the @State
         // wrappers share the same instances.
-        let destinationStore = DestinationConfigurationStore()
-        let credentialStore = DestinationCredentialStore()
+        let destinationStore = DestinationConfigurationStore(secureStore: secureStore)
+        let credentialStore = DestinationCredentialStore(secureStore: secureStore)
         let selectionStore = ExportSelectionStore()
 
         _appModel = State(initialValue: VitalRouteModel(healthData: healthKitService))
@@ -55,8 +59,48 @@ struct VitalRouteApp: App {
         )
         _autoSyncEngine = State(initialValue: engine)
 
-        // Must happen before the app finishes launching.
+        let recovery = DestinationRecoveryCoordinator(
+            destinationStore: destinationStore,
+            credentialStore: credentialStore,
+            selectionStore: selectionStore,
+            engine: engine,
+            secureStore: secureStore
+        )
+        _recovery = State(initialValue: recovery)
+
+        // Must happen before the app finishes launching. Registration
+        // happens after the restoration task exists (but both within init),
+        // so a BGTask firing immediately can await it instead of completing
+        // as a no-op pass before the engine knows its configuration.
+        let restoration = Task { @MainActor in
+            await recovery.migrateSecureStorageIfNeeded()
+            await destinationStore.loadSavedEndpoint()
+            if destinationStore.isLoaded {
+                await credentialStore.loadCredential(for: destinationStore.savedEndpoint)
+            }
+            await engine.prepareStorage()
+            let configurationIsReadable = destinationStore.isLoaded
+                && credentialStore.credentialEndpoint == destinationStore.savedEndpoint
+            if configurationIsReadable {
+                await engine.restoreOnLaunch(
+                    destination: destinationStore.savedEndpoint,
+                    token: credentialStore.loadedToken,
+                    metrics: selectionStore.selectedMetrics
+                )
+            } else {
+                // Locked launch: the endpoint or its own credential could
+                // not be read. Waiting keeps the queue and the destination
+                // identity intact until the recovery path settles the
+                // stores; an endpoint is never paired with a credential that
+                // belongs to a different endpoint.
+                await engine.restorePausedOnSecureStorage()
+            }
+        }
+        engine.launchRestoration = restoration
         BackgroundSyncTasks.register(engine: engine)
+        // The coordinator observes protected-data availability for the whole
+        // process, scene or no scene.
+        recovery.start()
 
         // Launch restoration must not depend on a UI scene existing. iOS can
         // relaunch a terminated app directly into the background — a
@@ -67,22 +111,18 @@ struct VitalRouteApp: App {
         // process death ended observation until the user happened to open
         // the app, and background passes could see no configuration at all.
         //
-        // This races the scene-driven configuration re-reports in the
-        // foreground; that is safe by construction — an identical re-report
-        // claims no generation, and `restoreOnLaunch`'s claim always wins
-        // ordering because it runs before the scene's onChange hooks can
-        // observe a settled store — so a duplicate pass is redundant work at
-        // worst, never lost work.
-        Task { @MainActor in
-            await destinationStore.loadSavedEndpoint()
-            await credentialStore.loadCredential(for: destinationStore.savedEndpoint)
-            await engine.prepareStorage()
-            await engine.restoreOnLaunch(
-                destination: destinationStore.savedEndpoint,
-                token: credentialStore.loadedToken,
-                metrics: selectionStore.selectedMetrics
-            )
-        }
+        // A locked device makes these Keychain reads fail (items written by
+        // builds before the accessibility migration are unreadable until
+        // unlock). In that case the engine waits on secure storage instead
+        // of being told the destination is gone; the recovery coordinator —
+        // on protected-data availability or the next activation — retries
+        // the loads and reports the configuration, resuming everything
+        // without user action. This races the scene-driven configuration
+        // re-reports in the foreground; that is safe by construction — an
+        // identical re-report claims no generation, and `restoreOnLaunch`'s
+        // claim always wins ordering because it runs before the scene's
+        // onChange hooks can observe a settled store — so a duplicate pass
+        // is redundant work at worst, never lost work.
     }
 
     nonisolated private static func syncDirectory() -> URL {
@@ -146,13 +186,36 @@ struct VitalRouteApp: App {
                 }
                 .onChange(of: scenePhase) { _, newValue in
                     if newValue == .active {
-                        autoSyncEngine.foregroundCatchUp()
+                        // Activation doubles as a recovery retry: Darwin
+                        // notifications can be coalesced while the app was
+                        // suspended, so the settle-and-report runs here
+                        // before the catch-up pass.
+                        let recoveryCoordinator = recovery
+                        let engine = autoSyncEngine
+                        Task { @MainActor in
+                            await recoveryCoordinator.recoverNow()
+                            engine.foregroundCatchUp()
+                        }
                     }
                 }
         }
     }
 
     private func syncConfigurationWithEngine() {
+        // A settled empty endpoint means removal, even for an engine still
+        // waiting on secure storage; route it to the removal path. An
+        // unreadable store (not loaded) reports nothing — there is nothing
+        // known to act on. Otherwise only report a credential that belongs
+        // to the configured endpoint: a transient read failure must never
+        // pair the previous destination's key with the new destination.
+        if destinationStore.savedEndpoint.isEmpty {
+            if destinationStore.isLoaded {
+                let engine = autoSyncEngine
+                Task { await engine.configurationRemoved() }
+            }
+            return
+        }
+        guard credentialStore.credentialEndpoint == destinationStore.savedEndpoint else { return }
         let engine = autoSyncEngine
         let endpoint = destinationStore.savedEndpoint
         let token = credentialStore.loadedToken

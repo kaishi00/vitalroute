@@ -2021,6 +2021,358 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertEqual(engine.mode, .paused(.credentialMissing),
                        "a whitespace-only key must not be used as a credential")
     }
+
+    // MARK: Secure storage unavailable (locked-device background launch)
+
+    /// Enables automatic sync and leaves one change queued for delivery,
+    /// the durable state a locked-device relaunch would find.
+    private func enableWithQueuedWork(provider: ScriptedHealthProvider, client: ScriptedSyncClient) async -> AutomaticSyncEngine {
+        provider.script = [.steps: [page(additions: [record(1)], anchor: "s1")]]
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 1)
+        return engine
+    }
+
+    func testRestoreWithoutReadableConfigurationWaitsInsteadOfPausingForDestination() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        // Simulated relaunch during a locked-device background wake: the
+        // persisted flag says automatic sync is on, but the Keychain read
+        // failed, so no configuration can be reported. The engine must
+        // wait — not claim an empty destination, not discard the queue.
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        XCTAssertEqual(relaunched.mode, .paused(.secureStorageUnavailable))
+        XCTAssertTrue(relaunched.isEnabled)
+        XCTAssertEqual(relaunched.pendingCount, 1, "waiting must not discard queued work")
+        XCTAssertTrue(
+            relaunched.lastStatusMessage?.contains("secure storage") == true,
+            relaunched.lastStatusMessage ?? ""
+        )
+        XCTAssertTrue(
+            relaunchedProvider.observedMetrics.isEmpty,
+            "no observers may be armed while configuration is unreadable"
+        )
+    }
+
+    func testTriggersWhileWaitingNeitherRunNorRelabelThePause() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // Every trigger a locked device can produce while waiting: the
+        // pause must survive re-evaluation without being relabeled
+        // destinationMissing (whose remedy is user action the user cannot
+        // take from a locked device).
+        relaunched.foregroundCatchUp()
+        relaunched.backgroundTaskFired()
+        relaunched.manualSyncFinished()
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .paused(.secureStorageUnavailable))
+        XCTAssertEqual(relaunched.pendingCount, 1, "waiting must not discard queued work")
+        XCTAssertTrue(relaunchedProvider.changeQueries.isEmpty, "no capture may run without configuration")
+        XCTAssertTrue(relaunchedProvider.observedMetrics.isEmpty)
+    }
+
+    func testRecoveryFromWaitingResumesOriginalQueueOnOriginalDestination() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let clock = ClockBox()
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunchedClient = ScriptedSyncClient()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: relaunchedClient, clock: clock)
+        await relaunched.restorePausedOnSecureStorage()
+
+        // Secure storage became readable: the recovery path reports the
+        // persisted configuration — the same destination and token the
+        // queue was captured for. Recovery happens at unlock, after the
+        // first process's delivery backoff has elapsed; new live data
+        // arrives alongside.
+        relaunchedProvider.script = [.steps: [page(additions: [record(2)], anchor: "s2")]]
+        clock.advance(by: 61)
+        await relaunched.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .active)
+        XCTAssertFalse(
+            relaunchedProvider.observedMetrics.isEmpty,
+            "recovery must re-arm background observers without user interaction"
+        )
+        let delivered = relaunchedClient.sentChangeBatches.flatMap(\.changes)
+        XCTAssertEqual(
+            delivered,
+            [.upsert(record(1)), .upsert(record(2))],
+            "the queue captured before the wait must survive and reach its original destination"
+        )
+        XCTAssertEqual(relaunched.pendingCount, 0)
+        XCTAssertFalse(
+            relaunched.lastStatusMessage?.contains("discarded") == true,
+            "recovery is not a destination change: \(relaunched.lastStatusMessage ?? "")"
+        )
+    }
+
+    func testStaleLaunchWaitDoesNotClobberRecoveredEngine() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // The recovery path lands first (the device unlocked before the
+        // launch task's wait decision was applied).
+        await relaunched.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        // The launch task's stale wait decision then lands: it must not
+        // overwrite a recovered, running engine — a background launch has no
+        // scene to produce the report that would clear the pause again.
+        await relaunched.restorePausedOnSecureStorage()
+
+        XCTAssertEqual(relaunched.mode, .active)
+        XCTAssertFalse(relaunchedProvider.observedMetrics.isEmpty)
+    }
+
+    func testWaitingEngineStaysOffAfterUserDisables() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+        XCTAssertTrue(relaunched.isEnabled)
+
+        // The user turns automatic sync off while it waits; nothing about
+        // the wait (or a later recovery report) turns it back on.
+        await relaunched.disable()
+        await relaunched.restorePausedOnSecureStorage()
+        await relaunched.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        XCTAssertFalse(relaunched.isEnabled)
+        XCTAssertTrue(
+            relaunchedProvider.observedMetrics.isEmpty,
+            "a disabled engine must not arm observers, recovery report or not"
+        )
+    }
+
+    func testDestinationRemovalWhileActivePurgesAndDisables() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(3)], anchor: "s3")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 1)
+
+        // The user removes the destination: the UI reports an empty
+        // endpoint. That report is how removal reaches the engine — the
+        // queue for the removed destination is discarded with a visible
+        // notice and automatic sync is disabled, never delivered anywhere.
+        await engine.configurationChanged(destination: "", token: nil, metrics: [.steps])
+        await engine.waitUntilIdle()
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.pendingCount, 0)
+        XCTAssertTrue(
+            engine.lastStatusMessage?.contains("discarded") == true,
+            engine.lastStatusMessage ?? ""
+        )
+    }
+
+    func testWaitingEngineStaysWaitingWhenReportedAnEmptyEndpoint() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // A re-report of "no configuration" against an engine that has none
+        // must not relabel the honest wait as a destination problem.
+        await relaunched.configurationChanged(destination: "", token: nil, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .paused(.secureStorageUnavailable))
+        XCTAssertEqual(relaunched.pendingCount, 1, "the wait must not discard queued work")
+    }
+
+    func testRestoreOnLaunchClearsTheSecureStorageWait() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // A future caller can legitimately restore after the wait was set
+        // (stores settled between the wait and the restore): the engine must
+        // come up instead of staying paused with a valid configuration.
+        relaunchedProvider.script = [.steps: [page(additions: [record(4)], anchor: "s4")]]
+        await relaunched.restoreOnLaunch(destination: endpoint, token: token, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .active)
+        XCTAssertFalse(relaunchedProvider.observedMetrics.isEmpty)
+    }
+
+    func testConfigurationRemovedWhileWaitingDisablesAndPurgesTheQueue() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // The user removes the destination while the engine still waits on
+        // secure storage: the wait ends the same way an active removal does.
+        await relaunched.configurationRemoved()
+        await relaunched.waitUntilIdle()
+
+        XCTAssertFalse(relaunched.isEnabled)
+        XCTAssertEqual(relaunched.pendingCount, 0, "the queue for the removed destination is discarded")
+        XCTAssertTrue(
+            relaunched.lastStatusMessage?.contains("removed") == true,
+            relaunched.lastStatusMessage ?? ""
+        )
+        XCTAssertTrue(relaunchedProvider.observedMetrics.isEmpty)
+    }
+
+    func testConfigurationRemovedWhileActivePurgesAndDisables() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(5)], anchor: "s5")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 1)
+
+        // The removal path also serves an active engine (it delegates to the
+        // same purge a destination change uses).
+        await engine.configurationRemoved()
+        await engine.waitUntilIdle()
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.pendingCount, 0)
+        XCTAssertTrue(
+            engine.lastStatusMessage?.contains("discarded") == true,
+            engine.lastStatusMessage ?? ""
+        )
+    }
+
+    func testConfigurationRemovedWhileDisabledDiscardsKeptQueue() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(6)], anchor: "s6")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 1)
+
+        // Sync off first (the queue is kept for a re-enable), then the
+        // destination is removed: the kept queue must go with it.
+        await engine.disable()
+        XCTAssertEqual(engine.pendingCount, 1, "disabling keeps the queue")
+
+        await engine.configurationRemoved()
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.pendingCount, 0, "the removed destination's queue is discarded")
+        XCTAssertTrue(
+            engine.lastStatusMessage?.contains("destination") == true,
+            engine.lastStatusMessage ?? ""
+        )
+    }
+
+    func testConfigurationRemovedWhileDisabledAndUnconfiguredStaysOff() async throws {
+        let engine = makeEngine(provider: ScriptedHealthProvider(), client: ScriptedSyncClient())
+
+        await engine.configurationRemoved()
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.pendingCount, 0)
+    }
+
+    func testBackgroundTaskWaitsForLaunchRestorationToSettle() async throws {
+        let client = ScriptedSyncClient()
+        let engine = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        // The BGTask handler awaits the restoration before acting. A broken
+        // wait (returning while restoration is still parked) shows up as the
+        // handler fulfilling before the restoration has finished.
+        let gate = AsyncGate()
+        let restored = expectation(description: "launch restoration completed")
+        engine.launchRestoration = Task { [gate, engine, restored] in
+            await gate.enter()
+            await engine.restoreOnLaunch(destination: endpoint, token: token, metrics: [.steps])
+            restored.fulfill()
+        }
+
+        let handled = expectation(description: "BGTask handler proceeded past the restoration wait")
+        let handler = Task { [engine, handled] in
+            await engine.waitForLaunchRestoration()
+            handled.fulfill()
+        }
+
+        // fulfillment pumps the run loop, so the spawned main-actor tasks
+        // actually get to run — a plain `await handler` here can starve them
+        // until the test method has returned.
+        gate.open()
+        await fulfillment(of: [restored, handled], timeout: 5)
+        await engine.waitUntilIdle()
+
+        // `restored` is fulfilled on the restoration task's last line, so
+        // `handled` having fulfilled proves the wait spanned the whole
+        // restoration.
+        XCTAssertEqual(engine.mode, .active)
+    }
+
+    func testDestinationChangeWhileWaitingPurgesWithHonestNoticeNotCrossDelivery() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunchedClient = ScriptedSyncClient()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: relaunchedClient)
+        await relaunched.restorePausedOnSecureStorage()
+
+        // While waiting, the destination changed (the endpoint saved before
+        // the lock is not the endpoint configured now). The queue captured
+        // for the old destination must be discarded — never delivered to the
+        // new one — with a visible notice.
+        await relaunched.configurationChanged(
+            destination: otherEndpoint,
+            token: "other-token-0002",
+            metrics: [.steps]
+        )
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .active)
+        let delivered = relaunchedClient.sentChangeBatches.flatMap(\.changes)
+        XCTAssertEqual(
+            delivered,
+            [],
+            "work captured for the pre-lock destination must never reach the new one"
+        )
+        XCTAssertTrue(
+            relaunched.lastStatusMessage?.contains("discarded") == true,
+            relaunched.lastStatusMessage ?? ""
+        )
+    }
 }
 
 // MARK: - Test doubles
@@ -2065,7 +2417,7 @@ private final class ReleaseCounter: @unchecked Sendable {
 /// Scripted health provider: pages are consumed in order per metric, and
 /// observer notifications can be fired on demand.
 @MainActor
-private final class ScriptedHealthProvider: HealthDataProviding {
+final class ScriptedHealthProvider: HealthDataProviding {
     struct RecordedQuery {
         let metric: HealthMetric
         let anchorData: Data?
@@ -2074,7 +2426,7 @@ private final class ScriptedHealthProvider: HealthDataProviding {
 
     /// One fired notification: the completion the app must release, and a
     /// counter of how many times it was actually released.
-    struct FiredNotification {
+    fileprivate struct FiredNotification {
         let completion: ObserverCompletion
         let releases: ReleaseCounter
     }
@@ -2093,7 +2445,7 @@ private final class ScriptedHealthProvider: HealthDataProviding {
     private(set) var registrationAttempts = 0
     /// Incremented each time a capture page parks on `captureGate`.
     private(set) var parkedCaptureCount = 0
-    private(set) var firedNotifications: [FiredNotification] = []
+    fileprivate private(set) var firedNotifications: [FiredNotification] = []
     /// When set, change queries throw this instead of paging.
     var storageWriteError: Error?
     /// When set, change queries throw this before recording.
@@ -2101,14 +2453,14 @@ private final class ScriptedHealthProvider: HealthDataProviding {
     /// When set, observeChanges throws.
     var observeError: Error?
     /// Parks authorization, so a configuration change can land mid-enable.
-    var authorizationGate: AsyncGate?
+    fileprivate var authorizationGate: AsyncGate?
     /// Parks observer registration.
-    var registrationGate: AsyncGate?
+    fileprivate var registrationGate: AsyncGate?
     /// Parks a capture page, so tests can inspect state while a capture is
     /// genuinely in flight.
-    var captureGate: AsyncGate?
+    fileprivate var captureGate: AsyncGate?
     /// Parks observer teardown.
-    var stopGate: AsyncGate?
+    fileprivate var stopGate: AsyncGate?
 
     private var observerHandler: (@Sendable (ObserverCompletion) -> Void)?
 
@@ -2211,7 +2563,7 @@ private final class ScriptedHealthProvider: HealthDataProviding {
     /// exactly-once completion whose releases are counted, so a test can
     /// prove the engine neither answers early nor answers twice.
     @discardableResult
-    func fireObserver() -> FiredNotification? {
+    fileprivate func fireObserver() -> FiredNotification? {
         guard let observerHandler else { return nil }
         let releases = ReleaseCounter()
         let completion = ObserverCompletion { releases.increment() }
@@ -2223,7 +2575,7 @@ private final class ScriptedHealthProvider: HealthDataProviding {
 }
 
 /// Scripted client with capability, delivery scripting, and gating.
-private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
+final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
     struct SentBatch {
         let changes: [SyncChangeEvent]
         let batchID: UUID
@@ -2253,7 +2605,7 @@ private final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         capabilities: ["additions", "deletions"]
     )
     var nextAcknowledgment: ChangeAcknowledgment?
-    var sendGate: AsyncGate?
+    fileprivate var sendGate: AsyncGate?
     private var queuedFailure: DestinationClientError?
     private var failureForThisSend: DestinationClientError?
     /// When set, every delivery fails (keeps a pass's captures queued while
@@ -2449,3 +2801,4 @@ private final class AsyncGate: @unchecked Sendable {
         open()
     }
 }
+
