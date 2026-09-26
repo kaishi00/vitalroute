@@ -45,7 +45,7 @@ enum ServerSetup {
     /// contract-v3 draft) predates the fail-closed schema reset, the
     /// unversioned-table boot protection, orphan-chunk suppression, and
     /// the transport-limit hardening, and must never be referenced again.
-    static let compatibleReceiverRef = "39c31b5d0b3a3860c42ab70ae7e691bce5a393d3"
+    static let compatibleReceiverRef = "2b07fe91a2c0b9a53af5d07a313309bbed75aa27"
 
     /// The URL shape the app expects. The configured endpoint is the exact
     /// ingestion URL; the connection test is `GET` on the same URL.
@@ -83,7 +83,7 @@ enum ServerSetup {
     needs to enter in the app.
 
     Repository: https://github.com/kaishi00/vitalroute
-    Required receiver revision (full commit SHA): 39c31b5d0b3a3860c42ab70ae7e691bce5a393d3
+    Required receiver revision (full commit SHA): 2b07fe91a2c0b9a53af5d07a313309bbed75aa27
     The app requires contract v\#(compatibleContractVersion) for everything it does:
     connection test plus change-batch ingestion of additions and deletions
     (`apiVersion >= \#(compatibleContractVersion)`,
