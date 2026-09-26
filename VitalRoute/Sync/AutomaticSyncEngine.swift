@@ -532,11 +532,11 @@ final class AutomaticSyncEngine {
     /// see the removal — it ends the wait the same way: disabled, queue
     /// discarded, visible notice. No-op when sync is already off.
     func configurationRemoved() async {
-        guard mode != .disabled else { return }
         guard destination.isEmpty else {
             await configurationChanged(destination: "", token: nil, metrics: selectedMetrics)
             return
         }
+        guard mode != .disabled else { return }
         await disable()
         await discardPendingWork(
             generation: configurationGeneration,

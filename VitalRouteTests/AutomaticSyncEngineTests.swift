@@ -2273,7 +2273,32 @@ final class AutomaticSyncEngineTests: XCTestCase {
         )
     }
 
-    func testConfigurationRemovedWhileDisabledStaysOff() async throws {
+    func testConfigurationRemovedWhileDisabledDiscardsKeptQueue() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(6)], anchor: "s6")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 1)
+
+        // Sync off first (the queue is kept for a re-enable), then the
+        // destination is removed: the kept queue must go with it.
+        await engine.disable()
+        XCTAssertEqual(engine.pendingCount, 1, "disabling keeps the queue")
+
+        await engine.configurationRemoved()
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.pendingCount, 0, "the removed destination's queue is discarded")
+        XCTAssertTrue(
+            engine.lastStatusMessage?.contains("destination") == true,
+            engine.lastStatusMessage ?? ""
+        )
+    }
+
+    func testConfigurationRemovedWhileDisabledAndUnconfiguredStaysOff() async throws {
         let engine = makeEngine(provider: ScriptedHealthProvider(), client: ScriptedSyncClient())
 
         await engine.configurationRemoved()
@@ -2776,5 +2801,4 @@ private final class AsyncGate: @unchecked Sendable {
         open()
     }
 }
-
 
