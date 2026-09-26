@@ -2141,7 +2141,7 @@ final class ClockBox: @unchecked Sendable {
 
 /// Counts releases of an observer completion. Lock-backed because the
 /// release closure runs wherever the release happens, not on the main actor.
-final class ReleaseCounter: @unchecked Sendable {
+private final class ReleaseCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
 
@@ -2197,14 +2197,14 @@ final class ScriptedHealthProvider: HealthDataProviding {
     /// When set, observeChanges throws.
     var observeError: Error?
     /// Parks authorization, so a configuration change can land mid-enable.
-    var authorizationGate: AsyncGate?
+    fileprivate var authorizationGate: AsyncGate?
     /// Parks observer registration.
-    var registrationGate: AsyncGate?
+    fileprivate var registrationGate: AsyncGate?
     /// Parks a capture page, so tests can inspect state while a capture is
     /// genuinely in flight.
-    var captureGate: AsyncGate?
+    fileprivate var captureGate: AsyncGate?
     /// Parks observer teardown.
-    var stopGate: AsyncGate?
+    fileprivate var stopGate: AsyncGate?
 
     private var observerHandler: (@Sendable (ObserverCompletion) -> Void)?
 
@@ -2349,7 +2349,7 @@ final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         capabilities: ["additions", "deletions"]
     )
     var nextAcknowledgment: ChangeAcknowledgment?
-    var sendGate: AsyncGate?
+    fileprivate var sendGate: AsyncGate?
     private var queuedFailure: DestinationClientError?
     private var failureForThisSend: DestinationClientError?
     /// When set, every delivery fails (keeps a pass's captures queued while
@@ -2519,7 +2519,7 @@ private final class ManualStubClient: DestinationClient, @unchecked Sendable {
 }
 
 /// One-shot async gate used to park scripted deliveries.
-final class AsyncGate: @unchecked Sendable {
+private final class AsyncGate: @unchecked Sendable {
     private let lock = NSLock()
     private var opened = false
 
