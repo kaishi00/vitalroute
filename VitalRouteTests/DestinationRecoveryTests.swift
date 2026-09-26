@@ -292,5 +292,7 @@ private final class RecordingSecureStore: SecureValueStoring, @unchecked Sendabl
         migrateCallCount += 1
     }
 
-    private enum RecoveryStoreError: Error {}
+    private enum RecoveryStoreError: Error {
+        case unavailable
+    }
 }
