@@ -90,6 +90,51 @@ final class SyncPayloadTests: XCTestCase {
         XCTAssertEqual(decoded.createdAt, Date(timeIntervalSince1970: 1_735_689_600.5))
     }
 
+    // MARK: Acknowledgment reconciliation
+
+    func testReconcilesAcceptsCountsThatCoverTheBatch() {
+        let acknowledgment = ChangeAcknowledgment(
+            accepted: 2, duplicates: 1, superseded: 1, appliedDeletions: 1, duplicateDeletions: 0
+        )
+
+        XCTAssertTrue(acknowledgment.reconciles(upsertsSent: 4, deletesSent: 1))
+        XCTAssertFalse(acknowledgment.reconciles(upsertsSent: 5, deletesSent: 1))
+        XCTAssertFalse(acknowledgment.reconciles(upsertsSent: 4, deletesSent: 2))
+    }
+
+    func testReconcilesRejectsOverflowingUpsertTotal() {
+        // Every count is receiver-controlled. `Int.max + 1` cannot match any
+        // real batch, and it must fail reconciliation rather than trap.
+        let acknowledgment = ChangeAcknowledgment(
+            accepted: .max, duplicates: 1, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0
+        )
+
+        XCTAssertFalse(acknowledgment.reconciles(upsertsSent: 1, deletesSent: 0))
+    }
+
+    func testReconcilesRejectsOverflowingDeletionTotal() {
+        let acknowledgment = ChangeAcknowledgment(
+            accepted: 0, duplicates: 0, superseded: 0, appliedDeletions: .max, duplicateDeletions: 1
+        )
+
+        XCTAssertFalse(acknowledgment.reconciles(upsertsSent: 0, deletesSent: 1))
+    }
+
+    func testReconcilesRejectsCountsOverflowingAcrossAllThreeUpsertTerms() {
+        let acknowledgment = ChangeAcknowledgment(
+            accepted: .max, duplicates: .max, superseded: 1, appliedDeletions: 0, duplicateDeletions: 0
+        )
+
+        XCTAssertNil(ChangeAcknowledgment.checkedSum([acknowledgment.accepted, acknowledgment.duplicates, acknowledgment.superseded]))
+        XCTAssertFalse(acknowledgment.reconciles(upsertsSent: 0, deletesSent: 0))
+    }
+
+    func testV1AcknowledgmentDeliveryTotalIsNilWhenCountsOverflow() {
+        let acknowledgment = SyncAcknowledgment(accepted: .max, duplicates: 1)
+
+        XCTAssertNil(acknowledgment.delivered, "a hostile ack must not trap the client")
+    }
+
     func testDecodingRejectsMalformedDateStrings() throws {
         let malformed = #"{"createdAt":"not-a-date","records":[],"schemaVersion":1}"#
         let data = try XCTUnwrap(malformed.data(using: .utf8))

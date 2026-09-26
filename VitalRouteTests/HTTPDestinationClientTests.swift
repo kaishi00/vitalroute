@@ -16,6 +16,16 @@ final class HTTPDestinationClientTests: XCTestCase {
         HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
     }
 
+    private func sampleRecord() -> HealthRecord {
+        HealthRecord(
+            metric: .steps,
+            value: 100,
+            unit: "count",
+            startDate: Date(timeIntervalSince1970: 1_735_689_600),
+            endDate: Date(timeIntervalSince1970: 1_735_689_600)
+        )
+    }
+
     private func samplePayload() -> SyncPayload {
         SyncPayload(records: [
             HealthRecord(
@@ -92,7 +102,7 @@ final class HTTPDestinationClientTests: XCTestCase {
 
         let response = try await client.testConnection(to: endpoint, authorization: authorization)
 
-        XCTAssertEqual(response, ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 1))
+        XCTAssertEqual(response, ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 1, capabilities: []))
         let request = try XCTUnwrap(box.request)
         XCTAssertEqual(request.httpMethod, "GET")
         XCTAssertNil(request.httpBody)
@@ -141,7 +151,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.malformedAcknowledgment) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -151,7 +161,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.malformedAcknowledgment) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -161,7 +171,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.malformedAcknowledgment) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -171,7 +181,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.malformedAcknowledgment) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -183,7 +193,7 @@ final class HTTPDestinationClientTests: XCTestCase {
                 (Data(), self.httpResponse(status: status, url: request.url!))
             }
             await assertThrows(.authenticationFailed) {
-                try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+                _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
             }
         }
     }
@@ -197,7 +207,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.redirected) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
         await assertThrows(.redirected) {
             _ = try await client.testConnection(to: self.endpoint, authorization: self.authorization)
@@ -210,7 +220,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.payloadTooLarge) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -223,7 +233,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.serverRejected(status: 400)) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -235,7 +245,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.requestTimedOut) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -245,7 +255,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.connectionFailed) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -255,7 +265,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.invalidResponse) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -283,14 +293,14 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.insecureEndpoint) {
-            try await client.send(
+            _ = try await client.send(
                 samplePayload(),
                 to: URL(string: "http://health.example.org/v1/records")!,
                 authorization: self.authorization
             )
         }
         await assertThrows(.insecureEndpoint) {
-            try await client.testConnection(
+            _ = try await client.testConnection(
                 to: URL(string: "http://health.example.org/v1/records")!,
                 authorization: self.authorization
             )
@@ -309,7 +319,7 @@ final class HTTPDestinationClientTests: XCTestCase {
             "https://health.example.org/v1/records#section",
         ] {
             await assertThrows(.insecureEndpoint) {
-                try await client.send(
+                _ = try await client.send(
                     samplePayload(),
                     to: URL(string: raw)!,
                     authorization: self.authorization
@@ -325,7 +335,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.emptyBatch) {
-            try await client.send(
+            _ = try await client.send(
                 SyncPayload(records: []),
                 to: self.endpoint,
                 authorization: self.authorization
@@ -345,7 +355,59 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.malformedAcknowledgment) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+        }
+    }
+
+    func testOverflowingChangeAcknowledgmentIsRejectedWithoutTrapping() async {
+        // accepted + duplicates + superseded overflows Int; the counts decode
+        // fine and must be rejected as malformed, leaving the batch
+        // unconfirmed (and therefore still queued).
+        let client = HTTPDestinationClient { request in
+            (
+                self.httpData(#"{"status":"accepted","accepted":9223372036854775807,"duplicates":1,"superseded":0,"appliedDeletions":0,"duplicateDeletions":0}"#),
+                self.httpResponse(status: 200, url: request.url!)
+            )
+        }
+
+        await assertThrows(.malformedAcknowledgment) {
+            _ = try await client.sendChanges(
+                [.upsert(self.sampleRecord())],
+                batchID: UUID(),
+                to: self.endpoint,
+                authorization: self.authorization
+            )
+        }
+    }
+
+    func testOverflowingDeletionAcknowledgmentIsRejectedWithoutTrapping() async {
+        let client = HTTPDestinationClient { request in
+            (
+                self.httpData(#"{"status":"accepted","accepted":0,"duplicates":0,"superseded":0,"appliedDeletions":9223372036854775807,"duplicateDeletions":1}"#),
+                self.httpResponse(status: 200, url: request.url!)
+            )
+        }
+
+        await assertThrows(.malformedAcknowledgment) {
+            _ = try await client.sendChanges(
+                [.delete(DeletedRecord(id: UUID(), metric: .steps, startDate: Date(), endDate: Date()))],
+                batchID: UUID(),
+                to: self.endpoint,
+                authorization: self.authorization
+            )
+        }
+    }
+
+    func testOverflowingV1AcknowledgmentIsRejectedWithoutTrapping() async {
+        let client = HTTPDestinationClient { request in
+            (
+                self.httpData(#"{"status":"accepted","accepted":9223372036854775807,"duplicates":1}"#),
+                self.httpResponse(status: 200, url: request.url!)
+            )
+        }
+
+        await assertThrows(.malformedAcknowledgment) {
+            _ = try await client.send(self.samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
     }
 
@@ -355,7 +417,7 @@ final class HTTPDestinationClientTests: XCTestCase {
         }
 
         await assertThrows(.tlsValidationFailed) {
-            try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
+            _ = try await client.send(samplePayload(), to: self.endpoint, authorization: self.authorization)
         }
         await assertThrows(.tlsValidationFailed) {
             _ = try await client.testConnection(to: self.endpoint, authorization: self.authorization)

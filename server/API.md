@@ -57,6 +57,89 @@ Request body — the VitalRoute sync payload, schema version 1:
 `GET` on the same URL performs the connection test (below). This keeps client
 configuration to a single URL regardless of where a backend mounts the API.
 
+## Version 2: additions and deletions — `schemaVersion: 2`
+
+Contract v2 extends the same endpoint with a change-batch payload. The
+version selects the schema: a v1-only receiver rejects a v2 body outright
+(with `invalid_payload`, because the shape does not match its contract), and
+a v2 receiver
+never reinterprets a v1 body as v2 or vice versa — `schemaVersion` must match
+the body shape (`records` for v1, `changes` for v2).
+
+```json
+{
+  "schemaVersion": 2,
+  "createdAt": "2026-09-24T12:00:00.000Z",
+  "batchId": "7f6c1a2e-9b34-4d05-8c11-2f0a54d7b901",
+  "changes": [
+    { "kind": "upsert", "record": { "...": "a full v1 record object" } },
+    {
+      "kind": "delete",
+      "id": "6f9619ff-8b86-d011-b42d-00c04fc964ff",
+      "metric": "steps",
+      "startDate": "2026-09-22T00:00:00.000Z",
+      "endDate": "2026-09-22T23:59:59.000Z"
+    }
+  ]
+}
+```
+
+- `batchId` is a canonical UUID chosen by the client per batch attempt.
+- `upsert.record` must satisfy every v1 record validation rule.
+- `delete` identifies the deleted sample by its id (the Apple Health sample
+  UUID), with its category and interval. Apple's deleted-object results do
+  not expose the original sample dates, so clients send the capture time;
+  the receiver stores it on the tombstone for audit. Validation rules mirror
+  v1 (`unknown_metric`, ISO 8601 dates, `endDate` ≥ `startDate`).
+- Limits and framing match v1 (≤ 500 changes per batch, 10 MiB body,
+  Content-Length required, transfer encoding refused).
+- The whole batch applies in one transaction; any validation failure stores
+  nothing.
+
+Server semantics with tombstones:
+
+- **upsert**: first-write-wins `INSERT OR IGNORE` — *unless a tombstone
+  exists for the id*, in which case the addition is ignored and counted as
+  `superseded`. An older queued or retried addition can therefore never
+  resurrect a deleted sample.
+- **delete**: removes any live row and upserts a tombstone (`deleted_ids`
+  table). Retrying a deletion is idempotent and counted as
+  `duplicateDeletions`. Deletions of ids never seen before still create
+  tombstones, so a late-arriving addition is suppressed too.
+
+**Retention**: tombstones are kept indefinitely and are consulted on every
+upsert, at both contract versions. That is deliberate — pruning an old
+tombstone would let a sufficiently stale replayed addition resurrect a
+deleted sample — but it means `deleted_ids` grows without bound on a
+long-running receiver and must be planned for operationally (size the volume
+for it, and monitor table growth). If a deployment needs pruning, the
+retention window must be longer than any batch that could still be replayed —
+and note that this horizon is effectively unbounded, because a restored device
+backup can replay arbitrarily old batches. Any pruning is therefore accepting
+resurrection risk for whatever it prunes, not merely a batch-age bound.
+
+Acknowledgment (after commit):
+
+```json
+{
+  "status": "accepted",
+  "accepted": 8,
+  "duplicates": 1,
+  "superseded": 1,
+  "appliedDeletions": 2,
+  "duplicateDeletions": 0,
+  "schemaVersion": 2
+}
+```
+
+Clients validate that `accepted + duplicates + superseded` equals the number
+of upserts sent and `appliedDeletions + duplicateDeletions` equals the number
+of deletes sent; anything else is a delivery failure (safe to retry).
+
+Migration: opening a v1 database with a v2 receiver adds the `deleted_ids`
+table via `CREATE TABLE IF NOT EXISTS`. Existing rows are never rewritten
+and v1 ingestion behavior is unchanged.
+
 ### Connection test — `GET` to the configured endpoint URL
 
 Verifies reachability, TLS, and the credential — without sending or returning
@@ -80,9 +163,14 @@ Connection test:
 {
   "status": "ok",
   "service": "vitalroute-receiver",
-  "apiVersion": 1
+  "apiVersion": 2,
+  "capabilities": ["additions", "deletions"]
 }
 ```
+
+Clients that only need v1 (records-only manual sync) may ignore
+`capabilities`; clients that synchronize deletions must see `apiVersion >= 2`
+and `"deletions"` in `capabilities` before enabling that mode.
 
 Ingestion acknowledgment (sent only after the batch has been committed):
 

@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.milim.vitalroute.sync</string>
+	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
@@ -19,9 +23,16 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>VitalRoute reads only the Apple Health categories shown in Health Data so you can route recent records to a destination you control.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>VitalRoute reads the Apple Health categories you choose to route recent records to a destination you control, and never writes to Apple Health.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>

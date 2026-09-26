@@ -145,7 +145,8 @@ class ConnectionTestTests(ReceiverServerTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["service"], "vitalroute-receiver")
-        self.assertEqual(body["apiVersion"], 1)
+        self.assertEqual(body["apiVersion"], 2)
+        self.assertEqual(body["capabilities"], ["additions", "deletions"])
         # A connection test must never store anything.
         self.assertEqual(self.stored_count(), 0)
 
@@ -333,8 +334,15 @@ class IngestionValidationTests(ReceiverServerTestCase):
 
     def test_rejects_unsupported_schema_version(self):
         payload = make_payload([make_record()])
-        payload["schemaVersion"] = 2
+        payload["schemaVersion"] = 3
         self.post_expect("unsupported_schema_version", payload)
+
+    def test_v1_shape_with_v2_version_is_invalid_payload(self):
+        # The version selects the schema; a v1-shaped body claiming version 2
+        # is a shape violation, not a version problem.
+        payload = make_payload([make_record()])
+        payload["schemaVersion"] = 2
+        self.post_expect("invalid_payload", payload)
 
     def test_rejects_empty_batch(self):
         self.post_expect("empty_batch", make_payload([]))
@@ -641,6 +649,197 @@ class SlowClientTimeoutTests(unittest.TestCase):
             finally:
                 process.terminate()
                 process.wait(timeout=5)
+
+
+def make_change_payload(changes):
+    return {
+        "schemaVersion": 2,
+        "createdAt": "2026-09-24T12:00:00.000Z",
+        "batchId": "7f6c1a2e-9b34-4d05-8c11-2f0a54d7b901",
+        "changes": changes,
+    }
+
+
+def make_upsert(record=None):
+    return {"kind": "upsert", "record": record or make_record()}
+
+
+def make_delete(record_id=None, metric="steps"):
+    return {
+        "kind": "delete",
+        "id": record_id or str(uuid.uuid4()),
+        "metric": metric,
+        "startDate": "2026-09-20T00:00:00.000Z",
+        "endDate": "2026-09-20T23:59:59.000Z",
+    }
+
+
+class ChangeBatchTests(ReceiverServerTestCase):
+    def stored_count(self):
+        return storage.RecordStore(self.db_path).record_count()
+
+    def tombstones(self):
+        return storage.ChangeApplier(self.db_path).tombstones()
+
+    def test_v2_batch_persists_upserts_and_deletions(self):
+        keep = make_record()
+        drop = make_record()
+        status, body = self.post("/v1/records", make_change_payload([
+            make_upsert(keep),
+            make_upsert(drop),
+        ]))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "accepted")
+        self.assertEqual(body["accepted"], 2)
+        self.assertEqual(body["duplicates"], 0)
+        self.assertEqual(body["superseded"], 0)
+        self.assertEqual(body["appliedDeletions"], 0)
+        self.assertEqual(body["duplicateDeletions"], 0)
+        self.assertEqual(self.stored_count(), 2)
+
+        status, body = self.post("/v1/records", make_change_payload([
+            make_delete(record_id=drop["id"]),
+        ]))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["appliedDeletions"], 1)
+        self.assertEqual(body["duplicateDeletions"], 0)
+        self.assertEqual(self.stored_count(), 1)
+        self.assertIn(drop["id"].lower(), self.tombstones())
+        self.assertNotIn(keep["id"].lower(), self.tombstones())
+
+    def test_retried_deletion_is_idempotent(self):
+        delete = make_delete()
+        self.post("/v1/records", make_change_payload([delete]))
+        status, body = self.post("/v1/records", make_change_payload([delete]))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["appliedDeletions"], 0)
+        self.assertEqual(body["duplicateDeletions"], 1)
+
+    def test_tombstone_prevents_resurrection_by_older_addition(self):
+        record = make_record()
+        self.post("/v1/records", make_change_payload([
+            make_upsert(record),
+            make_delete(record_id=record["id"]),
+        ]))
+        self.assertEqual(self.stored_count(), 0)
+
+        # A stale queued addition replayed after the deletion must not
+        # resurrect the sample.
+        status, body = self.post("/v1/records", make_change_payload([
+            make_upsert(record),
+        ]))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["superseded"], 1)
+        self.assertEqual(body["accepted"], 0)
+        self.assertEqual(self.stored_count(), 0)
+
+    def test_deletion_of_unknown_id_creates_tombstone(self):
+        # Deletion-only flow: tombstones must exist even for ids never seen,
+        # so a later-arriving addition is suppressed.
+        record_id = str(uuid.uuid4())
+        status, body = self.post("/v1/records", make_change_payload([
+            make_delete(record_id=record_id),
+        ]))
+        self.assertEqual(body["appliedDeletions"], 1)
+        self.assertIn(record_id.lower(), self.tombstones())
+
+        status, body = self.post("/v1/records", make_change_payload([
+            make_upsert(make_record(id=record_id)),
+        ]))
+        self.assertEqual(body["superseded"], 1)
+        self.assertEqual(self.stored_count(), 0)
+
+    def test_full_batch_retry_is_idempotent(self):
+        changes = [make_upsert(make_record()), make_delete()]
+        first = self.post("/v1/records", make_change_payload(changes))[1]
+        second = self.post("/v1/records", make_change_payload(changes))[1]
+        self.assertEqual(second["accepted"], 0)
+        self.assertEqual(second["duplicates"], 1)
+        self.assertEqual(second["appliedDeletions"], 0)
+        self.assertEqual(second["duplicateDeletions"], 1)
+
+    def test_v1_ingestion_still_works_alongside_v2(self):
+        record = make_record()
+        status, body = self.post("/v1/records", make_payload([record]))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["schemaVersion"], 1)
+        self.assertEqual(self.stored_count(), 1)
+
+    def test_bad_change_rolls_back_whole_batch(self):
+        good = make_upsert()
+        bad = {"kind": "delete", "id": "not-a-uuid", "metric": "steps",
+               "startDate": "2026-09-20T00:00:00.000Z", "endDate": "2026-09-20T01:00:00.000Z"}
+        status, body = self.post("/v1/records", make_change_payload([good, bad]))
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["code"], "invalid_record")
+        self.assertEqual(self.stored_count(), 0)
+        self.assertEqual(len(self.tombstones()), 0)
+
+    def test_unknown_change_kind_rejected(self):
+        payload = make_change_payload([{"kind": "patch", "record": make_record()}])
+        status, body = self.post("/v1/records", payload)
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["code"], "invalid_record")
+
+    def test_v2_rejects_empty_changes(self):
+        status, body = self.post("/v1/records", make_change_payload([]))
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["code"], "empty_batch")
+
+    def test_v2_rejects_missing_batch_id(self):
+        payload = make_change_payload([make_upsert()])
+        del payload["batchId"]
+        status, body = self.post("/v1/records", payload)
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["code"], "invalid_payload")
+
+    def test_v2_upsert_record_validation_matches_v1(self):
+        record = make_record(unit="")
+        status, body = self.post("/v1/records", make_change_payload([make_upsert(record)]))
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["code"], "invalid_record")
+
+
+    def test_v1_batch_cannot_resurrect_tombstoned_sample(self):
+        # A stale manual-sync (v1) batch containing an id deleted through
+        # the v2 stream must not re-insert it; the ack still reconciles by
+        # counting the suppressed row as a duplicate.
+        record = make_record()
+        delete = make_delete(record_id=record["id"], metric=record["metric"])
+        status, _ = self.post("/v1/records", make_change_payload([delete]))
+        self.assertEqual(status, 200)
+
+        status, body = self.post("/v1/records", make_payload([record]))
+        self.assertEqual(status, 200)
+        self.assertEqual(body["accepted"], 0)
+        self.assertEqual(body["duplicates"], 1)
+        self.assertEqual(self.stored_count(), 0)
+        self.assertIn(record["id"].lower(), self.tombstones())
+
+
+class MigrationTests(unittest.TestCase):
+    def test_v1_database_migrates_additively(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            db_path = os.path.join(tempdir, "records.sqlite3")
+            record_store = storage.RecordStore(db_path)
+            record = make_record()
+            record_tuple = validation._validate_record(record, 0)
+            record_store.ingest([record_tuple], "2026-09-23T00:00:00.000Z")
+
+            # Opening the applier migrates: tombstone table added, v1 rows
+            # and ingestion behavior untouched.
+            applier = storage.ChangeApplier(db_path)
+            self.assertEqual(applier.tombstones(), set())
+            self.assertEqual(storage.RecordStore(db_path).record_count(), 1)
+
+            change = validation._validate_change(
+                {"kind": "delete", "id": record["id"], "metric": record["metric"],
+                 "startDate": record["startDate"], "endDate": record["endDate"]}, 0
+            )
+            counts = applier.apply([change], "2026-09-24T00:00:00.000Z")
+            self.assertEqual(counts.applied_deletions, 1)
+            self.assertEqual(storage.RecordStore(db_path).record_count(), 0)
+            self.assertIn(record["id"].lower(), applier.tombstones())
 
 
 class ValidationUnitTests(unittest.TestCase):

@@ -94,20 +94,32 @@ final class ManualSyncCoordinator {
     private(set) var lastSuccessfulSync: LastSyncInfo?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
 
+    /// Shared with the automatic engine: the single serialization boundary
+    /// that keeps manual and background work from racing checkpoints or
+    /// duplicating active uploads.
+    @ObservationIgnored private let workGate: SyncWorkGate
+
     init(
         healthData: any HealthDataProviding,
         client: any DestinationClient,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        workGate: SyncWorkGate = SyncWorkGate()
     ) {
         self.healthData = healthData
         self.client = client
         self.defaults = defaults
+        self.workGate = workGate
         lastSuccessfulSync = Self.loadLastSync(from: defaults)
     }
 
-    var isSyncing: Bool {
-        syncTask != nil
-    }
+    /// Observable in-flight state.
+    ///
+    /// `syncTask` is observation-ignored, so a computed `isSyncing` over it
+    /// registers no Observation dependency and a view reading it never
+    /// updates. That matters now that a manual sync can wait behind an
+    /// automatic pass: the wait is real, and the screen has to show it and
+    /// offer the cancel.
+    private(set) var isSyncing = false
 
     /// Starts a sync from the current configuration. All inputs are captured
     /// into the plan immediately; overlapping calls are ignored while a sync
@@ -148,11 +160,46 @@ final class ManualSyncCoordinator {
             return
         }
 
+        let gate = workGate
+        // Captured before the task so a cancellation while queued can report
+        // the start the user actually experienced.
+        let startedAt = Date()
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.runSync(plan: plan)
+            // The in-flight marker is cleared here rather than inside
+            // `runSync`: a cancellation that lands while this task is still
+            // queued behind the gate makes `gate.run` throw before `runSync`
+            // is ever entered, and an uncleared marker reads as a permanent
+            // "syncing" state that also blocks every later start.
+            defer {
+                self.syncTask = nil
+                self.isSyncing = false
+                self.phase = .idle
+            }
+            // Serialized with automatic sync: the whole manual operation
+            // (query + upload) holds the gate.
+            do {
+                try await gate.run { @MainActor [weak self] () throws -> Void in
+                    try await self?.runSync(plan: plan)
+                }
+            } catch is CancellationError {
+                // Cancelled while queued: `runSync` was never entered, so it
+                // could not record the stop itself. Without this the outcome
+                // card would keep showing the previous run's result.
+                self.lastOutcome = SyncOutcome(
+                    startedAt: startedAt,
+                    finishedAt: Date(),
+                    result: .cancelled
+                )
+            } catch {
+                // runSync handles its own failures; only cancellation is
+                // expected to escape the gate wrapper. Anything else is a
+                // bug worth surfacing in debug builds rather than losing.
+                assertionFailure("ManualSyncCoordinator: unexpected gate error: \(error)")
+            }
         }
         syncTask = task
+        isSyncing = true
     }
 
     func cancelSync() {
@@ -167,12 +214,7 @@ final class ManualSyncCoordinator {
         )
     }
 
-    private func runSync(plan: SyncPlan) async {
-        defer {
-            syncTask = nil
-            phase = .idle
-        }
-
+    private func runSync(plan: SyncPlan) async throws {
         let startedAt = Date()
         var summary = SyncSummary()
         currentSummary = summary

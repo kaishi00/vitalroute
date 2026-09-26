@@ -23,4 +23,14 @@ protocol DestinationClient: Sendable {
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse
+
+    /// Sends one v2 change batch (additions and deletions) and returns the
+    /// receiver's reconciled acknowledgment. A return without throwing means
+    /// the receiver committed the batch and accounted for every change.
+    func sendChanges(
+        _ changes: [SyncChangeEvent],
+        batchID: UUID,
+        to endpoint: URL,
+        authorization: DestinationAuthorization
+    ) async throws -> ChangeAcknowledgment
 }

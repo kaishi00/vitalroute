@@ -66,7 +66,8 @@ final class ReceiverIntegrationTests: XCTestCase {
         }
 
         XCTAssertEqual(response.status, "ok")
-        XCTAssertEqual(response.apiVersion, 1)
+        XCTAssertEqual(response.apiVersion, 2)
+        XCTAssertTrue(response.supportsDeletions, "the live receiver must advertise deletion support for this suite")
     }
 
     func testIngestionRetryIsIdempotentAgainstLiveReceiver() async throws {
@@ -104,6 +105,76 @@ final class ReceiverIntegrationTests: XCTestCase {
         } catch let error as DestinationClientError {
             XCTAssertEqual(error, .authenticationFailed)
         }
+    }
+
+    func testChangeLifecycleAgainstLiveReceiver() async throws {
+        // Addition -> retry (idempotent) -> deletion -> old-addition replay
+        // (tombstone must prevent resurrection), each through the real
+        // client against the real receiver over real TLS.
+        let configuration = try integrationConfiguration()
+        let authorization = DestinationAuthorization(bearerToken: configuration.token)
+        let client = self.client
+        let endpoint = configuration.endpoint
+
+        let keepID = UUID()
+        let dropID = UUID()
+        let base = Date(timeIntervalSince1970: 1_760_100_000)
+        @Sendable func upsertEvent(_ id: UUID, offset: TimeInterval) -> SyncChangeEvent {
+            .upsert(HealthRecord(
+                id: id,
+                metric: .steps,
+                value: 100,
+                unit: "count",
+                startDate: base.addingTimeInterval(offset),
+                endDate: base.addingTimeInterval(offset + 60)
+            ))
+        }
+        let initial: [SyncChangeEvent] = [
+            upsertEvent(keepID, offset: 0),
+            upsertEvent(dropID, offset: 120),
+        ]
+
+        // 1) Addition.
+        let added = try await awaitWithTimeout {
+            try await client.sendChanges(initial, batchID: UUID(), to: endpoint, authorization: authorization)
+        }
+        XCTAssertEqual(added.accepted, 2)
+        XCTAssertEqual(added.duplicates, 0)
+
+        // 2) Retry of the same batch is idempotent.
+        let retried = try await awaitWithTimeout {
+            try await client.sendChanges(initial, batchID: UUID(), to: endpoint, authorization: authorization)
+        }
+        XCTAssertEqual(retried.accepted, 0)
+        XCTAssertEqual(retried.duplicates, 2)
+
+        // 3) Deletion of one sample.
+        let deletion = SyncChangeEvent.delete(DeletedRecord(
+            id: dropID,
+            metric: .steps,
+            startDate: base,
+            endDate: base.addingTimeInterval(60)
+        ))
+        let deleted = try await awaitWithTimeout {
+            try await client.sendChanges([deletion], batchID: UUID(), to: endpoint, authorization: authorization)
+        }
+        XCTAssertEqual(deleted.appliedDeletions, 1)
+        XCTAssertEqual(deleted.duplicateDeletions, 0)
+
+        // 4) Old queued addition replayed after the deletion must not
+        //    resurrect the deleted sample.
+        let resurrectAttempt = try await awaitWithTimeout {
+            try await client.sendChanges([upsertEvent(dropID, offset: 120)], batchID: UUID(), to: endpoint, authorization: authorization)
+        }
+        XCTAssertEqual(resurrectAttempt.superseded, 1)
+        XCTAssertEqual(resurrectAttempt.accepted, 0)
+
+        // 5) The deletion retry also stays idempotent.
+        let deletionRetry = try await awaitWithTimeout {
+            try await client.sendChanges([deletion], batchID: UUID(), to: endpoint, authorization: authorization)
+        }
+        XCTAssertEqual(deletionRetry.appliedDeletions, 0)
+        XCTAssertEqual(deletionRetry.duplicateDeletions, 1)
     }
 
     // MARK: Helpers

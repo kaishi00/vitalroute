@@ -83,6 +83,10 @@ class ReceiverHandler(BaseHTTPRequestHandler):
     def record_store(self):
         return self.server.record_store
 
+    @property
+    def change_applier(self):
+        return self.server.change_applier
+
     # ---- plumbing -------------------------------------------------------
 
     def _send_json(self, status, body, extra_headers=None, close=False):
@@ -267,6 +271,7 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "service": validation.SERVICE_NAME,
                 "apiVersion": validation.SUPPORTED_API_VERSION,
+                "capabilities": list(validation.RECEIVER_CAPABILITIES),
             },
         )
         self._log_request(200)
@@ -323,6 +328,14 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, "invalid_json", "The request body is not valid JSON.")
             return
 
+        # Contract dispatch: schemaVersion 2 carries additions and deletions;
+        # schemaVersion 1 is the original records-only payload. The versions
+        # have distinct shapes and are never reinterpreted as each other.
+        schema_version = payload.get("schemaVersion") if isinstance(payload, dict) else None
+        if schema_version == 2:
+            self._apply_change_batch(payload, config)
+            return
+
         try:
             batch_created_at, prepared = validation.validate_payload(
                 payload, config.max_records_per_batch
@@ -348,6 +361,39 @@ class ReceiverHandler(BaseHTTPRequestHandler):
             },
         )
         self._log_request(200, records=accepted + duplicates)
+
+    def _apply_change_batch(self, payload, config):
+        try:
+            batch_created_at, prepared = validation.validate_change_payload(
+                payload, config.max_records_per_batch
+            )
+        except validation.ValidationError as error:
+            self._send_error_json(400, error.code, error.message)
+            return
+
+        try:
+            counts = self.change_applier.apply(prepared, batch_created_at)
+        except Exception:  # noqa: BLE001 - never leak internals to the client
+            logger.exception("Change batch failed with an internal error.")
+            self._send_error_json(500, "internal_error", "Ingestion failed.")
+            return
+
+        self._send_json(
+            200,
+            {
+                "status": "accepted",
+                "accepted": counts.accepted,
+                "duplicates": counts.duplicates,
+                "superseded": counts.superseded,
+                "appliedDeletions": counts.applied_deletions,
+                "duplicateDeletions": counts.duplicate_deletions,
+                "schemaVersion": 2,
+            },
+        )
+        self._log_request(
+            200, records=counts.accepted + counts.duplicates + counts.superseded
+            + counts.applied_deletions + counts.duplicate_deletions
+        )
 
     def _drain_body(self, length):
         remaining = min(length, self.receiver_config.max_body_bytes + 1)
@@ -415,11 +461,14 @@ def make_server(
 
     record_store = storage.RecordStore(db_path)
 
+    change_applier = storage.ChangeApplier(db_path)
+
     server = ReceiverServer((host, port), ReceiverHandler)
     server.receiver_config = ReceiverConfig(
         token, db_path, max_body_bytes, max_records_per_batch
     )
     server.record_store = record_store
+    server.change_applier = change_applier
 
     if tls_cert or tls_key:
         if not (tls_cert and tls_key):

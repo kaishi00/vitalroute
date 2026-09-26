@@ -343,6 +343,73 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.lastOutcome?.result, .cancelled)
         XCTAssertLessThanOrEqual(coordinator.lastOutcome!.summary.batchesDelivered, 1)
         XCTAssertNil(coordinator.lastSuccessfulSync)
+        // The engine's manual-sync hook observes phase returning to .idle;
+        // pin it on the cancellation path too, not just on success.
+        XCTAssertEqual(coordinator.phase, .idle)
+    }
+
+    @MainActor
+    func testCancellingWhileQueuedBehindTheGateClearsTheSyncState() async throws {
+        // The regression: `runSync`'s cleanup never ran when the cancellation
+        // landed while the task was still queued behind the work gate, so the
+        // in-flight marker stayed set and manual sync could never start again.
+        let gate = SyncWorkGate()
+        let sendGate = AsyncGate()
+
+        let holderClient = StubDestinationClient()
+        holderClient.sendGate = sendGate
+        let holder = ManualSyncCoordinator(
+            healthData: StubHealthDataProvider(export: [record(1)]),
+            client: holderClient,
+            defaults: makeDefaults(),
+            workGate: gate
+        )
+        let queuedClient = StubDestinationClient()
+        // A non-empty export, so "nothing was uploaded" is not vacuous, and
+        // the provider's counters below prove `runSync` was never entered.
+        let queuedProvider = StubHealthDataProvider(export: [record(99)])
+        let queued = ManualSyncCoordinator(
+            healthData: queuedProvider,
+            client: queuedClient,
+            defaults: makeDefaults(),
+            workGate: gate
+        )
+
+        // The first sync takes the gate and parks inside its upload.
+        holder.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await sendGate.waitForEntry()
+
+        // The second queues behind it, then the user cancels.
+        queued.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        XCTAssertTrue(queued.isSyncing)
+        queued.cancelSync()
+
+        await sendGate.open()
+        await waitForCompletion(holder)
+
+        // The queued run never entered; it must still stop reporting as
+        // syncing once the gate is released.
+        var attempts = 0
+        while queued.isSyncing && attempts < 250 {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 2_000_000)
+            attempts += 1
+        }
+
+        XCTAssertFalse(queued.isSyncing, "a cancellation while queued must not wedge manual sync")
+        XCTAssertEqual(queued.phase, .idle)
+        XCTAssertEqual(queuedClient.sentPayloads.count, 0, "the cancelled run must not have uploaded")
+        XCTAssertEqual(queuedProvider.authorizationCount, 0, "the cancelled run was never entered")
+        guard case .cancelled? = queued.lastOutcome?.result else {
+            return XCTFail(
+                "a queued cancellation must be reported as cancelled, got \(String(describing: queued.lastOutcome?.result))"
+            )
+        }
+
+        // And the coordinator is usable again.
+        queued.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(queued)
+        XCTAssertEqual(queued.lastOutcome?.result, .completed)
     }
 
     @MainActor
@@ -419,6 +486,27 @@ private final class StubHealthDataProvider: HealthDataProviding {
             truncatedMetrics: truncated
         )
     }
+
+    func changePage(
+        for metric: HealthMetric,
+        since anchorData: Data?,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> HealthChangePage {
+        HealthChangePage(
+            additions: [],
+            deletions: [],
+            anchorData: anchorData,
+            isFull: false
+        )
+    }
+
+    func observeChanges(
+        for metrics: Set<HealthMetric>,
+        handler: @escaping @Sendable (ObserverCompletion) -> Void
+    ) async throws {}
+
+    func stopObservingChanges() async {}
 }
 
 private final class StubDestinationClient: DestinationClient, @unchecked Sendable {
@@ -455,7 +543,27 @@ private final class StubDestinationClient: DestinationClient, @unchecked Sendabl
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse {
-        ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 1)
+        ReceiverHealthResponse(
+            status: "ok",
+            service: "vitalroute-receiver",
+            apiVersion: 1,
+            capabilities: []
+        )
+    }
+
+    func sendChanges(
+        _ changes: [SyncChangeEvent],
+        batchID: UUID,
+        to endpoint: URL,
+        authorization: DestinationAuthorization
+    ) async throws -> ChangeAcknowledgment {
+        ChangeAcknowledgment(
+            accepted: changes.count,
+            duplicates: 0,
+            superseded: 0,
+            appliedDeletions: 0,
+            duplicateDeletions: 0
+        )
     }
 }
 

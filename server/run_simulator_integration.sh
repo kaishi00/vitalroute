@@ -82,6 +82,20 @@ xcodebuild -project VitalRoute.xcodeproj -scheme VitalRoute \
 echo "--- Persisted records ---"
 sqlite3 "$DB" "SELECT metric, COUNT(*) FROM records GROUP BY metric ORDER BY metric;"
 sqlite3 "$DB" "SELECT COUNT(*) AS total FROM records;"
+echo "--- Tombstones (deletion propagation) ---"
+sqlite3 "$DB" "SELECT COUNT(*) AS tombstones FROM deleted_ids;"
+sqlite3 "$DB" "SELECT metric, COUNT(*) FROM deleted_ids GROUP BY metric ORDER BY metric;"
+# The lifecycle test deletes one sample and then replays an older addition
+# for the same id: exactly one tombstone must exist and no row for it.
+DELETED_ID=$(sqlite3 "$DB" "SELECT id FROM deleted_ids LIMIT 1;")
+if [ -n "$DELETED_ID" ]; then
+  RESURRECTED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM records WHERE id = '$DELETED_ID';")
+  if [ "$RESURRECTED" = "0" ]; then
+    echo "tombstone held: no resurrection for $DELETED_ID"
+  else
+    echo "RESURRECTION DETECTED for $DELETED_ID" && exit 1
+  fi
+fi
 
 echo "--- Receiver log ---"
 cat "$INTDIR/receiver.log"
