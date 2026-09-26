@@ -81,21 +81,22 @@ TOOLS = [
     {
         "name": "list_metrics",
         "description": "List the health metrics available in this VitalRoute receiver, "
-        "with record counts, date coverage, and aggregation semantics. "
-        "Start here before asking for daily stats.",
+        "with record kind, record counts, date coverage, and the unit quantity "
+        "rows were stored in. Start here before asking for daily stats.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "daily_stats",
-        "description": "Per-day aggregates (count, sum, avg, min, max) per metric. "
-        "Cumulative metrics (steps, activeEnergy, sleep) are read via 'sum'; "
-        "instantaneous metrics (heartRate and friends) via 'avg'/'min'/'max'. "
+        "description": "Per-day aggregates per metric and record kind. Quantity rows "
+        "(scalar samples) get count/sum/avg/min/max over their stored value plus "
+        "the unit; every other kind (workouts, sleep stages, ECGs, clinical "
+        "documents, series chunks) is counted, never numerically aggregated. "
         "Dates group by UTC day. Deleted samples are excluded. "
         "Pass either 'days' (recent window with data) or 'from'/'to' (ISO dates).",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "metric": {"type": "string", "description": "Single metric (e.g. steps); omit for all"},
+                "metric": {"type": "string", "description": "Single metric; omit for all"},
                 "from": {"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
                 "to": {"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
                 "days": {"type": "integer", "description": "The last N days with data (1-366)"},
@@ -105,7 +106,9 @@ TOOLS = [
     },
     {
         "name": "recent_records",
-        "description": "Most recent raw records (newest first), optionally filtered by metric. "
+        "description": "Most recent raw record envelopes (newest first), optionally "
+        "filtered by metric. Each record carries its typed data payload (e.g. a "
+        "quantity value+unit, a workout summary, a clinical FHIR document). "
         "Bounded to 200 per call; use daily_stats for aggregates.",
         "inputSchema": {
             "type": "object",
