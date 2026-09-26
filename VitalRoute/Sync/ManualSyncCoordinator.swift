@@ -57,15 +57,21 @@ struct SyncSummary: Equatable {
     var batchesDelivered = 0
     var acceptedRecords = 0
     var duplicateRecords = 0
+    /// Records the receiver refused to store because a tombstone exists
+    /// (the sample was deleted through the automatic change stream before
+    /// this manual batch arrived). Accounted for, but not stored.
+    var supersededRecords = 0
 
     var deliveredRecords: Int {
-        acceptedRecords + duplicateRecords
+        acceptedRecords + duplicateRecords + supersededRecords
     }
 
     /// Per-category counts for outcome copy, in catalog order.
     var breakdownText: String {
-        HealthMetric.allCases
-            .compactMap { metric in recordsByMetric[metric].map { "\(metric.displayName) \($0)" } }
+        MetricCatalog.selectableMetrics
+            .compactMap { descriptor in
+                recordsByMetric[descriptor.metric].map { "\(descriptor.displayName) \($0)" }
+            }
             .joined(separator: " · ")
     }
 }
@@ -104,6 +110,30 @@ struct LastSyncInfo: Equatable, Codable {
     let deliveredRecords: Int
     let acceptedRecords: Int
     let duplicateRecords: Int
+    var supersededRecords: Int = 0
+
+    private enum CodingKeys: String, CodingKey {
+        case finishedAt, deliveredRecords, acceptedRecords, duplicateRecords, supersededRecords
+    }
+
+    init(finishedAt: Date, deliveredRecords: Int, acceptedRecords: Int, duplicateRecords: Int, supersededRecords: Int = 0) {
+        self.finishedAt = finishedAt
+        self.deliveredRecords = deliveredRecords
+        self.acceptedRecords = acceptedRecords
+        self.duplicateRecords = duplicateRecords
+        self.supersededRecords = supersededRecords
+    }
+
+    /// `supersededRecords` was added after the first releases of this
+    /// struct; values persisted before it decode as zero.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        finishedAt = try container.decode(Date.self, forKey: .finishedAt)
+        deliveredRecords = try container.decode(Int.self, forKey: .deliveredRecords)
+        acceptedRecords = try container.decode(Int.self, forKey: .acceptedRecords)
+        duplicateRecords = try container.decode(Int.self, forKey: .duplicateRecords)
+        supersededRecords = try container.decodeIfPresent(Int.self, forKey: .supersededRecords) ?? 0
+    }
 }
 
 /// Drives foreground, user-initiated syncs: authorize for the selected
@@ -188,7 +218,9 @@ final class ManualSyncCoordinator {
             plan = SyncPlan(
                 endpoint: configuration.endpoint,
                 bearerToken: trimmedToken,
-                metrics: HealthMetric.allCases.filter { metrics.contains($0) }
+                metrics: MetricCatalog.selectableMetrics
+                    .map(\.metric)
+                    .filter { metrics.contains($0) }
             )
             // Captured with the plan so the window start is one decision:
             // configuration captured at start time, not whenever the gate
@@ -316,7 +348,8 @@ final class ManualSyncCoordinator {
                     finishedAt: outcome.finishedAt,
                     deliveredRecords: summary.deliveredRecords,
                     acceptedRecords: summary.acceptedRecords,
-                    duplicateRecords: summary.duplicateRecords
+                    duplicateRecords: summary.duplicateRecords,
+                    supersededRecords: summary.supersededRecords
                 )
                 lastSuccessfulSync = info
                 persistLastSync(info)
@@ -399,7 +432,11 @@ final class ManualSyncCoordinator {
             // Deliver this page before its cursor moves: an acknowledged
             // page can never be lost, and an undelivered one is re-read on
             // the next sync (the receiver keeps one copy of each record).
-            let batches = page.records.batched(into: SyncLimits.recordsPerUploadBatch)
+            // Manual sync shares the automatic path's single v3 operation:
+            // an additions-only change batch.
+            let batches = page.records
+                .map(SyncChangeEvent.upsert)
+                .batched(into: SyncLimits.recordsPerUploadBatch)
             summary.batchesPlanned += batches.count
             for batch in batches {
                 try Task.checkCancellation()
@@ -407,15 +444,16 @@ final class ManualSyncCoordinator {
                     batch: summary.batchesDelivered + 1,
                     totalBatches: 0 // streaming: the total is not known yet
                 )
-                let payload = SyncPayload(records: batch)
-                let acknowledgment = try await client.send(
-                    payload,
+                let acknowledgment = try await client.sendChanges(
+                    batch,
+                    batchID: UUID(),
                     to: plan.endpoint,
                     authorization: authorization
                 )
                 summary.batchesDelivered += 1
                 summary.acceptedRecords += acknowledgment.accepted
                 summary.duplicateRecords += acknowledgment.duplicates
+                summary.supersededRecords += acknowledgment.superseded
                 currentSummary = summary
             }
 

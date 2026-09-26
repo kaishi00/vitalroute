@@ -24,10 +24,9 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         HealthRecord(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index))!,
             metric: metric,
-            value: Double(index),
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600 + start),
-            endDate: Date(timeIntervalSince1970: 1_735_689_600 + start + 60)
+            endDate: Date(timeIntervalSince1970: 1_735_689_600 + start + 60),
+            data: .quantity(QuantityData(value: Double(index), unit: "count"))
         )
     }
 
@@ -124,7 +123,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
         XCTAssertEqual(coordinator.lastOutcome?.summary.recordsFound, 0)
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertEqual(client.sentBatches.count, 0)
     }
 
     @MainActor
@@ -138,10 +137,10 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
 
-        XCTAssertEqual(client.sentPayloads.count, 2)
-        XCTAssertEqual(client.sentPayloads[0].records.count, SyncLimits.recordsPerUploadBatch)
-        XCTAssertEqual(client.sentPayloads[1].records.count, 50)
-        XCTAssertEqual(client.sentPayloads[0].records.first?.id, ids.first.map { record($0).id })
+        XCTAssertEqual(client.sentBatches.count, 2)
+        XCTAssertEqual(client.sentBatches[0].count, SyncLimits.recordsPerUploadBatch)
+        XCTAssertEqual(client.sentBatches[1].count, 50)
+        XCTAssertEqual(client.sentBatches[0].first?.sampleID, ids.first.map { record($0).id })
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
         XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, ids.count)
     }
@@ -173,7 +172,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(provider.exportQueries[2].sinceAnchor, Data("a2".utf8))
         XCTAssertEqual(provider.exportQueries[3].sinceAnchor, Data("a3".utf8))
         // One batch per record page, all acknowledged.
-        XCTAssertEqual(client.sentPayloads.count, 4)
+        XCTAssertEqual(client.sentBatches.count, 4)
         XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, 4)
         // The final cursor reflects the last acknowledged page.
         let cursor = await store.manualCursor(
@@ -346,7 +345,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         provider.script[.steps] = [page([1], anchor: "same", full: false)]
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
-        XCTAssertEqual(client.sentPayloads.count, 1)
+        XCTAssertEqual(client.sentBatches.count, 1)
 
         // A full page whose anchor equals the anchor it was read with:
         // continuing would re-send the same page forever, so the run stops
@@ -365,7 +364,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         }
         XCTAssertTrue(message.contains("could not be read past"), message)
         // The offending page WAS delivered before the stop.
-        XCTAssertEqual(client.sentPayloads.count, 2)
+        XCTAssertEqual(client.sentBatches.count, 2)
     }
 
     @MainActor
@@ -620,7 +619,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         coordinator.startSync(endpoint: endpoint, token: nil, metrics: [.steps])
 
         XCTAssertFalse(coordinator.isSyncing)
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertEqual(client.sentBatches.count, 0)
         XCTAssertEqual(provider.authorizationCount, 0)
         guard case .failed(let message)? = coordinator.lastOutcome?.result else {
             XCTFail("expected failure outcome")
@@ -701,7 +700,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
             return
         }
         XCTAssertTrue(message.contains("Apple Health"))
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertEqual(client.sentBatches.count, 0)
     }
 
     @MainActor
@@ -719,7 +718,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         await waitForCompletion(coordinator)
 
         // The overlapping call was ignored: exactly one payload.
-        XCTAssertEqual(client.sentPayloads.count, 1)
+        XCTAssertEqual(client.sentBatches.count, 1)
     }
 
     @MainActor
@@ -786,13 +785,13 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
         XCTAssertFalse(coordinator.isSyncing)
         XCTAssertEqual(coordinator.lastOutcome?.result, .cancelled)
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertEqual(client.sentBatches.count, 0)
         // The cleared state must not wedge later syncs.
         provider.script[.steps] = [page([9], anchor: "z1", full: false)]
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
-        XCTAssertEqual(client.sentPayloads.count, 1)
+        XCTAssertEqual(client.sentBatches.count, 1)
     }
 
     @MainActor
@@ -819,7 +818,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
         // The failed attempt never checkpointed its page, so the retry reads
         // it again — the receiver keeps one copy of each record.
-        XCTAssertEqual(client.sentPayloads.count, 2)
+        XCTAssertEqual(client.sentBatches.count, 2)
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
         XCTAssertNotNil(coordinator.lastSuccessfulSync)
     }
@@ -936,7 +935,7 @@ private final class StubHealthDataProvider: HealthDataProviding {
 }
 
 private final class StubDestinationClient: DestinationClient, @unchecked Sendable {
-    private(set) var sentPayloads: [SyncPayload] = []
+    private(set) var sentBatches: [[SyncChangeEvent]] = []
     private(set) var receivedEndpoints: [URL] = []
     private(set) var receivedAuthorizations: [DestinationAuthorization] = []
 
@@ -946,25 +945,6 @@ private final class StubDestinationClient: DestinationClient, @unchecked Sendabl
     var failOnBatchNumber: Int?
     var failure: DestinationClientError?
 
-    func send(
-        _ payload: SyncPayload,
-        to endpoint: URL,
-        authorization: DestinationAuthorization
-    ) async throws -> SyncAcknowledgment {
-        let batchNumber = sentPayloads.count + 1
-        sentPayloads.append(payload)
-        receivedEndpoints.append(endpoint)
-        receivedAuthorizations.append(authorization)
-
-        if let gate = sendGate {
-            await gate.enter()
-        }
-        if failOnBatchNumber == batchNumber, let failure {
-            throw failure
-        }
-        return SyncAcknowledgment(accepted: payload.records.count, duplicates: 0)
-    }
-
     func testConnection(
         to endpoint: URL,
         authorization: DestinationAuthorization
@@ -972,8 +952,8 @@ private final class StubDestinationClient: DestinationClient, @unchecked Sendabl
         ReceiverHealthResponse(
             status: "ok",
             service: "vitalroute-receiver",
-            apiVersion: 1,
-            capabilities: []
+            apiVersion: 3,
+            capabilities: ["additions", "deletions"]
         )
     }
 
@@ -983,9 +963,21 @@ private final class StubDestinationClient: DestinationClient, @unchecked Sendabl
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ChangeAcknowledgment {
-        ChangeAcknowledgment(
-            accepted: changes.count,
-            duplicates: 0,
+        let batchNumber = sentBatches.count + 1
+        sentBatches.append(changes)
+        receivedEndpoints.append(endpoint)
+        receivedAuthorizations.append(authorization)
+
+        if let gate = sendGate {
+            await gate.enter()
+        }
+        if failOnBatchNumber == batchNumber, let failure {
+            throw failure
+        }
+        let upserts = changes.filter { if case .upsert = $0 { return true } else { return false } }.count
+        return ChangeAcknowledgment(
+            accepted: upserts,
+            duplicates: changes.count - upserts,
             superseded: 0,
             appliedDeletions: 0,
             duplicateDeletions: 0

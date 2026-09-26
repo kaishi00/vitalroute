@@ -44,18 +44,24 @@ private final class QueryBox: @unchecked Sendable {
 final class HealthKitService: HealthDataProviding {
     private let healthStore = HKHealthStore()
     private let observers: HealthObserverCoordinator
+    /// Series loaders for metrics whose records continue into a series
+    /// (ECG voltage today; workout routes when cataloged). Ordinary
+    /// metrics need none. Injectable so tests can script fetches.
+    private let seriesFetchers: [HealthMetric: any SeriesFetching]
 
     /// `observerBackend` defaults to the store at hand; tests inject a
     /// controllable adapter so partial enablement failures, suspended
     /// registrations, and late callbacks can be scripted.
     init(
         observerBackend: (any HealthObserverBackend)? = nil,
-        observerCompletionDeadline: TimeInterval = HealthObserverCoordinator.defaultCompletionDeadline
+        observerCompletionDeadline: TimeInterval = HealthObserverCoordinator.defaultCompletionDeadline,
+        seriesFetchers: [HealthMetric: any SeriesFetching] = [:]
     ) {
         observers = HealthObserverCoordinator(
             backend: observerBackend ?? healthStore,
             completionDeadline: observerCompletionDeadline
         )
+        self.seriesFetchers = seriesFetchers
     }
 
     var isAvailable: Bool {
@@ -73,9 +79,7 @@ final class HealthKitService: HealthDataProviding {
             throw HealthKitServiceError.noMetricsRequested
         }
 
-        let types = Set(metrics.compactMap { metric -> HKObjectType? in
-            HealthKitRecordMapper.sampleType(for: metric)
-        })
+        let types = HealthKitRecordMapper.objectTypes(for: metrics)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             healthStore.requestAuthorization(toShare: Set<HKSampleType>(), read: types) { granted, error in
@@ -107,15 +111,23 @@ final class HealthKitService: HealthDataProviding {
         // One HealthKit query per metric; the queries overlap on HealthKit's
         // own queues, and concurrency is bounded by the metric count.
         let store = healthStore
+        let fetchers = seriesFetchers
         let recordsByMetric = try await withThrowingTaskGroup(of: (HealthMetric, [HealthRecord]).self) { group in
-            for metric in HealthMetric.allCases where metrics.contains(metric) {
+            for metric in MetricCatalog.metrics.map(\.metric) where metrics.contains(metric) {
                 group.addTask {
-                    (metric, try await Self.queryRecords(
+                    let mapped = try await Self.queryRecords(
                         for: metric,
                         using: store,
                         predicate: predicate,
                         limit: limit
-                    ))
+                    )
+                    let records = try await Self.expandSeries(
+                        mapped,
+                        metric: metric,
+                        using: store,
+                        seriesFetchers: fetchers
+                    )
+                    return (metric, records)
                 }
             }
             var results: [HealthMetric: [HealthRecord]] = [:]
@@ -125,10 +137,10 @@ final class HealthKitService: HealthDataProviding {
             return results
         }
 
-        // Assemble in HealthMetric.allCases order so the merged output stays
+        // Assemble in catalog order so the merged output stays
         // deterministic regardless of query completion order.
         var records: [HealthRecord] = []
-        for metric in HealthMetric.allCases where metrics.contains(metric) {
+        for metric in MetricCatalog.metrics.map(\.metric) where metrics.contains(metric) {
             records.append(contentsOf: recordsByMetric[metric] ?? [])
         }
 
@@ -160,8 +172,14 @@ final class HealthKitService: HealthDataProviding {
             anchor: anchor,
             limit: limit
         )
+        let records = try await Self.expandSeries(
+            page.records,
+            metric: metric,
+            using: healthStore,
+            seriesFetchers: seriesFetchers
+        )
         return HealthExportPage(
-            records: page.records,
+            records: records,
             anchorData: Self.serialize(page.nextAnchor),
             isFull: page.isFull
         )
@@ -174,11 +192,11 @@ final class HealthKitService: HealthDataProviding {
         using healthStore: HKHealthStore,
         predicate: NSPredicate,
         limit: Int
-    ) async throws -> [HealthRecord] {
-        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
+    ) async throws -> [MappedSample] {
+        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric.descriptor) else {
             return []
         }
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HealthRecord], Error>) in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[MappedSample], Error>) in
             let query = HKSampleQuery(
                 sampleType: sampleType,
                 predicate: predicate,
@@ -191,16 +209,35 @@ final class HealthKitService: HealthDataProviding {
                     continuation.resume(throwing: error)
                 } else {
                     // HKSample is not Sendable: convert to the app-owned
-                    // HealthRecord value type on HealthKit's callback thread
-                    // so only Sendable values cross the continuation.
-                    let records = (samples ?? []).compactMap {
-                        HealthKitRecordMapper.makeRecord(from: $0, metric: metric)
+                    // mapped values on HealthKit's callback thread so only
+                    // Sendable values cross the continuation.
+                    let mapped = (samples ?? []).compactMap {
+                        HealthKitRecordMapper.makeMappedSample(from: $0, metric: metric)
                     }
-                    continuation.resume(returning: records)
+                    continuation.resume(returning: mapped)
                 }
             }
             healthStore.execute(query)
         }
+    }
+
+    /// Appends the series chunks each mapped sample asks for. A series
+    /// continuation without a configured loader is a wiring bug that must
+    /// fail loudly, not silently drop data.
+    private nonisolated static func expandSeries(
+        _ mapped: [MappedSample],
+        metric: HealthMetric,
+        using healthStore: HKHealthStore,
+        seriesFetchers: [HealthMetric: any SeriesFetching]
+    ) async throws -> [HealthRecord] {
+        var records = mapped.compactMap(\.record)
+        for request in mapped.compactMap(\.seriesRequest) {
+            guard let fetcher = seriesFetchers[metric] else {
+                throw HealthKitServiceError.seriesFetcherUnavailable(metric: metric.rawValue)
+            }
+            records.append(contentsOf: try await fetcher.fetchChunkRecords(for: request, metric: metric))
+        }
+        return records
     }
 
     /// One anchored page. The anchor advances past exactly the samples it
@@ -218,11 +255,11 @@ final class HealthKitService: HealthDataProviding {
         predicate: NSPredicate,
         anchor: HKQueryAnchor?,
         limit: Int
-    ) async throws -> RecordPager.Page<HKQueryAnchor> {
-        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
+    ) async throws -> RecordPager.Page<MappedSample, HKQueryAnchor> {
+        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric.descriptor) else {
             return RecordPager.Page(records: [], nextAnchor: anchor, isFull: false)
         }
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<RecordPager.Page<HKQueryAnchor>, Error>) in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<RecordPager.Page<MappedSample, HKQueryAnchor>, Error>) in
             let once = ContinuationGuard()
             let queryBox = QueryBox()
             let query = HKAnchoredObjectQuery(
@@ -241,11 +278,11 @@ final class HealthKitService: HealthDataProviding {
                 }
                 // Map on HealthKit's callback thread so only Sendable values
                 // cross the continuation.
-                let records = (samples ?? []).compactMap {
-                    HealthKitRecordMapper.makeRecord(from: $0, metric: metric)
+                let mapped = (samples ?? []).compactMap {
+                    HealthKitRecordMapper.makeMappedSample(from: $0, metric: metric)
                 }
                 continuation.resume(returning: RecordPager.Page(
-                    records: records,
+                    records: mapped,
                     nextAnchor: newAnchor,
                     isFull: (samples?.count ?? 0) >= limit
                 ))
@@ -272,12 +309,24 @@ final class HealthKitService: HealthDataProviding {
             end: nil,
             options: [.strictStartDate]
         )
-        return try await Self.queryChangePage(
+        let page = try await Self.queryChangePage(
             for: metric,
             using: healthStore,
             predicate: predicate,
             anchor: anchor,
             limit: limit
+        )
+        let additions = try await Self.expandSeries(
+            page.additions,
+            metric: metric,
+            using: healthStore,
+            seriesFetchers: seriesFetchers
+        )
+        return HealthChangePage(
+            additions: additions,
+            deletions: page.deletions,
+            anchorData: page.anchorData,
+            isFull: page.isFull
         )
     }
 
@@ -293,7 +342,7 @@ final class HealthKitService: HealthDataProviding {
         guard isAvailable else {
             throw HealthKitServiceError.unavailable
         }
-        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
+        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric.descriptor) else {
             return []
         }
         let predicate = HKQuery.predicateForSamples(
@@ -305,6 +354,7 @@ final class HealthKitService: HealthDataProviding {
             key: HKSampleSortIdentifierEndDate,
             ascending: false
         )
+        let fetchers = seriesFetchers
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HealthRecord], Error>) in
             let once = ContinuationGuard()
             let query = HKSampleQuery(
@@ -319,11 +369,25 @@ final class HealthKitService: HealthDataProviding {
                     return
                 }
                 // Map on HealthKit's callback thread so only Sendable values
-                // cross the continuation.
-                let records = (samples ?? []).compactMap {
-                    HealthKitRecordMapper.makeRecord(from: $0, metric: metric)
+                // cross the continuation. Series expansion needs async work,
+                // so the callback hands over mapped samples and the task
+                // expands below.
+                let mapped = (samples ?? []).compactMap {
+                    HealthKitRecordMapper.makeMappedSample(from: $0, metric: metric)
                 }
-                continuation.resume(returning: records)
+                Task {
+                    do {
+                        let records = try await Self.expandSeries(
+                            mapped,
+                            metric: metric,
+                            using: healthStore,
+                            seriesFetchers: fetchers
+                        )
+                        continuation.resume(returning: records)
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
             }
             healthStore.execute(query)
         }
@@ -335,11 +399,11 @@ final class HealthKitService: HealthDataProviding {
         predicate: NSPredicate,
         anchor: HKQueryAnchor?,
         limit: Int
-    ) async throws -> HealthChangePage {
-        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
-            return HealthChangePage(additions: [], deletions: [], anchorData: Self.serialize(anchor), isFull: false)
+    ) async throws -> (additions: [MappedSample], deletions: [DeletedRecord], anchorData: Data?, isFull: Bool) {
+        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric.descriptor) else {
+            return ([], [], Self.serialize(anchor), false)
         }
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HealthChangePage, Error>) in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<([MappedSample], [DeletedRecord], Data?, Bool), Error>) in
             let once = ContinuationGuard()
             let queryBox = QueryBox()
             let query = HKAnchoredObjectQuery(
@@ -359,8 +423,8 @@ final class HealthKitService: HealthDataProviding {
                 // Map on HealthKit's callback thread so only Sendable values
                 // cross the continuation. Deletions are captured as events
                 // here: they cannot be recovered by re-querying later.
-                let additions = (samples ?? []).compactMap {
-                    HealthKitRecordMapper.makeRecord(from: $0, metric: metric)
+                let mapped = (samples ?? []).compactMap {
+                    HealthKitRecordMapper.makeMappedSample(from: $0, metric: metric)
                 }
                 // HKDeletedObject exposes only the UUID; the deletion event
                 // carries the capture time as its interval.
@@ -373,13 +437,13 @@ final class HealthKitService: HealthDataProviding {
                         endDate: capturedAt
                     )
                 }
-                continuation.resume(returning: HealthChangePage(
-                    additions: additions,
-                    deletions: deletions,
-                    anchorData: Self.serialize(newAnchor),
+                continuation.resume(returning: (
+                    mapped,
+                    deletions,
+                    Self.serialize(newAnchor),
                     // The query limit applies to new samples; a full page of
                     // additions marks a pagination boundary for the pager.
-                    isFull: (samples?.count ?? 0) >= limit
+                    (samples?.count ?? 0) >= limit
                 ))
             }
             queryBox.query = query
@@ -396,9 +460,7 @@ final class HealthKitService: HealthDataProviding {
         guard isAvailable else {
             throw HealthKitServiceError.unavailable
         }
-        let sampleTypes = HealthMetric.allCases
-            .filter { metrics.contains($0) }
-            .compactMap { HealthKitRecordMapper.sampleType(for: $0) }
+        let sampleTypes = HealthKitRecordMapper.sampleTypes(for: metrics)
         try await observers.start(for: sampleTypes, handler: handler)
     }
 
@@ -436,6 +498,9 @@ enum HealthKitServiceError: LocalizedError, Equatable {
     /// A newer registration or a teardown replaced this one while it was
     /// still being established.
     case registrationSuperseded
+    /// A metric whose records continue into a series was read without a
+    /// series loader configured — a wiring bug, not a runtime condition.
+    case seriesFetcherUnavailable(metric: String)
 
     var errorDescription: String? {
         switch self {
@@ -449,6 +514,8 @@ enum HealthKitServiceError: LocalizedError, Equatable {
             "The stored synchronization checkpoint is unreadable; it will be rebuilt from the initial window."
         case .registrationSuperseded:
             "Background observation was replaced before it finished starting."
+        case .seriesFetcherUnavailable(let metric):
+            "The \(metric) series could not be read because its loader is not configured."
         }
     }
 

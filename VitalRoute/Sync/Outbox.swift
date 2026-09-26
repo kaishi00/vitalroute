@@ -53,17 +53,25 @@ actor Outbox {
 
     static let capacityLimit = 10_000
     static let deliveryBatchSize = 200
+    /// Byte budget for one delivery batch. Event files are exactly the
+    /// encoded wire changes, so file size is the wire contribution; the
+    /// budget keeps series-chunk batches (whose records are far larger than
+    /// ordinary samples) from exceeding the receiver's body limit. Headroom
+    /// covers batch framing and per-change wrappers.
+    static let deliveryBatchByteLimit = 8 * 1024 * 1024
 
     private struct Entry {
         let sequence: UInt64
         let eventID: String
         let lane: Lane
         let fileName: String
+        let fileSize: Int
     }
 
     private let directory: URL
     private let protection: FileProtectionType
     private let capacityLimit: Int
+    private let deliveryByteLimit: Int
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var nextSequence: UInt64 = 0
@@ -76,11 +84,13 @@ actor Outbox {
     init(
         directory: URL,
         protection: FileProtectionType = .completeUntilFirstUserAuthentication,
-        capacityLimit: Int = Outbox.capacityLimit
+        capacityLimit: Int = Outbox.capacityLimit,
+        deliveryByteLimit: Int = Outbox.deliveryBatchByteLimit
     ) {
         self.directory = directory.appendingPathComponent("outbox", isDirectory: true)
         self.protection = protection
         self.capacityLimit = capacityLimit
+        self.deliveryByteLimit = deliveryByteLimit
     }
 
     func prepare() throws {
@@ -115,7 +125,8 @@ actor Outbox {
                     sequence: parsed.sequence,
                     eventID: parsed.eventID,
                     lane: parsed.lane,
-                    fileName: name
+                    fileName: name,
+                    fileSize: Self.fileSize(of: directory.appendingPathComponent(name))
                 ))
             }
         }
@@ -163,7 +174,8 @@ actor Outbox {
                 sequence: nextSequence,
                 eventID: event.eventID,
                 lane: lane,
-                fileName: name
+                fileName: name,
+                fileSize: data.count
             ))
             written += 1
         }
@@ -197,20 +209,36 @@ actor Outbox {
         return PendingSnapshot(events: events, totalPending: index.count, quarantinedCount: quarantined)
     }
 
-    /// Live events first, topped up with backfill events to a full batch.
-    /// Scans the index once and stops as soon as the batch is full.
+    /// Live events first, topped up with backfill events to a full batch,
+    /// bounded by both the event count and the byte budget. Scans the index
+    /// once and stops as soon as a limit is reached; a single oversized
+    /// event still ships alone (a legal batch of one).
     private func pickBatchEntries() -> [Entry] {
         var chosen: [Entry] = []
-        chosen.reserveCapacity(Self.deliveryBatchSize)
-        for entry in index where entry.lane == .live {
+        var bytes = 0
+        func admit(_ entry: Entry) -> Bool {
+            if chosen.count == Self.deliveryBatchSize {
+                return false
+            }
+            if !chosen.isEmpty, bytes + entry.fileSize > deliveryByteLimit {
+                return false
+            }
             chosen.append(entry)
-            if chosen.count == Self.deliveryBatchSize { return chosen }
+            bytes += entry.fileSize
+            return true
+        }
+        for entry in index where entry.lane == .live {
+            if !admit(entry) { return chosen }
         }
         for entry in index where entry.lane == .backfill {
-            chosen.append(entry)
-            if chosen.count == Self.deliveryBatchSize { break }
+            if !admit(entry) { break }
         }
         return chosen
+    }
+
+    private static func fileSize(of url: URL) -> Int {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.intValue ?? 0
     }
 
     /// Keeps a corrupt file for inspection without letting it block the

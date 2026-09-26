@@ -290,7 +290,7 @@ final class AutomaticSyncEngine {
 
     /// Enables automatic sync. Foreground user action: requests HealthKit
     /// authorization for the selection and verifies the receiver supports
-    /// contract v2 (deletions) before any background work is armed.
+    /// contract v3 (deletions) before any background work is armed.
     func enable(
         destination endpoint: String,
         token bearerToken: String?,
@@ -351,7 +351,7 @@ final class AutomaticSyncEngine {
             )
             guard health.supportsDeletions else {
                 guard isCurrent(generation) else { return superseded("the capability check") }
-                let message = "The destination receiver does not support deletions (contract v2). Update it to a v2 receiver, then try again. Manual sync keeps working."
+                let message = "The destination receiver does not support deletions (contract v3). Update it to a v3 receiver, then try again. Manual sync keeps working."
                 lastStatusMessage = message
                 return .failed(message: message)
             }
@@ -1027,7 +1027,7 @@ final class AutomaticSyncEngine {
         let desiredWindowStart = BackfillDepth.stored(in: defaults)
             .windowStart(from: now())
         var backfillPending = ((try? await outbox.laneCounts())?.backfill) ?? 0
-        for metric in HealthMetric.allCases where selectedMetrics.contains(metric) {
+        for metric in MetricCatalog.metrics.map(\.metric) where selectedMetrics.contains(metric) {
             try Task.checkCancellation()
 
             let checkpoint = await stateStore.loadCheckpoint(for: metric)

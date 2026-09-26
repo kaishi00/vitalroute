@@ -36,24 +36,63 @@ final class ReceiverIntegrationTests: XCTestCase {
     private let missingEnvironmentMessage =
         "Set VITALROUTE_INTEGRATION_URL and VITALROUTE_INTEGRATION_TOKEN to run the live receiver integration."
 
-    private func syntheticPayload(count: Int) -> SyncPayload {
+    /// Synthetic records covering every contract-v3 kind. Ids are unique
+    /// per call, so retries of the SAME batch are idempotent while different
+    /// tests never collide.
+    private func syntheticChanges(count: Int) -> [SyncChangeEvent] {
         let base = Date(timeIntervalSince1970: 1_760_000_000)
-        var records: [HealthRecord] = []
-        records.reserveCapacity(count)
+        let seriesID = UUID()
+        var changes: [SyncChangeEvent] = []
+        changes.reserveCapacity(count)
         for index in 0..<count {
-            let isSteps = index % 2 == 0
-            let offsetMinutes = Double(index) * 60
-            let record = HealthRecord(
-                id: UUID(),
-                metric: isSteps ? .steps : .heartRate,
-                value: Double(60 + index),
-                unit: isSteps ? "count" : "count/min",
-                startDate: base.addingTimeInterval(offsetMinutes),
-                endDate: base.addingTimeInterval(offsetMinutes + 30)
-            )
-            records.append(record)
+            let offset = Double(index) * 60
+            let start = base.addingTimeInterval(offset)
+            let end = start.addingTimeInterval(30)
+            let record: HealthRecord
+            switch index % 6 {
+            case 0:
+                record = HealthRecord(
+                    id: UUID(), metric: .steps, startDate: start, endDate: end,
+                    data: .quantity(QuantityData(value: Double(8000 + index), unit: "count")))
+            case 1:
+                record = HealthRecord(
+                    id: UUID(), metric: .heartRate, startDate: start, endDate: end,
+                    data: .quantity(QuantityData(value: Double(60 + index), unit: "count/min")))
+            case 2:
+                record = HealthRecord(
+                    id: UUID(), metric: .sleep, startDate: start, endDate: start.addingTimeInterval(1800),
+                    data: .category(CategoryData(value: 3, name: "asleepREM")))
+            case 3:
+                record = HealthRecord(
+                    id: UUID(), metric: HealthMetric(rawValue: "bloodPressure")!, startDate: start, endDate: start,
+                    data: .correlation(CorrelationData(components: [
+                        CorrelationComponent(metric: "bloodPressureSystolic", value: 122, unit: "mmHg"),
+                        CorrelationComponent(metric: "bloodPressureDiastolic", value: 78, unit: "mmHg"),
+                    ])))
+            case 4:
+                record = HealthRecord(
+                    id: UUID(), metric: .workouts, startDate: start, endDate: end,
+                    data: .workout(WorkoutData(
+                        activityType: "running",
+                        activityTypeRawValue: 52,
+                        duration: 1920,
+                        totalEnergyKilocalories: 331,
+                        totalDistanceMeters: 5210)))
+            default:
+                record = HealthRecord(
+                    id: HealthKitRecordMapper.deterministicChunkID(seriesID: seriesID, chunkIndex: index / 6),
+                    metric: .heartRate, startDate: start, endDate: end,
+                    data: .series(SeriesData(
+                        seriesType: "syntheticSeries",
+                        seriesID: seriesID,
+                        parentID: nil,
+                        chunkIndex: index / 6,
+                        channels: ["t", "v"],
+                        points: [[0, 1], [0.5, 2], [1, 3]])))
+            }
+            changes.append(.upsert(record))
         }
-        return SyncPayload(records: records)
+        return changes
     }
 
     func testConnectionTestAgainstLiveReceiver() async throws {
@@ -66,7 +105,7 @@ final class ReceiverIntegrationTests: XCTestCase {
         }
 
         XCTAssertEqual(response.status, "ok")
-        XCTAssertEqual(response.apiVersion, 2)
+        XCTAssertEqual(response.apiVersion, 3)
         XCTAssertTrue(response.supportsDeletions, "the live receiver must advertise deletion support for this suite")
     }
 
@@ -75,17 +114,17 @@ final class ReceiverIntegrationTests: XCTestCase {
         let authorization = DestinationAuthorization(bearerToken: configuration.token)
         let client = self.client
         let endpoint = configuration.endpoint
-        let payload = syntheticPayload(count: 6)
+        let changes = syntheticChanges(count: 6)
 
         let first = try await awaitWithTimeout {
-            try await client.send(payload, to: endpoint, authorization: authorization)
+            try await client.sendChanges(changes, batchID: UUID(), to: endpoint, authorization: authorization)
         }
         XCTAssertEqual(first.accepted, 6)
         XCTAssertEqual(first.duplicates, 0)
 
         // Retrying the identical batch must not duplicate records.
         let retry = try await awaitWithTimeout {
-            try await client.send(payload, to: endpoint, authorization: authorization)
+            try await client.sendChanges(changes, batchID: UUID(), to: endpoint, authorization: authorization)
         }
         XCTAssertEqual(retry.accepted, 0)
         XCTAssertEqual(retry.duplicates, 6)
@@ -95,11 +134,11 @@ final class ReceiverIntegrationTests: XCTestCase {
         let configuration = try integrationConfiguration()
         let authorization = DestinationAuthorization(bearerToken: "wrong-token-0123456789")
         let client = self.client
-        let payload = syntheticPayload(count: 2)
+        let changes = syntheticChanges(count: 2)
 
         do {
             _ = try await awaitWithTimeout {
-                try await client.send(payload, to: configuration.endpoint, authorization: authorization)
+                try await client.sendChanges(changes, batchID: UUID(), to: configuration.endpoint, authorization: authorization)
             }
             XCTFail("expected authentication failure")
         } catch let error as DestinationClientError {
@@ -123,10 +162,9 @@ final class ReceiverIntegrationTests: XCTestCase {
             .upsert(HealthRecord(
                 id: id,
                 metric: .steps,
-                value: 100,
-                unit: "count",
                 startDate: base.addingTimeInterval(offset),
-                endDate: base.addingTimeInterval(offset + 60)
+                endDate: base.addingTimeInterval(offset + 60),
+                data: .quantity(QuantityData(value: 100, unit: "count"))
             ))
         }
         let initial: [SyncChangeEvent] = [

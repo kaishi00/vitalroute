@@ -26,7 +26,7 @@ final class ExportSelectionStore {
 
     /// Selected categories in catalog order for deterministic payloads.
     var orderedSelection: [HealthMetric] {
-        HealthMetric.allCases.filter { selectedMetrics.contains($0) }
+        MetricCatalog.selectableMetrics.map(\.metric).filter { selectedMetrics.contains($0) }
     }
 
     func setMetric(_ metric: HealthMetric, selected: Bool) {

@@ -162,7 +162,7 @@ actor SyncStateStore {
     }
 
     func clearAllCheckpoints() {
-        for metric in HealthMetric.allCases {
+        for metric in MetricCatalog.metrics.map(\.metric) {
             clearCheckpoint(for: metric)
         }
     }

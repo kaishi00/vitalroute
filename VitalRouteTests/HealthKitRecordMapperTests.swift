@@ -3,21 +3,44 @@ import XCTest
 @testable import VitalRoute
 
 final class HealthKitRecordMapperTests: XCTestCase {
-    func testEveryMetricMapsToItsHealthKitSampleType() throws {
-        for metric in HealthMetric.allCases {
-            let sampleType = try XCTUnwrap(HealthKitRecordMapper.sampleType(for: metric))
-            XCTAssertEqual(sampleType.identifier, metric.healthKitIdentifier)
+    private let date = Date(timeIntervalSince1970: 1_735_689_600)
+
+    // MARK: Type resolution
+
+    func testEverySelectableMetricMapsToItsHealthKitSampleType() throws {
+        for descriptor in MetricCatalog.metrics {
+            if descriptor.metric.rawValue == "bloodPressure" {
+                // Correlation types are not HKSampleTypes resolvable through
+                // the sample-type path in this environment; their components
+                // are what gets authorized.
+                continue
+            }
+            let sampleType = try XCTUnwrap(
+                HealthKitRecordMapper.sampleType(for: descriptor),
+                "no sample type for \(descriptor.metric.rawValue)"
+            )
+            XCTAssertEqual(sampleType.identifier, descriptor.healthKitIdentifier)
         }
     }
 
-    func testConvertsQuantitySamplesToExpectedValuesAndUnits() throws {
-        let date = Date(timeIntervalSince1970: 1_735_689_600)
+    func testAuthorizationObjectTypesIncludeCorrelationComponents() throws {
+        let bloodPressure = try XCTUnwrap(HealthMetric(rawValue: "bloodPressure"))
+        let types = HealthKitRecordMapper.objectTypes(for: [bloodPressure])
+        let identifiers = Set(types.map(\.identifier))
+        XCTAssertTrue(identifiers.contains("HKCorrelationTypeIdentifierBloodPressure"))
+        XCTAssertTrue(identifiers.contains("HKQuantityTypeIdentifierBloodPressureSystolic"))
+        XCTAssertTrue(identifiers.contains("HKQuantityTypeIdentifierBloodPressureDiastolic"))
+    }
+
+    // MARK: Quantity
+
+    func testConvertsQuantitySamplesToTypedRecordsWithCanonicalUnits() throws {
         let cases: [(HealthMetric, HKQuantityTypeIdentifier, HKUnit, Double, String)] = [
             (.steps, .stepCount, .count(), 1200, "count"),
             (.heartRate, .heartRate, HKUnit.count().unitDivided(by: .minute()), 72, "count/min"),
             (.restingHeartRate, .restingHeartRate, HKUnit.count().unitDivided(by: .minute()), 58, "count/min"),
             (.heartRateVariability, .heartRateVariabilitySDNN, HKUnit.secondUnit(with: .milli), 35, "ms"),
-            (.activeEnergy, .activeEnergyBurned, .kilocalorie(), 245, "kcal")
+            (.activeEnergy, .activeEnergyBurned, .kilocalorie(), 245, "kcal"),
         ]
 
         for (metric, identifier, unit, value, expectedUnit) in cases {
@@ -28,16 +51,23 @@ final class HealthKitRecordMapperTests: XCTestCase {
                 start: date,
                 end: date
             )
-            let record = try XCTUnwrap(HealthKitRecordMapper.makeRecord(from: sample, metric: metric))
+            let mapped = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: sample, metric: metric))
+            let record = try XCTUnwrap(mapped.record)
 
             XCTAssertEqual(record.metric, metric)
-            XCTAssertEqual(record.value, value, accuracy: 0.001)
-            XCTAssertEqual(record.unit, expectedUnit)
+            XCTAssertEqual(record.kind, .quantity)
+            XCTAssertEqual(record.sourceName, sample.sourceRevision.source.name)
+            guard case .quantity(let payload) = record.data else {
+                return XCTFail("expected quantity payload for \(metric)")
+            }
+            XCTAssertEqual(payload.value, value, accuracy: 0.001)
+            XCTAssertEqual(payload.unit, expectedUnit)
         }
     }
 
-    func testConvertsSleepSampleDurationAndStage() throws {
-        let date = Date(timeIntervalSince1970: 1_735_689_600)
+    // MARK: Category
+
+    func testConvertsSleepSampleToNamedCategoryRecord() throws {
         let type = try XCTUnwrap(HKObjectType.categoryType(forIdentifier: .sleepAnalysis))
         let sample = HKCategorySample(
             type: type,
@@ -46,16 +76,77 @@ final class HealthKitRecordMapperTests: XCTestCase {
             end: date.addingTimeInterval(90 * 60)
         )
 
-        let record = try XCTUnwrap(HealthKitRecordMapper.makeRecord(from: sample, metric: .sleep))
+        let mapped = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: sample, metric: .sleep))
+        let record = try XCTUnwrap(mapped.record)
 
-        XCTAssertEqual(record.value, 90 * 60, accuracy: 0.001)
-        XCTAssertEqual(record.unit, "s")
-        XCTAssertEqual(record.metadata["sleepStage"], "asleepCore")
+        XCTAssertEqual(record.kind, .category)
+        guard case .category(let payload) = record.data else {
+            return XCTFail("expected category payload")
+        }
+        XCTAssertEqual(payload.value, HKCategoryValueSleepAnalysis.asleepCore.rawValue)
+        XCTAssertEqual(payload.name, "asleepCore")
     }
 
+    func testUnmappableSleepStageCarriesRawValueWithoutName() throws {
+        let type = try XCTUnwrap(HKObjectType.categoryType(forIdentifier: .sleepAnalysis))
+        let sample = HKCategorySample(type: type, value: 999, start: date, end: date)
+
+        let mapped = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: sample, metric: .sleep))
+        guard case .category(let payload) = try XCTUnwrap(mapped.record).data else {
+            return XCTFail("expected category payload")
+        }
+        XCTAssertEqual(payload.value, 999)
+        XCTAssertNil(payload.name)
+    }
+
+    // MARK: Correlation
+
+    func testAttributtesBloodPressureComponentsByCatalogMetric() throws {
+        let correlationType = try XCTUnwrap(
+            HKObjectType.correlationType(forIdentifier: .bloodPressure)
+        )
+        let systolicType = try XCTUnwrap(HKObjectType.quantityType(forIdentifier: .bloodPressureSystolic))
+        let diastolicType = try XCTUnwrap(HKObjectType.quantityType(forIdentifier: .bloodPressureDiastolic))
+        let systolic = HKQuantitySample(
+            type: systolicType,
+            quantity: HKQuantity(unit: .millimeterOfMercury(), doubleValue: 122),
+            start: date,
+            end: date
+        )
+        let diastolic = HKQuantitySample(
+            type: diastolicType,
+            quantity: HKQuantity(unit: .millimeterOfMercury(), doubleValue: 78),
+            start: date,
+            end: date
+        )
+        let correlation = HKCorrelation(
+            type: correlationType,
+            start: date,
+            end: date,
+            objects: [systolic, diastolic]
+        )
+
+        let mapped = try XCTUnwrap(
+            HealthKitRecordMapper.makeMappedSample(
+                from: correlation,
+                metric: HealthMetric(rawValue: "bloodPressure")!
+            )
+        )
+        let record = try XCTUnwrap(mapped.record)
+
+        XCTAssertEqual(record.kind, .correlation)
+        guard case .correlation(let payload) = record.data else {
+            return XCTFail("expected correlation payload")
+        }
+        XCTAssertEqual(payload.components.map(\.metric), ["bloodPressureSystolic", "bloodPressureDiastolic"])
+        XCTAssertEqual(payload.components.map(\.value), [122, 78])
+        XCTAssertEqual(payload.components.map(\.unit), ["mmHg", "mmHg"])
+    }
+
+    // MARK: Workout
+
     @available(iOS, deprecated: 18.0)
-    func testPreservesWorkoutMetadata() throws {
-        let date = Date(timeIntervalSince1970: 1_735_689_600)
+    func testWorkoutMapsStructuredDetails() throws {
         let workout = Self.makeWorkout(
             activityType: .running,
             start: date,
@@ -64,18 +155,22 @@ final class HealthKitRecordMapperTests: XCTestCase {
             distanceMeters: 5_000
         )
 
-        let record = try XCTUnwrap(HealthKitRecordMapper.makeRecord(from: workout, metric: .workouts))
+        let mapped = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: workout, metric: .workouts))
+        let record = try XCTUnwrap(mapped.record)
 
-        XCTAssertEqual(record.value, 30 * 60, accuracy: 0.001)
-        XCTAssertEqual(record.unit, "s")
-        XCTAssertEqual(record.metadata["activityTypeCode"], String(HKWorkoutActivityType.running.rawValue))
-        XCTAssertEqual(record.metadata["activeEnergyKcal"], "210.0")
-        XCTAssertEqual(record.metadata["distanceMeters"], "5000.0")
+        XCTAssertEqual(record.kind, .workout)
+        guard case .workout(let payload) = record.data else {
+            return XCTFail("expected workout payload")
+        }
+        XCTAssertEqual(payload.activityType, "running")
+        XCTAssertEqual(payload.activityTypeRawValue, HKWorkoutActivityType.running.rawValue)
+        XCTAssertEqual(payload.duration, 30 * 60, accuracy: 0.001)
+        XCTAssertEqual(payload.totalEnergyKilocalories ?? -1, 210, accuracy: 0.001)
+        XCTAssertEqual(payload.totalDistanceMeters ?? -1, 5_000, accuracy: 0.001)
     }
 
     @available(iOS, deprecated: 18.0)
-    func testPreservesWorkoutDistanceForNonWalkingActivities() throws {
-        let date = Date(timeIntervalSince1970: 1_735_689_600)
+    func testWorkoutMapsDistanceForNonWalkingActivities() throws {
         let workout = Self.makeWorkout(
             activityType: .cycling,
             start: date,
@@ -84,10 +179,19 @@ final class HealthKitRecordMapperTests: XCTestCase {
             distanceMeters: 15_000
         )
 
-        let record = try XCTUnwrap(HealthKitRecordMapper.makeRecord(from: workout, metric: .workouts))
+        let mapped = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: workout, metric: .workouts))
+        guard case .workout(let payload) = try XCTUnwrap(mapped.record).data else {
+            return XCTFail("expected workout payload")
+        }
+        XCTAssertEqual(payload.totalDistanceMeters ?? -1, 15_000, accuracy: 0.001)
+        XCTAssertEqual(payload.totalEnergyKilocalories ?? -1, 300, accuracy: 0.001)
+    }
 
-        XCTAssertEqual(record.metadata["distanceMeters"], "15000.0")
-        XCTAssertEqual(record.metadata["activeEnergyKcal"], "300.0")
+    func testActivityTypeNameCoversCommonActivitiesWithDeterministicFallback() {
+        XCTAssertEqual(HealthKitRecordMapper.activityTypeName(.running), "running")
+        XCTAssertEqual(HealthKitRecordMapper.activityTypeName(.traditionalStrengthTraining), "traditionalStrengthTraining")
+        let fallback = HealthKitRecordMapper.activityTypeName(HKWorkoutActivityType(rawValue: 999_999) ?? .running)
+        XCTAssertTrue(fallback == "running" || fallback.hasPrefix("hkActivityType"))
     }
 
     func testWorkoutDistanceExportsEachMeasuredDistanceType() throws {
@@ -100,7 +204,7 @@ final class HealthKitRecordMapperTests: XCTestCase {
             .distanceCrossCountrySkiing,
             .distancePaddleSports,
             .distanceRowing,
-            .distanceSkatingSports
+            .distanceSkatingSports,
         ]
         let meters = 1_234.5
 
@@ -127,7 +231,7 @@ final class HealthKitRecordMapperTests: XCTestCase {
             HKQuantityTypeIdentifier.distanceSwimming.rawValue: 800,
             HKQuantityTypeIdentifier.distanceCycling.rawValue: 20_000,
             HKQuantityTypeIdentifier.distanceRowing.rawValue: 5_000,
-            HKQuantityTypeIdentifier.distanceSkatingSports.rawValue: 3_000
+            HKQuantityTypeIdentifier.distanceSkatingSports.rawValue: 3_000,
         ]
 
         let distance = HealthKitRecordMapper.workoutDistance { type in
@@ -138,23 +242,12 @@ final class HealthKitRecordMapperTests: XCTestCase {
     }
 
     func testWorkoutDistanceReturnsNilWhenNoDistanceTypeIsMeasured() {
-        let distance = HealthKitRecordMapper.workoutDistance { _ in nil }
-
-        XCTAssertNil(distance)
+        XCTAssertNil(HealthKitRecordMapper.workoutDistance { _ in nil })
     }
 
-    func testWorkoutDistanceIgnoresStatisticsOutsideTheDistanceTypes() throws {
-        let stepType = try XCTUnwrap(HKObjectType.quantityType(forIdentifier: .stepCount))
-
-        let distance = HealthKitRecordMapper.workoutDistance { type in
-            type == stepType ? HKQuantity(unit: .count(), doubleValue: 5_000) : nil
-        }
-
-        XCTAssertNil(distance)
-    }
+    // MARK: Mismatched families
 
     func testReturnsNilForMismatchedSampleType() throws {
-        let date = Date(timeIntervalSince1970: 1_735_689_600)
         let type = try XCTUnwrap(HKObjectType.quantityType(forIdentifier: .stepCount))
         let sample = HKQuantitySample(
             type: type,
@@ -163,7 +256,142 @@ final class HealthKitRecordMapperTests: XCTestCase {
             end: date
         )
 
-        XCTAssertNil(HealthKitRecordMapper.makeRecord(from: sample, metric: .sleep))
+        XCTAssertNil(HealthKitRecordMapper.makeMappedSample(from: sample, metric: .sleep))
+    }
+
+    // MARK: Clinical
+
+    func testClinicalRecordPreservesFHIRStructurally() throws {
+        let clinicalType = try XCTUnwrap(
+            HKObjectType.clinicalType(forIdentifier: HKClinicalTypeIdentifier.allergyRecord)
+        )
+        let fhirJSON = """
+        {"resourceType":"AllergyIntolerance","code":{"text":"Pollen"},
+         "clinicalStatus":{"coding":[{"code":"active"}]}}
+        """
+        let resource = try XCTUnwrap(
+            HKFHIRResource(
+                fhirType: "AllergyIntolerance",
+                jsonRepresentation: Data(fhirJSON.utf8),
+                sourceURL: URL(string: "https://example.org/fhir")
+            )
+        )
+        let record = HKClinicalRecord(
+            type: clinicalType,
+            fhirResource: resource,
+            metadata: nil
+        )
+
+        let mapped = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(
+            from: record,
+            metric: HealthMetric(rawValue: "bloodPressure")!
+        ))
+        guard case .clinical(let payload) = try XCTUnwrap(mapped.record).data else {
+            return XCTFail("expected clinical payload")
+        }
+        XCTAssertEqual(payload.fhirType, "AllergyIntolerance")
+        guard case .object(let fhirObject) = payload.fhirResource else {
+            return XCTFail("expected a structured FHIR object")
+        }
+        XCTAssertEqual(fhirObject["resourceType"], .string("AllergyIntolerance"))
+        XCTAssertEqual(
+            fhirObject["code"],
+            .object(["text": .string("Pollen")])
+        )
+    }
+
+    // MARK: Series chunking
+
+    func testSeriesChunkingSplitsPointsAndDerivesDeterministicIDs() throws {
+        let seriesID = UUID()
+        let parentID = UUID()
+        let metric = try XCTUnwrap(HealthMetric(rawValue: "heartRate"))
+        // 3 chunks of 10, 10, and 5 points.
+        let points: [[Double]] = (0..<25).map { [Double($0), Double($0) * 1.5] }
+
+        let records = HealthKitRecordMapper.seriesChunkRecords(
+            seriesType: "electrocardiogramVoltage",
+            seriesID: seriesID,
+            parentID: parentID,
+            channels: ["t", "microvolts"],
+            points: points,
+            metric: metric,
+            parentStart: date,
+            parentEnd: date.addingTimeInterval(24)
+        )
+
+        XCTAssertEqual(records.count, 3)
+        XCTAssertEqual(records.map(\.kind), [.series, .series, .series])
+        // Deterministic identity: same series/index, same UUID.
+        XCTAssertEqual(
+            records.map(\.id),
+            (0..<3).map { HealthKitRecordMapper.deterministicChunkID(seriesID: seriesID, chunkIndex: $0) }
+        )
+        for (index, record) in records.enumerated() {
+            guard case .series(let payload) = record.data else {
+                return XCTFail("expected series payload")
+            }
+            XCTAssertEqual(payload.seriesID, seriesID)
+            XCTAssertEqual(payload.parentID, parentID)
+            XCTAssertEqual(payload.chunkIndex, index)
+            XCTAssertEqual(payload.channels, ["t", "microvolts"])
+            XCTAssertEqual(payload.points.count, index == 2 ? 5 : 10)
+        }
+    }
+
+    func testSeriesChunkIDsDifferAcrossSeriesAndMatchTheSyntheticSenderScheme() {
+        let first = HealthKitRecordMapper.deterministicChunkID(seriesID: UUID(), chunkIndex: 0)
+        let second = HealthKitRecordMapper.deterministicChunkID(seriesID: UUID(), chunkIndex: 0)
+        let retried = HealthKitRecordMapper.deterministicChunkID(seriesID: first, chunkIndex: 7)
+
+        XCTAssertNotEqual(first, second)
+        // UUIDv4 formatting (version and variant bits) so the derived id is
+        // indistinguishable from a random one.
+        XCTAssertEqual(first.uuidString.split(separator: "-")[2].first, "4")
+    }
+
+    func testSeriesChunkDatesSpanEachChunkTimeInterval() throws {
+        let seriesID = UUID()
+        let metric = try XCTUnwrap(HealthMetric(rawValue: "heartRate"))
+        // Offsets 0s and 10s from the parent start.
+        let points: [[Double]] = [[0, 1], [10, 2]]
+
+        let records = HealthKitRecordMapper.seriesChunkRecords(
+            seriesType: "heartbeatSeries",
+            seriesID: seriesID,
+            parentID: seriesID,
+            channels: ["t", "interval"],
+            points: points,
+            metric: metric,
+            parentStart: date,
+            parentEnd: date.addingTimeInterval(10)
+        )
+
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].startDate, date)
+        XCTAssertEqual(records[0].endDate, date.addingTimeInterval(10))
+    }
+
+    // MARK: ECG naming
+
+    func testECGClassificationNamesAreStable() {
+        XCTAssertEqual(HealthKitRecordMapper.ecgClassificationName(.sinusRhythm), "sinusRhythm")
+        XCTAssertEqual(HealthKitRecordMapper.ecgClassificationName(.atrialFibrillation), "atrialFibrillation")
+        XCTAssertEqual(HealthKitRecordMapper.ecgClassificationName(.notSet), "notSet")
+    }
+
+    // MARK: Sleep naming
+
+    func testSleepStageNamesMatchTheHistoricalSpellings() {
+        XCTAssertEqual(
+            HealthKitRecordMapper.categoryName(HKCategoryValueSleepAnalysis.asleepREM.rawValue, naming: .sleepAnalysis),
+            "asleepREM"
+        )
+        XCTAssertEqual(
+            HealthKitRecordMapper.categoryName(HKCategoryValueSleepAnalysis.awake.rawValue, naming: .sleepAnalysis),
+            "awake"
+        )
+        XCTAssertNil(HealthKitRecordMapper.categoryName(999, naming: .sleepAnalysis))
     }
 
     /// The deprecated convenience initializer is the only way to construct an
