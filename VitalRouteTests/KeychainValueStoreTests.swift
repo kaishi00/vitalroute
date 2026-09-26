@@ -23,7 +23,7 @@ final class KeychainValueStoreTests: XCTestCase {
         SecItemDelete(baseQuery(account) as CFDictionary)
     }
 
-    private func accessibility(of account: String) -> CFString? {
+    private func accessibility(of account: String) -> String? {
         var query = baseQuery(account)
         query[kSecReturnAttributes as String] = true
         var result: CFTypeRef?
@@ -32,7 +32,9 @@ final class KeychainValueStoreTests: XCTestCase {
             XCTFail("SecItemCopyMatching failed with status \(status)")
             return nil
         }
-        return (result as? [String: Any])?[kSecAttrAccessible as String] as? CFString
+        // kSecAttrAccessible is a toll-free-bridged CFString; comparing the
+        // bridged String against the bridged constant avoids a CF downcast.
+        return (result as? [String: Any])?[kSecAttrAccessible as String] as? String
     }
 
     func testSaveWritesBackgroundAccessibleDeviceOnlyItems() throws {
@@ -45,7 +47,7 @@ final class KeychainValueStoreTests: XCTestCase {
 
         XCTAssertEqual(
             accessibility(of: account),
-            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
             "destination items must stay readable from locked-device background launches"
         )
         XCTAssertEqual(try store.readValue(forKey: account), "https://health.example.org/v1/records")
@@ -68,7 +70,7 @@ final class KeychainValueStoreTests: XCTestCase {
 
         XCTAssertEqual(
             accessibility(of: account),
-            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
             "migration must upgrade existing items, not only future inserts"
         )
         XCTAssertEqual(
