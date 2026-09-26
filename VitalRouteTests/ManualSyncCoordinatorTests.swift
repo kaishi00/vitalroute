@@ -145,6 +145,38 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, ids.count)
     }
 
+    @MainActor
+    func testRecordsExceedingTransportLimitsAreSkippedAndSurfaced() async throws {
+        // A record the receiver would always reject must not poison its
+        // batch: it is skipped, counted, and the run still completes.
+        let poison = HealthRecord(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000009999")!,
+            metric: .steps,
+            startDate: Date(timeIntervalSince1970: 1_735_689_600),
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            metadata: ["blob": String(repeating: "v", count: 600)],
+            data: .quantity(QuantityData(value: 1, unit: "count"))
+        )
+        let sendable = record(1)
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [HealthExportPage(
+            records: [sendable, poison],
+            anchorData: Data("a1".utf8),
+            isFull: false
+        )]
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.skippedRecords, 1)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, 1)
+        XCTAssertEqual(client.sentBatches.count, 1)
+        XCTAssertEqual(client.sentBatches[0].count, 1)
+    }
+
     // MARK: Chunked backfill
 
     @MainActor

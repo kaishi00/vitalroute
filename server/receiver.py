@@ -62,13 +62,11 @@ class InvalidContentLength(Exception):
 
 
 class ReceiverConfig:
-    def __init__(self, token, db_path, max_body_bytes, max_records_per_batch,
-                 allow_schema_reset=False):
+    def __init__(self, token, db_path, max_body_bytes, max_records_per_batch):
         self.token = token
         self.db_path = db_path
         self.max_body_bytes = max_body_bytes
         self.max_records_per_batch = max_records_per_batch
-        self.allow_schema_reset = allow_schema_reset
 
 
 class ReceiverHandler(BaseHTTPRequestHandler):
@@ -458,8 +456,7 @@ def make_server(
 
     server = ReceiverServer((host, port), ReceiverHandler)
     server.receiver_config = ReceiverConfig(
-        token, db_path, max_body_bytes, max_records_per_batch,
-        allow_schema_reset=allow_schema_reset,
+        token, db_path, max_body_bytes, max_records_per_batch
     )
     server.record_store = record_store
 
@@ -522,7 +519,7 @@ def main(argv=None):
             tls_key=args.tls_key,
             allow_schema_reset=os.environ.get("VITALROUTE_ALLOW_SCHEMA_RESET") in ("1", "true", "yes"),
         )
-    except ValueError as error:
+    except (ValueError, storage.IncompatibleSchema) as error:
         raise SystemExit(str(error))
 
     scheme = "https" if (args.tls_cert and args.tls_key) else "http"

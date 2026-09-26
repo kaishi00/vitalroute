@@ -222,7 +222,7 @@ def recent_records(connection, metric=None, limit=20, offset=0):
     response_bytes = 0
     truncated = False
     for row in rows:
-        size = len(row["data_json"] or "") + len(row["metadata_json"] or "") + 256
+        size = len((row["data_json"] or "").encode("utf-8"))             + len((row["metadata_json"] or "").encode("utf-8")) + 256
         if response_bytes + size > MAX_RECENT_RESPONSE_BYTES:
             truncated = True
             break

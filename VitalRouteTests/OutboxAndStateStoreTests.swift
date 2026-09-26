@@ -25,12 +25,13 @@ final class OutboxAndStateStoreTests: XCTestCase {
         SyncStateStore(directory: tempDirectory)
     }
 
-    private func record(_ id: Int, metric: HealthMetric = .steps) -> HealthRecord {
+    private func record(_ id: Int, metric: HealthMetric = .steps, blob: String? = nil) -> HealthRecord {
         HealthRecord(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", id))!,
             metric: metric,
             startDate: Date(timeIntervalSince1970: 1_735_689_600),
             endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            metadata: blob.map { ["blob": $0] } ?? [:],
             data: .quantity(QuantityData(value: Double(id), unit: "count"))
         )
     }
@@ -126,6 +127,26 @@ final class OutboxAndStateStoreTests: XCTestCase {
         let snapshot = try await outbox.nextBatch()
         XCTAssertEqual(snapshot.events.count, 1)
         XCTAssertEqual(snapshot.totalPending, 1)
+    }
+
+    func testByteBudgetMissSkipsOversizedEntryAndKeepsScanning() async throws {
+        // An entry that does not fit the budget is skipped, not fatal:
+        // smaller events behind it still make this batch, and the
+        // oversized one ships alone later.
+        let outbox = Outbox(directory: tempDirectory, deliveryByteLimit: 1_000)
+        try await outbox.prepare()
+        let big = SyncChangeEvent.upsert(record(1, blob: String(repeating: "x", count: 4_000)))
+        let small = SyncChangeEvent.upsert(record(2))
+        _ = try await outbox.append([small, big], lane: .backfill)
+
+        let first = try await outbox.nextBatch()
+        XCTAssertEqual(first.events.map(\.eventID), [small.eventID])
+        XCTAssertEqual(first.skippedOversizedCount, 1)
+
+        await outbox.remove(eventIDs: first.events.map(\.eventID))
+        let second = try await outbox.nextBatch()
+        XCTAssertEqual(second.events.map(\.eventID), [big.eventID])
+        XCTAssertEqual(second.skippedOversizedCount, 0)
     }
 
     func testRemoveOnlyAfterAcknowledgedKeepsOthers() async throws {

@@ -7,9 +7,10 @@ payload as canonical JSON — the receiver stores structure, it does not
 flatten it into per-metric columns.
 
 Schema policy (pre-release, documented in DEPLOYMENT.md): there is no
-migration machinery. A database whose schema_version differs from this
-module's is dropped and recreated on open; the receiver logs a single
-line (never any data) and starts empty.
+migration machinery. A database that does not match this module's schema
+generation blocks startup unless the caller explicitly allows the reset,
+in which case it is dropped and recreated empty; the receiver logs a
+single line (never any data).
 
 Ingestion runs inside a single transaction per batch; the ack is only
 issued after a successful commit. Duplicate ids are ignored (first write
@@ -63,6 +64,15 @@ def _utc_now_text():
 
 class StorageError(Exception):
     pass
+
+
+class IncompatibleSchema(StorageError):
+    """The on-disk database does not match the supported schema generation.
+
+    Raised instead of silently discarding health data. Converting it to a
+    clean startup failure (and opting into the reset) is the caller's
+    decision.
+    """
 
 
 class ChangeCounts:
@@ -131,18 +141,23 @@ class RecordStore:
         connection = self._connect()
         try:
             existing = self._read_schema_version(connection)
-            records_table_exists = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'records'"
-            ).fetchone() is not None
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
             version_mismatch = (
                 existing is not None and str(existing) != str(_SCHEMA_VERSION)
             )
-            # A records table with no declared version is a partial or
+            # Record tables with no declared version are a partial or
             # pre-versioning database: the same incompatible-generation
-            # treatment, because its shape cannot be trusted.
-            unversioned_tables = existing is None and records_table_exists
+            # treatment, because their shape cannot be trusted.
+            unversioned_tables = existing is None and bool(
+                tables & {"records", "deleted_ids"}
+            )
             if (version_mismatch or unversioned_tables) and not self._allow_schema_reset:
-                raise SystemExit(
+                raise IncompatibleSchema(
                     "The database at %s is not schema version %s; refusing to "
                     "start rather than discard health data. Re-sync from the "
                     "device or restore a backup, or explicitly allow the "

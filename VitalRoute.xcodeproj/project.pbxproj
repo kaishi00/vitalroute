@@ -10,6 +10,7 @@
 		04F133BDA725690BF5E7B4D3 /* BackgroundSyncTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91A5DBE27503555D4CB71DD9 /* BackgroundSyncTasks.swift */; };
 		055EF315C0ACA6414663A03B /* BackfillDepth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799C3E429B3AFF5FF3944AEA /* BackfillDepth.swift */; };
 		0A4F28ED7818AC123DC86737 /* ServerSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED7894B4CC321B724420477D /* ServerSetup.swift */; };
+		0AA3ABB1CE2D8A7926A3B971 /* RecordModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 468965CA454422A272815DE8 /* RecordModelTests.swift */; };
 		0BD59D43D392DA78B69D66F8 /* RecordData.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEBFD20E2D7F4819F086EFF1 /* RecordData.swift */; };
 		0C67AFD1CBADACB1A0FF8075 /* SyncWorkGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3294DCD4D709D28C9D343ADD /* SyncWorkGate.swift */; };
 		165DEBBA3DDD258077035B79 /* DestinationCredentialStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51A5216F48B81FFFE4804F1E /* DestinationCredentialStoreTests.swift */; };
@@ -21,9 +22,9 @@
 		270623B4585E6B603C61C24A /* SeriesFetching.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D1AE4A21101E61254B8E62C /* SeriesFetching.swift */; };
 		28BDAA30DC8FC7D1A7466B6F /* DestinationRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20DA533FC7536B6F99F6934 /* DestinationRecoveryTests.swift */; };
 		29378BAB4D04A80C59A3AEFC /* SyncAcknowledgment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1867D25051C387367F3761B0 /* SyncAcknowledgment.swift */; };
+		34979AE6B12BABDB92C0D073 /* RecordWireLimits.swift in Sources */ = {isa = PBXBuildFile; fileRef = 228CC758524A78B091AAD71B /* RecordWireLimits.swift */; };
 		3764D99AFB5EC1848AFC1AF8 /* VitalRouteModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 711E1DD1FC2624EA1E6E61DA /* VitalRouteModel.swift */; };
 		38FE8F4CE03FF89B07BEA143 /* FHIRJSON.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB31E2FB82DE16EDB51189AB /* FHIRJSON.swift */; };
-		455CFE7448618721CD3C731B /* SyncPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */; };
 		459D3293B03D01AD0B0246C0 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DBB21975C9F05A1352B6ADE3 /* Assets.xcassets */; };
 		475A17FA563DBBC2A932511D /* OverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF0B77CA424E9FB356524D3B /* OverviewView.swift */; };
 		4D4BCA61CC398A1E3B16E185 /* HealthMetric.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCF0F120103661DDE2DB95CA /* HealthMetric.swift */; };
@@ -51,6 +52,7 @@
 		C007ECC58B50EA5E527492FD /* DestinationRecoveryCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 024AD14A384F7943559D95E9 /* DestinationRecoveryCoordinator.swift */; };
 		C2BF1EF915A4A58369614D13 /* HealthKitRecordMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CC3628A6EAD92F6AC450B95 /* HealthKitRecordMapper.swift */; };
 		C8F33F484488C940B6676DE7 /* HealthKitRecordMapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE0112885358C8CED8930D04 /* HealthKitRecordMapperTests.swift */; };
+		C984A43A9B61F09A808C79D7 /* RecordWireLimitsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AD84A32FFC13F313B1CA885 /* RecordWireLimitsTests.swift */; };
 		CDE20B962DE63B29863105FE /* HealthMetricTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F6BBF3C7833CE838BA584A /* HealthMetricTests.swift */; };
 		CEFB04E33380CCDDF025A028 /* HealthObserverBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D81123EF8716B80DD719F19 /* HealthObserverBackend.swift */; };
 		D090DCDCDAB54ED48548850C /* ManualSyncCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D43A57F7EF0A32938F96F1A9 /* ManualSyncCoordinatorTests.swift */; };
@@ -84,6 +86,7 @@
 		1867D25051C387367F3761B0 /* SyncAcknowledgment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncAcknowledgment.swift; sourceTree = "<group>"; };
 		1D244659BE71C0EC41544089 /* VitalRouteTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = VitalRouteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1F900E8D27C268308C92106D /* BackfillDepthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillDepthTests.swift; sourceTree = "<group>"; };
+		228CC758524A78B091AAD71B /* RecordWireLimits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordWireLimits.swift; sourceTree = "<group>"; };
 		253F1897B82767544D465728 /* DestinationConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfiguration.swift; sourceTree = "<group>"; };
 		2BEC5CE89D985751A16DDB80 /* HealthRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRecord.swift; sourceTree = "<group>"; };
 		2F8CBF05F56585C49B20A509 /* HealthDataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataView.swift; sourceTree = "<group>"; };
@@ -94,9 +97,11 @@
 		3EC2C1065C0877FBEE1659AB /* DestinationConfigurationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfigurationStore.swift; sourceTree = "<group>"; };
 		4008320A95D4EFD02B848CE8 /* DestinationConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationConfigurationTests.swift; sourceTree = "<group>"; };
 		41D146C98D4771728A2EB763 /* HealthDataProviding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataProviding.swift; sourceTree = "<group>"; };
+		468965CA454422A272815DE8 /* RecordModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordModelTests.swift; sourceTree = "<group>"; };
 		4D81123EF8716B80DD719F19 /* HealthObserverBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthObserverBackend.swift; sourceTree = "<group>"; };
 		4DB6E1A524629690F037A76D /* DestinationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationView.swift; sourceTree = "<group>"; };
 		51A5216F48B81FFFE4804F1E /* DestinationCredentialStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationCredentialStoreTests.swift; sourceTree = "<group>"; };
+		5AD84A32FFC13F313B1CA885 /* RecordWireLimitsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordWireLimitsTests.swift; sourceTree = "<group>"; };
 		5CC3628A6EAD92F6AC450B95 /* HealthKitRecordMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitRecordMapper.swift; sourceTree = "<group>"; };
 		5FD7D248B3B516C8B2CCC5A2 /* AutomaticSyncEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomaticSyncEngineTests.swift; sourceTree = "<group>"; };
 		65FE661EF803A7FA195EA8C9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -132,7 +137,6 @@
 		ED7894B4CC321B724420477D /* ServerSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSetup.swift; sourceTree = "<group>"; };
 		EEBFD20E2D7F4819F086EFF1 /* RecordData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordData.swift; sourceTree = "<group>"; };
 		F1E643F41109A59136822965 /* HealthKitServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitServiceTests.swift; sourceTree = "<group>"; };
-		F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPayloadTests.swift; sourceTree = "<group>"; };
 		F5F466F6BA29E9C78322417C /* HealthObserverCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthObserverCoordinatorTests.swift; sourceTree = "<group>"; };
 		F64AFE0A3CBFA24AE20998D8 /* ManualSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualSyncCoordinator.swift; sourceTree = "<group>"; };
 		F91B0740C51996005F797DAE /* VitalRoute.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VitalRoute.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -241,6 +245,7 @@
 				DCF0F120103661DDE2DB95CA /* HealthMetric.swift */,
 				2BEC5CE89D985751A16DDB80 /* HealthRecord.swift */,
 				EEBFD20E2D7F4819F086EFF1 /* RecordData.swift */,
+				228CC758524A78B091AAD71B /* RecordWireLimits.swift */,
 				1867D25051C387367F3761B0 /* SyncAcknowledgment.swift */,
 				FD0FE789EA58F7F78F6913BE /* SyncChangeEvent.swift */,
 			);
@@ -313,8 +318,9 @@
 				D43A57F7EF0A32938F96F1A9 /* ManualSyncCoordinatorTests.swift */,
 				08B7BA635E61AD44B5356799 /* OutboxAndStateStoreTests.swift */,
 				B8D6728F7FF093E7539BB03E /* ReceiverIntegrationTests.swift */,
+				468965CA454422A272815DE8 /* RecordModelTests.swift */,
+				5AD84A32FFC13F313B1CA885 /* RecordWireLimitsTests.swift */,
 				A663EA96198DBC4C40F6DD71 /* ServerSetupTests.swift */,
-				F3DD96C18A7DF88FBA2F07F2 /* SyncPayloadTests.swift */,
 				33CDAA387B2A9A9D8665794F /* VitalRouteModelTests.swift */,
 			);
 			path = VitalRouteTests;
@@ -433,6 +439,7 @@
 				475A17FA563DBBC2A932511D /* OverviewView.swift in Sources */,
 				0BD59D43D392DA78B69D66F8 /* RecordData.swift in Sources */,
 				21B9087824E6EE929687EAB5 /* RecordPager.swift in Sources */,
+				34979AE6B12BABDB92C0D073 /* RecordWireLimits.swift in Sources */,
 				270623B4585E6B603C61C24A /* SeriesFetching.swift in Sources */,
 				0A4F28ED7818AC123DC86737 /* ServerSetup.swift in Sources */,
 				166749596549EF52630D7B1F /* ServerSetupGuideView.swift in Sources */,
@@ -466,8 +473,9 @@
 				D090DCDCDAB54ED48548850C /* ManualSyncCoordinatorTests.swift in Sources */,
 				BCF027AF9A0C63CB272F32CE /* OutboxAndStateStoreTests.swift in Sources */,
 				B5D717EE2076416171A0BA75 /* ReceiverIntegrationTests.swift in Sources */,
+				0AA3ABB1CE2D8A7926A3B971 /* RecordModelTests.swift in Sources */,
+				C984A43A9B61F09A808C79D7 /* RecordWireLimitsTests.swift in Sources */,
 				F9C0329A4A01552D92BCD0CC /* ServerSetupTests.swift in Sources */,
-				455CFE7448618721CD3C731B /* SyncPayloadTests.swift in Sources */,
 				876E427E9EDA2567BB1AF393 /* VitalRouteModelTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

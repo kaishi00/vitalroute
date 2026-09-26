@@ -109,7 +109,9 @@ TOOLS = [
         "description": "Most recent raw record envelopes (newest first), optionally "
         "filtered by metric. Each record carries its typed data payload (e.g. a "
         "quantity value+unit, a workout summary, a clinical FHIR document). "
-        "Bounded to 200 per call; use daily_stats for aggregates.",
+        "Bounded to 200 per call and a 4 MiB response budget (truncated=true "
+        "means rows were left out; narrow the window or paginate). Use "
+        "daily_stats for aggregates.",
         "inputSchema": {
             "type": "object",
             "properties": {

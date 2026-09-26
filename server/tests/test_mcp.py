@@ -379,6 +379,54 @@ class QueryLayerTests(unittest.TestCase):
         with self.assertRaises(sqlite3.Error):
             self.connection.execute("DELETE FROM records")
 
+    def test_recent_records_response_budget_truncates(self):
+        # The response budget bounds one answer even when single records
+        # carry large typed payloads.
+        from validation import PreparedChange, PreparedRecord
+
+        def store_big():
+            record = make_record(
+                id=str(uuid.uuid4()),
+                metric="clinicalNote",
+                kind="clinical",
+                data={
+                    "type": "clinical",
+                    "fhirType": "DocumentReference",
+                    "fhirResource": {"text": "x" * 900_000},
+                },
+            )
+            prepared = PreparedChange(
+                "upsert",
+                record["id"],
+                record["metric"],
+                record=PreparedRecord(
+                    id=record["id"], metric=record["metric"], kind=record["kind"],
+                    start_date=record["startDate"], end_date=record["endDate"],
+                    source_name=None, device_name=None,
+                    metadata_json="{}", data_json=json.dumps(record["data"]),
+                    parent_id=None,
+                ),
+            )
+            self.store.apply([prepared], "2026-09-23T12:00:00.000Z")
+
+        for _ in range(6):
+            store_big()
+        original_budget = queries.MAX_RECENT_RESPONSE_BYTES
+        try:
+            queries.MAX_RECENT_RESPONSE_BYTES = 2_000_000
+            result = queries.recent_records(self.connection, limit=200)
+            self.assertLess(len(result["records"]), 6)
+            self.assertTrue(result["truncated"])
+        finally:
+            queries.MAX_RECENT_RESPONSE_BYTES = original_budget
+        # With the real budget, 6 x ~900 KB records truncate again — and a
+        # small result under the budget is not truncated.
+        result = queries.recent_records(self.connection, limit=200)
+        self.assertEqual(len(result["records"]), 4)
+        self.assertTrue(result["truncated"])
+        result = queries.recent_records(self.connection, metric="steps")
+        self.assertFalse(result["truncated"])
+
     def test_non_quantity_kinds_are_counted_not_aggregated(self):
         # A workout (kind workout) must never feed a numeric aggregate.
         workout = make_record(

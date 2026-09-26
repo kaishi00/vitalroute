@@ -1083,6 +1083,10 @@ final class AutomaticSyncEngine {
                         // the outbox dedupes by event identity and the
                         // receiver answers idempotently. Deletions for these
                         // samples are captured by that same later read.
+                        // No skip count surfaced here: the unthrottled
+                        // anchored read re-reports these same samples and
+                        // its path surfaces the skip; this head read is
+                        // only an optimization over it.
                         _ = try await outbox.append(
                             fresh.map { SyncChangeEvent.upsert($0) }
                                 .filter(RecordWireLimits.isTransmittableChangeEvent),
@@ -1217,6 +1221,9 @@ final class AutomaticSyncEngine {
             quarantinedDuringRun += snapshot.quarantinedCount
             if quarantinedDuringRun > 0 {
                 lastStatusMessage = "Some captured changes were unreadable and were set aside (\(quarantinedDuringRun)). Delivery of the remaining changes continues."
+            }
+            if snapshot.skippedOversizedCount > 0 {
+                lastStatusMessage = "\(snapshot.skippedOversizedCount) queued change(s) exceed this delivery batch's size budget and will be delivered separately."
             }
             if snapshot.events.isEmpty {
                 break

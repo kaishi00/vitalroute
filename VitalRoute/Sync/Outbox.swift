@@ -28,6 +28,13 @@ actor Outbox {
         /// Files moved to quarantine by this read; surfaced so the user can
         /// learn that some captured changes were undeliverable.
         var quarantinedCount: Int = 0
+        /// Entries skipped this read because they exceed the delivery byte
+        /// budget. They stay pending (the next budget change or event mix
+        /// may admit them); the count exists so chronic skips are visible
+        /// instead of silently filling capacity. New captures cannot create
+        /// them: the transport-limit filter drops oversized records at
+        /// capture time.
+        var skippedOversizedCount: Int = 0
     }
 
     /// Delivery priority of a pending event.
@@ -196,7 +203,8 @@ actor Outbox {
     /// cannot stall delivery forever; the count is reported for surfacing.
     func nextBatch() throws -> PendingSnapshot {
         try ensurePrepared()
-        let chosen = pickBatchEntries()
+        let picked = pickBatchEntries()
+        let chosen = picked.entries
         var events: [SyncChangeEvent] = []
         var quarantined = 0
         for entry in chosen {
@@ -211,16 +219,22 @@ actor Outbox {
                 quarantined += 1
             }
         }
-        return PendingSnapshot(events: events, totalPending: index.count, quarantinedCount: quarantined)
+        return PendingSnapshot(
+            events: events,
+            totalPending: index.count,
+            quarantinedCount: quarantined,
+            skippedOversizedCount: picked.skippedOversized
+        )
     }
 
     /// Live events first, topped up with backfill events to a full batch,
     /// bounded by both the event count and the byte budget. Scans the index
     /// once and stops as soon as a limit is reached; a single oversized
     /// event still ships alone (a legal batch of one).
-    private func pickBatchEntries() -> [Entry] {
+    private func pickBatchEntries() -> (entries: [Entry], skippedOversized: Int) {
         var chosen: [Entry] = []
         var bytes = 0
+        var skippedOversized = 0
         // Admitting fails for exactly two reasons: the batch is full
         // (assembly is over) or the entry does not fit the byte budget
         // (skip it; smaller events later in the queue may still fit).
@@ -234,14 +248,14 @@ actor Outbox {
             return true
         }
         for entry in index where entry.lane == .live {
-            if isFull() { return chosen }
-            _ = admits(entry)
+            if isFull() { break }
+            if !admits(entry) { skippedOversized += 1 }
         }
         for entry in index where entry.lane == .backfill {
             if isFull() { break }
-            _ = admits(entry)
+            if !admits(entry) { skippedOversized += 1 }
         }
-        return chosen
+        return (chosen, skippedOversized)
     }
 
     private static func fileSize(of url: URL) -> Int {

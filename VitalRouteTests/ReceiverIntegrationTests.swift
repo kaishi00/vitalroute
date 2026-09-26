@@ -45,8 +45,9 @@ final class ReceiverIntegrationTests: XCTestCase {
         // Per-cycle workout ids: the series chunk of a cycle references its
         // cycle's workout as parent, so a real-server cascade delete is
         // exercised end to end by the lifecycle test.
-        let workoutIDs = Dictionary(uniqueKeysWithValues: (0..<count).map { index in
-            (index / 6, UUID())
+        let cycleCount = (count + 5) / 6
+        let workoutIDs = Dictionary(uniqueKeysWithValues: (0..<cycleCount).map { cycle in
+            (cycle, UUID())
         })
         var changes: [SyncChangeEvent] = []
         changes.reserveCapacity(count)

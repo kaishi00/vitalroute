@@ -116,6 +116,34 @@ final class RecordWireLimitsTests: XCTestCase {
         ))))
     }
 
+    func testEncodedDataOverOneMiBIsRejected() {
+        // The receiver caps canonical data_json at 1 MiB; the mirror must
+        // catch the same records or its batch is poisoned server-side.
+        let big = ClinicalData(
+            fhirType: "DocumentReference",
+            fhirIdentifier: nil,
+            fhirResource: .object(["text": .string(String(repeating: "x", count: 1_048_576))])
+        )
+        XCTAssertFalse(RecordWireLimits.isTransmittable(record(data: .clinical(big))))
+    }
+
+    func testIdentifiersAreASCIIStrict() {
+        // The server pattern is ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ —
+        // non-ASCII letters pass Unicode checks but not the contract.
+        XCTAssertFalse(RecordWireLimits.isASCIIIdentifier("héllo", maxLength: 64))
+        XCTAssertFalse(RecordWireLimits.isASCIIIdentifier("has space", maxLength: 64))
+        XCTAssertFalse(RecordWireLimits.isASCIIIdentifier("-leading", maxLength: 64))
+        XCTAssertTrue(RecordWireLimits.isASCIIIdentifier("bloodPressureSystolic", maxLength: 64))
+        XCTAssertTrue(RecordWireLimits.isASCIIIdentifier("t", maxLength: 32))
+        XCTAssertFalse(RecordWireLimits.isASCIIIdentifier("bad channel", maxLength: 32))
+    }
+
+    func testCategoryValueUpperBoundMirrorsInt32() {
+        XCTAssertFalse(RecordWireLimits.isTransmittable(record(
+            data: .category(CategoryData(value: Int(Int32.max) + 1, name: nil))
+        )))
+    }
+
     func testChangeEventFilterAlwaysAdmitsDeletions() {
         let deletion = SyncChangeEvent.delete(DeletedRecord(
             id: UUID(), metric: .steps, startDate: date, endDate: date

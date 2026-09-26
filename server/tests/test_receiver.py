@@ -1017,7 +1017,7 @@ class SchemaResetTests(unittest.TestCase):
     def test_legacy_database_is_reset_for_v3(self):
         self._write_legacy_database(1)
         # Resetting is destructive: it must be explicitly allowed.
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(storage.IncompatibleSchema):
             storage.RecordStore(self.db_path)
         store = storage.RecordStore(self.db_path, allow_schema_reset=True)
         self.assertEqual(store.schema_version(), "3")
@@ -1057,7 +1057,7 @@ class SchemaResetTests(unittest.TestCase):
             connection.commit()
         finally:
             connection.close()
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(storage.IncompatibleSchema):
             storage.RecordStore(self.db_path)
         store = storage.RecordStore(self.db_path, allow_schema_reset=True)
         self.assertEqual(store.record_count(), 0)
@@ -1216,6 +1216,21 @@ class ValidationUnitTests(unittest.TestCase):
         for value in ("", "has space", "-leading", "a" * 65, None, 5, "../traversal"):
             with self.assertRaises(validation.ValidationError):
                 validation.parse_metric(value, "test")
+
+
+class SyntheticSenderParityTests(unittest.TestCase):
+    """Pins the chunk-identity derivation shared with the iOS client: the
+    Swift side asserts the same vector against its SHA-256 implementation,
+    so the two cannot drift in either direction."""
+
+    def test_deterministic_chunk_id_matches_the_swift_known_answer(self):
+        import send_synthetic_data
+
+        fixed = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
+        self.assertEqual(
+            send_synthetic_data.deterministic_chunk_id(fixed, 0),
+            "a9d90958-56a1-4238-9979-764a7d550194",
+        )
 
 
 if __name__ == "__main__":

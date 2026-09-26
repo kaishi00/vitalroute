@@ -432,8 +432,8 @@ There is no migration machinery from earlier development schemas. When the
 receiver opens a database that does not match its schema generation — a
 different declared `schema_version`, or record tables with no declared
 version — it refuses to start rather than discard health data. Starting it
-with `VITALROUTE_ALLOW_SCHEMA_RESET=1` (environment variable, one boot)
-recreates the database empty instead, logging a single line (never any
+with `VITALROUTE_ALLOW_SCHEMA_RESET=1` in the environment recreates the
+database empty instead, logging a single line (never any
 data). Operators upgrading a pre-3 deployment therefore either re-sync from
 the device afterwards or restore from a backup taken before the upgrade.
 

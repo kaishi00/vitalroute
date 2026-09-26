@@ -34,11 +34,12 @@ final class ExportSelectionStore {
     }
 
     func setMetric(_ metric: HealthMetric, selected: Bool) {
-        // Component-only metrics are never user selections; the load-time
-        // filter would drop them anyway, so refusing here keeps the
-        // invariant at the write site too.
-        guard metric.descriptor.userSelectable else { return }
         if selected {
+            // Component-only metrics are never user selections; the
+            // load-time filter would drop them anyway, so refusing here
+            // keeps the invariant at the write site too. Deselection is
+            // always allowed so stale persisted values can be cleaned up.
+            guard metric.descriptor.userSelectable else { return }
             selectedMetrics.insert(metric)
         } else {
             selectedMetrics.remove(metric)

@@ -9,9 +9,10 @@ import Foundation
 /// `isTransmittable` and skip-and-surface instead of queueing doomed
 /// records.
 ///
-/// The two implementations must stay in lockstep: every limit here has a
-/// counterpart in `validation.py`, and the receiver's test suite pins the
-/// server side.
+/// The two implementations must stay in lockstep, in BOTH directions:
+/// looser here means the receiver still rejects the batch (the failure
+/// this type exists to prevent); stricter here means silently dropping
+/// records the receiver would have accepted.
 enum RecordWireLimits {
     enum Metadata {
         static let maxEntries = 32
@@ -26,6 +27,11 @@ enum RecordWireLimits {
     static let maxCorrelationComponents = 8
     static let maxSeriesChannels = 16
     static let maxSeriesPointsPerChunk = 2048
+    /// Mirror of the receiver's canonical data_json cap
+    /// (`_MAX_DATA_JSON_BYTES`): bounds byte length, which the FHIR node /
+    /// depth budget alone does not.
+    static let maxEncodedDataBytes = 1_048_576
+    static let maxInt32 = Int(Int32.max)
 
     /// Filter form for outbox capture: deletions always pass (their metric
     /// is catalog-checked); additions are checked against the same limits.
@@ -40,11 +46,11 @@ enum RecordWireLimits {
 
     /// True when the record can satisfy the receiver's envelope and
     /// typed-payload rules. Structural checks that require HealthKit-side
-    /// knowledge (UUIDs, dates) are enforced upstream by construction.
+    /// knowledge (UUIDs, dates) are enforced upstream by construction; the
+    /// metric identifier is a catalog-minted `HealthMetric`, so only
+    /// free-form strings and payload content need mirroring here.
     static func isTransmittable(_ record: HealthRecord) -> Bool {
-        guard RecordKind(rawValue: record.kind.rawValue) == record.kind,
-              record.kind == record.data.kind
-        else { return false }
+        guard record.kind == record.data.kind else { return false }
         if let source = record.sourceName, source.count > maxNameLength { return false }
         if let device = record.deviceName, device.count > maxNameLength { return false }
         let metadata = record.metadata
@@ -53,7 +59,11 @@ enum RecordWireLimits {
             if key.isEmpty || key.count > Metadata.maxKeyLength { return false }
             if value.count > Metadata.maxValueLength { return false }
         }
-        return isTransmittable(record.data)
+        guard isTransmittable(record.data) else { return false }
+        // The receiver caps the canonical encoded data payload; measure the
+        // same bytes here. An unencodable payload can never be delivered.
+        guard let encoded = try? JSONEncoder().encode(record.data) else { return false }
+        return encoded.count <= maxEncodedDataBytes
     }
 
     static func isTransmittable(_ data: RecordData) -> Bool {
@@ -61,20 +71,22 @@ enum RecordWireLimits {
         case .quantity(let payload):
             return payload.value.isFinite && isUnit(payload.unit)
         case .category(let payload):
-            if payload.value < 0 { return false }
-            if let name = payload.name, !isShortString(name) { return false }
+            if payload.value < 0 || payload.value > maxInt32 { return false }
+            if let name = payload.name, name.count > maxShortStringLength { return false }
             return true
         case .correlation(let payload):
             let components = payload.components
             guard (1...maxCorrelationComponents).contains(components.count) else { return false }
             return components.allSatisfy { component in
-                isMetricIdentifier(component.metric)
+                isASCIIIdentifier(component.metric, maxLength: 64)
                     && component.value.isFinite
                     && isUnit(component.unit)
             }
         case .workout(let payload):
             if !isShortString(payload.activityType) { return false }
-            if payload.activityTypeRawValue < 0 { return false }
+            if payload.activityTypeRawValue < 0 || payload.activityTypeRawValue > maxInt32 {
+                return false
+            }
             if payload.duration.isFinite == false || payload.duration < 0 { return false }
             for optional in [payload.totalEnergyKilocalories, payload.totalDistanceMeters] {
                 guard let value = optional else { continue }
@@ -101,7 +113,9 @@ enum RecordWireLimits {
         case .series(let payload):
             if !isShortString(payload.seriesType) { return false }
             guard (1...maxSeriesChannels).contains(payload.channels.count) else { return false }
-            guard payload.channels.allSatisfy(isChannelName) else { return false }
+            guard payload.channels.allSatisfy({ isASCIIIdentifier($0, maxLength: 32) }) else {
+                return false
+            }
             guard (1...maxSeriesPointsPerChunk).contains(payload.points.count) else { return false }
             return payload.points.allSatisfy { row in
                 row.count == payload.channels.count && row.allSatisfy(\.isFinite)
@@ -109,6 +123,8 @@ enum RecordWireLimits {
         case .electrocardiogram(let payload):
             if !isShortString(payload.classification) { return false }
             if let status = payload.symptomStatus, !isShortString(status) { return false }
+            if let raw = payload.classificationRawValue, raw < 0 || raw > maxInt32 { return false }
+            if let raw = payload.symptomStatusRawValue, raw < 0 || raw > maxInt32 { return false }
             if let rate = payload.averageHeartRate, !rate.isFinite || rate < 0 { return false }
             if let frequency = payload.samplingFrequency, !frequency.isFinite || frequency <= 0 {
                 return false
@@ -117,7 +133,7 @@ enum RecordWireLimits {
         case .clinical(let payload):
             if !isShortString(payload.fhirType) { return false }
             if let identifier = payload.fhirIdentifier,
-               identifier.isEmpty || identifier.count > maxFHIRIdentifierLength {
+                identifier.count > maxFHIRIdentifierLength {
                 return false
             }
             return FHIRWireBudget.isWithinBudget(payload.fhirResource)
@@ -132,23 +148,18 @@ enum RecordWireLimits {
         !value.isEmpty && value.count <= maxShortStringLength
     }
 
-    private static func isChannelName(_ value: String) -> Bool {
-        !value.isEmpty && value.count <= 32
-    }
-
-    /// The receiver's metric-identifier shape: 1–64 characters, starting
-    /// with an alphanumeric, then alphanumerics, dots, underscores, dashes.
-    static func isMetricIdentifier(_ value: String) -> Bool {
-        guard !value.isEmpty, value.count <= 64 else { return false }
-        let allowed = CharacterSet(charactersIn: "._-")
+    /// The receiver's identifier shape, ASCII-only:
+    /// `^[A-Za-z0-9][A-Za-z0-9._-]{0,maxLength-1}$`.
+    static func isASCIIIdentifier(_ value: String, maxLength: Int) -> Bool {
+        guard !value.isEmpty, value.count <= maxLength else { return false }
+        let extra = CharacterSet(charactersIn: "._-")
         for (index, scalar) in value.unicodeScalars.enumerated() {
+            let isASCIIAlphanumeric = (scalar.value >= 0x30 && scalar.value <= 0x39)
+                || (scalar.value >= 0x41 && scalar.value <= 0x5A)
+                || (scalar.value >= 0x61 && scalar.value <= 0x7A)
             if index == 0 {
-                if !(scalar.properties.isAlphabetic || scalar.properties.numericType == .decimal) {
-                    return false
-                }
-            } else if !(scalar.properties.isAlphabetic
-                || scalar.properties.numericType == .decimal
-                || allowed.contains(scalar)) {
+                if !isASCIIAlphanumeric { return false }
+            } else if !(isASCIIAlphanumeric || extra.contains(scalar)) {
                 return false
             }
         }
@@ -157,7 +168,8 @@ enum RecordWireLimits {
 }
 
 /// Structural budget for clinical FHIR payloads, mirroring the receiver's
-/// depth and node limits.
+/// depth, node, and key limits. Byte length is bounded separately by
+/// `RecordWireLimits.maxEncodedDataBytes`.
 enum FHIRWireBudget {
     static let maxDepth = 32
     static let maxNodes = 4096
