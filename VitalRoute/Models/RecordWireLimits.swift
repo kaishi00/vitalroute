@@ -103,11 +103,16 @@ enum RecordWireLimits {
                 count += 6 // 3-byte scalar -> short unicode escape
             case 0xF0...0xF4:
                 count += 12 // astral scalar -> surrogate pair escape
+            case 0x5C:
+                count += 2 // backslash: canonical form always escapes it
+            case 0x22:
+                // Structural quotes cost 1, escaped quotes 2; counting 1
+                // and charging the escape lead covers both.
+                count += 1
             default:
-                // ASCII printable counts 1; quote, backslash, and control
-                // characters escape to at most 6 bytes.
-                count += (byte >= 0x20 && byte <= 0x7E && byte != 0x22 && byte != 0x5C)
-                    ? 1 : 6
+                // Printable ASCII counts 1; control characters escape to
+                // at most 6 bytes.
+                count += (byte >= 0x20 && byte <= 0x7E) ? 1 : 6
             }
             index += 1
         }
@@ -160,6 +165,7 @@ enum RecordWireLimits {
             return true
         case .series(let payload):
             if !isShortString(payload.seriesType) { return false }
+            if payload.chunkIndex < 0 || payload.chunkIndex > 1_000_000 { return false }
             guard (1...maxSeriesChannels).contains(payload.channels.count) else { return false }
             guard payload.channels.allSatisfy({ isASCIIIdentifier($0, maxLength: 32) }) else {
                 return false

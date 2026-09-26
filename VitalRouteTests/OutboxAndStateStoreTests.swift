@@ -132,7 +132,10 @@ final class OutboxAndStateStoreTests: XCTestCase {
     func testByteBudgetMissSkipsOversizedEntryAndKeepsScanning() async throws {
         // An entry that does not fit the budget is skipped, not fatal:
         // smaller events behind it still make this batch, and the
-        // oversized one ships alone later.
+        // oversized one ships alone later. The oversized fixture uses a
+        // metadata blob for size; a real capture cannot produce one (the
+        // transport-limit filter drops it), but the file-size budgeting
+        // under test is identical.
         let outbox = Outbox(directory: tempDirectory, deliveryByteLimit: 1_000)
         try await outbox.prepare()
         let big = SyncChangeEvent.upsert(record(1, blob: String(repeating: "x", count: 4_000)))

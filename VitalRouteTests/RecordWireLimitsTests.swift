@@ -144,6 +144,51 @@ final class RecordWireLimitsTests: XCTestCase {
         )))
     }
 
+    func testNonASCIIPayloadCountsTheCanonicalEscapeLength() {
+        // The round-3 failure mode: a payload whose UTF-8 length is under
+        // 1 MiB but whose ensure_ascii-escaped canonical length exceeds it.
+        // 262,144 astral scalars = ~1 MiB UTF-8 vs ~3 MiB canonical.
+        func clinical(_ text: String) -> RecordData {
+            .clinical(ClinicalData(
+                fhirType: "DocumentReference",
+                fhirIdentifier: nil,
+                fhirResource: .object(["text": .string(text)])
+            ))
+        }
+        XCTAssertFalse(RecordWireLimits.isTransmittable(record(data: clinical(
+            String(repeating: "\u{1F600}", count: 262_144)
+        ))))
+        // 150,000 BMP non-ASCII: ~300 KB UTF-8, ~900 KB canonical - under.
+        XCTAssertTrue(RecordWireLimits.isTransmittable(record(data: clinical(
+            String(repeating: "\u{00E9}", count: 150_000)
+        ))))
+    }
+
+    func testCanonicalByteCountMirrorsPythonEnsureASCII() {
+        // BMP non-ASCII -> 6; astral -> 12; printable ASCII -> 1;
+        // backslash -> 2; quote -> 1; control -> 6.
+        XCTAssertEqual(
+            RecordWireLimits.canonicalByteCount(
+                of: Data("\u{00E9}\u{1F600}a\"\\u{01}".utf8)
+            ),
+            6 + 12 + 1 + 1 + 2 + 5
+        )
+        XCTAssertEqual(RecordWireLimits.canonicalByteCount(of: Data()), 0)
+        XCTAssertEqual(
+            RecordWireLimits.canonicalByteCount(
+                of: Data(String(repeating: "\u{4F60}", count: 100).utf8)
+            ),
+            600
+        )
+    }
+
+    func testSeriesChunkIndexBoundMirrorsTheReceiver() {
+        XCTAssertFalse(RecordWireLimits.isTransmittable(record(data: .series(SeriesData(
+            seriesType: "workoutRoute", seriesID: UUID(), parentID: nil,
+            chunkIndex: 1_000_001, channels: ["t"], points: [[0]]
+        )))))
+    }
+
     func testChangeEventFilterAlwaysAdmitsDeletions() {
         let deletion = SyncChangeEvent.delete(DeletedRecord(
             id: UUID(), metric: .steps, startDate: date, endDate: date
