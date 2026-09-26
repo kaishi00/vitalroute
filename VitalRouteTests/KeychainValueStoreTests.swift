@@ -80,6 +80,40 @@ final class KeychainValueStoreTests: XCTestCase {
         )
     }
 
+    func testMigrationCoversEveryItemUnderTheService() throws {
+        // The migration is service-scoped on purpose: the endpoint and every
+        // per-destination credential need background readability. Pin that
+        // both item kinds are upgraded by one call.
+        let endpointAccount = "destination.endpoint"
+        let credentialAccount = "destination.credential.abc123"
+        cleanup(endpointAccount)
+        cleanup(credentialAccount)
+        defer {
+            cleanup(endpointAccount)
+            cleanup(credentialAccount)
+        }
+        for account in [endpointAccount, credentialAccount] {
+            var addQuery = baseQuery(account)
+            addQuery[kSecValueData as String] = Data("value-for-\(account)".utf8)
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            XCTAssertEqual(SecItemAdd(addQuery as CFDictionary, nil), errSecSuccess)
+        }
+
+        let store = KeychainValueStore()
+        try store.migrateToBackgroundAccessibility()
+
+        XCTAssertEqual(
+            accessibility(of: endpointAccount),
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
+        )
+        XCTAssertEqual(
+            accessibility(of: credentialAccount),
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
+        )
+        XCTAssertEqual(try store.readValue(forKey: endpointAccount), "value-for-\(endpointAccount)")
+        XCTAssertEqual(try store.readValue(forKey: credentialAccount), "value-for-\(credentialAccount)")
+    }
+
     func testMigrationWithNoItemsDoesNotThrow() throws {
         let account = "test.accessibility.empty"
         cleanup(account)

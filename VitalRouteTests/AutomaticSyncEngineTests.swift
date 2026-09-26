@@ -2167,6 +2167,48 @@ final class AutomaticSyncEngineTests: XCTestCase {
         )
     }
 
+    func testDestinationRemovalWhileActivePurgesAndDisables() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(3)], anchor: "s3")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 1)
+
+        // The user removes the destination: the UI reports an empty
+        // endpoint. That report is how removal reaches the engine — the
+        // queue for the removed destination is discarded with a visible
+        // notice and automatic sync is disabled, never delivered anywhere.
+        await engine.configurationChanged(destination: "", token: nil, metrics: [.steps])
+        await engine.waitUntilIdle()
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.pendingCount, 0)
+        XCTAssertTrue(
+            engine.lastStatusMessage?.contains("discarded") == true,
+            engine.lastStatusMessage ?? ""
+        )
+    }
+
+    func testWaitingEngineStaysWaitingWhenReportedAnEmptyEndpoint() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // A re-report of "no configuration" against an engine that has none
+        // must not relabel the honest wait as a destination problem.
+        await relaunched.configurationChanged(destination: "", token: nil, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .paused(.secureStorageUnavailable))
+        XCTAssertEqual(relaunched.pendingCount, 1, "the wait must not discard queued work")
+    }
+
     func testDestinationChangeWhileWaitingPurgesWithHonestNoticeNotCrossDelivery() async throws {
         let client = ScriptedSyncClient()
         _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)

@@ -198,13 +198,12 @@ struct VitalRouteApp: App {
     }
 
     private func syncConfigurationWithEngine() {
-        // Only report a credential that belongs to a real, settled endpoint:
-        // a transient read failure must never pair the previous
-        // destination's key with the new destination, and an empty report
-        // must not relabel a waiting engine's honest pause. The recovery
-        // coordinator re-reports once the matching credential settles.
-        guard !destinationStore.savedEndpoint.isEmpty,
-              credentialStore.credentialEndpoint == destinationStore.savedEndpoint else { return }
+        // Only report a credential that belongs to the configured endpoint: a
+        // transient read failure must never pair the previous destination's
+        // key with the new destination. Empty reports still propagate — they
+        // are how destination removal reaches the engine — and the engine
+        // itself ignores an empty report that has nothing to purge.
+        guard credentialStore.credentialEndpoint == destinationStore.savedEndpoint else { return }
         let engine = autoSyncEngine
         let endpoint = destinationStore.savedEndpoint
         let token = credentialStore.loadedToken

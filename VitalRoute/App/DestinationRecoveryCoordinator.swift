@@ -84,10 +84,6 @@ final class DestinationRecoveryCoordinator {
         await destinationStore.loadSavedEndpoint()
         guard destinationStore.isLoaded else { return }
         let endpoint = destinationStore.savedEndpoint
-        // Recovery exists to re-arm a waiting engine; an empty endpoint has
-        // nothing to report, and reporting "" would relabel the wait as
-        // "destination missing".
-        guard !endpoint.isEmpty else { return }
 
         await credentialStore.loadCredential(for: endpoint)
         // An endpoint may only be paired with its own credential: reporting

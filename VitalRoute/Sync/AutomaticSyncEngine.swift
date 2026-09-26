@@ -543,6 +543,16 @@ final class AutomaticSyncEngine {
         let newDestination = Self.normalizedDestination(newDestinationRaw)
         let newToken = Self.normalizedToken(newToken)
 
+        // An empty report carries information only when the engine holds a
+        // destination for it to purge (the removal flow: the report then
+        // takes the destinationChanged branch below). When the engine has no
+        // destination — a waiting launch, a disabled engine — the report is
+        // a no-op, and relabeling the secure-storage wait as
+        // destinationMissing would be the same lie as acting on it.
+        if newDestination.isEmpty && destination.isEmpty {
+            return
+        }
+
         // A real change invalidates in-flight work before the first
         // suspension; an unchanged re-report (the UI re-renders) must not
         // cancel an enablement the user just asked for.

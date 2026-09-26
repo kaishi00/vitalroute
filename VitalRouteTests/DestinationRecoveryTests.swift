@@ -247,6 +247,46 @@ final class DestinationRecoveryTests: XCTestCase {
         )
     }
 
+    func testMigrationFailureRetriesUntilItSucceedsThenStops() async throws {
+        let secureStore = RecordingSecureStore()
+        secureStore.values["destination.endpoint"] = endpoint
+        secureStore.values[DestinationCredentialStore.storageKey(for: endpoint)] = token
+        secureStore.failAllReads = true
+        secureStore.migrateFailuresRemaining = 1
+
+        defaults.set(true, forKey: "automaticSync.enabled")
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        let coordinator = makeCoordinator(
+            destinationStore: DestinationConfigurationStore(secureStore: secureStore),
+            credentialStore: DestinationCredentialStore(secureStore: secureStore),
+            secureStore: secureStore,
+            engine: relaunched
+        )
+
+        // First attempt: the migration fails (a locked keychain) and must be
+        // retried by the next trigger, not treated as converged.
+        await coordinator.recoverNow()
+        XCTAssertEqual(relaunched.mode, .paused(.secureStorageUnavailable))
+        XCTAssertEqual(secureStore.migrateCallCount, 1)
+
+        // The device unlocked: the retried migration succeeds, the loads
+        // settle, and the engine recovers.
+        secureStore.failAllReads = false
+        clock.advance(by: 61)
+        await coordinator.recoverNow()
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .active)
+        XCTAssertEqual(secureStore.migrateCallCount, 2)
+
+        // Converged: no further keychain writes.
+        await coordinator.recoverNow()
+        XCTAssertEqual(secureStore.migrateCallCount, 2)
+    }
+
     // MARK: System notification wiring
 
     func testProtectedDataAvailableNotificationTriggersRecovery() async throws {
@@ -285,6 +325,8 @@ private final class RecordingSecureStore: SecureValueStoring, @unchecked Sendabl
     var failAllReads = false
     var failingKeys: Set<String> = []
     private(set) var migrateCallCount = 0
+    /// Simulates a migration that fails (a locked keychain) until cleared.
+    var migrateFailuresRemaining = 0
 
     func readValue(forKey key: String) throws -> String? {
         if failAllReads || failingKeys.contains(key) {
@@ -303,6 +345,10 @@ private final class RecordingSecureStore: SecureValueStoring, @unchecked Sendabl
 
     func migrateToBackgroundAccessibility() throws {
         migrateCallCount += 1
+        if migrateFailuresRemaining > 0 {
+            migrateFailuresRemaining -= 1
+            throw RecoveryStoreError.unavailable
+        }
     }
 
     private enum RecoveryStoreError: Error {
