@@ -488,3 +488,130 @@ final class RecordModelTests: XCTestCase {
         }
     }
 }
+
+/// Display formatting must never trap: records shown on screen are not
+/// wire-validated, so an extreme finite HealthKit value has to render
+/// clamped instead of crashing the view with an out-of-range `Int(_:)`.
+final class DisplayValueFormattingTests: XCTestCase {
+    private let date = Date(timeIntervalSince1970: 1_735_689_600)
+
+    private func quantityRecord(value: Double, unit: String) -> HealthRecord {
+        HealthRecord(
+            metric: .heartRate,
+            startDate: date,
+            endDate: date,
+            data: .quantity(QuantityData(value: value, unit: unit))
+        )
+    }
+
+    func testExtremeFiniteSecondsDoNotTrapAndClamp() {
+        let huge = quantityRecord(value: .greatestFiniteMagnitude, unit: "s")
+        XCTAssertEqual(huge.displayValue, "\(Int.max) min")
+
+        let large = quantityRecord(value: 1e300, unit: "s")
+        XCTAssertEqual(large.displayValue, "\(Int.max) min")
+
+        let negative = quantityRecord(value: -1e300, unit: "s")
+        XCTAssertEqual(negative.displayValue, "0 min")
+    }
+
+    func testOrdinarySecondsStillRenderAsMinutes() {
+        let record = quantityRecord(value: 3600, unit: "s")
+        XCTAssertEqual(record.displayValue, "60 min")
+    }
+
+    func testExtremeFiniteWorkoutDurationDoesNotTrap() {
+        let record = HealthRecord(
+            metric: .steps,
+            startDate: date,
+            endDate: date,
+            data: .workout(WorkoutData(
+                activityType: "running",
+                activityTypeRawValue: 52,
+                duration: 1e300,
+                totalEnergyKilocalories: nil,
+                totalDistanceMeters: nil
+            ))
+        )
+        XCTAssertEqual(record.displayValue, "Running · \(Int.max) min")
+    }
+
+    func testExtremeFiniteExerciseMinutesDoNotTrap() {
+        let record = HealthRecord(
+            metric: .steps,
+            startDate: date,
+            endDate: date,
+            data: .activitySummary(ActivitySummaryData(exerciseTimeMinutes: 1e300))
+        )
+        XCTAssertEqual(record.displayValue, "\(Int.max) min exercise")
+    }
+
+    func testClampedIntCoversTheBoundaries() {
+        XCTAssertEqual(HealthRecord.clampedInt(.greatestFiniteMagnitude), Int.max)
+        XCTAssertEqual(HealthRecord.clampedInt(-.greatestFiniteMagnitude), Int.min)
+        XCTAssertEqual(HealthRecord.clampedInt(.nan), 0)
+        XCTAssertEqual(HealthRecord.clampedInt(.infinity), Int.max)
+        XCTAssertEqual(HealthRecord.clampedInt(42.9), 42)
+        XCTAssertEqual(HealthRecord.clampedInt(-3.5), -3)
+    }
+}
+
+/// The manual delivery path and the automatic outbox path must batch by
+/// the same byte budget (the shared `Outbox.deliveryBatchByteLimit`), with
+/// an injectable limit so tests can exercise the boundary on either path.
+final class DeliveryBatchingTests: XCTestCase {
+    private func events(_ count: Int) -> [SyncChangeEvent] {
+        (0..<count).map { SyncChangeEvent.upsert(HealthRecord(
+            metric: .heartRate,
+            startDate: Date(timeIntervalSince1970: TimeInterval(1_735_689_600 + $0)),
+            endDate: Date(timeIntervalSince1970: TimeInterval(1_735_689_600 + $0)),
+            data: .quantity(QuantityData(value: Double($0), unit: "count/min"))
+        )) }
+    }
+
+    private func encodedSize(_ event: SyncChangeEvent) -> Int {
+        (try? JSONEncoder().encode(event))?.count ?? 0
+    }
+
+    func testByteLimitSplitsBatchesBeforeTheCountLimit() {
+        let batch = events(10)
+        let size = encodedSize(batch[0])
+
+        // A budget fitting exactly one event must produce one batch per
+        // event, even though the count limit would allow all ten.
+        let batches = batch.batchedForDelivery(maxCount: 10, byteLimit: size)
+        XCTAssertEqual(batches.count, 10)
+        XCTAssertTrue(batches.allSatisfy { $0.count == 1 })
+    }
+
+    func testByteLimitAdmitsEventsWhileTheyFit() {
+        let batch = events(4)
+        let size = encodedSize(batch[0])
+        // Budget exactly two events (sizes are near-identical for these
+        // records; a slightly generous budget keeps the test focused on
+        // splitting, not on encoder jitter).
+        let batches = batch.batchedForDelivery(maxCount: 10, byteLimit: size * 2 + 64)
+        XCTAssertEqual(batches.count, 2)
+        XCTAssertEqual(batches[0].count, 2)
+        XCTAssertEqual(batches[1].count, 2)
+    }
+
+    func testSingleOversizedEventStillShipsAlone() {
+        let batch = events(1)
+        let size = encodedSize(batch[0])
+        let batches = batch.batchedForDelivery(maxCount: 10, byteLimit: size - 1)
+        XCTAssertEqual(batches.count, 1)
+        XCTAssertEqual(batches[0].count, 1)
+    }
+
+    func testDefaultBudgetIsTheSharedOutboxConstant() {
+        // Drift guard: the manual path's default must be exactly the
+        // constant the outbox path batches by.
+        let batch = events(3)
+        let withDefault = batch.batchedForDelivery(maxCount: 100)
+        let withExplicit = batch.batchedForDelivery(
+            maxCount: 100, byteLimit: Outbox.deliveryBatchByteLimit
+        )
+        XCTAssertEqual(withDefault, withExplicit)
+    }
+}

@@ -3,8 +3,10 @@ import HealthKit
 
 /// Lets exactly one thread claim a HealthKit callback; later invocations of
 /// a long-running query handler are dropped instead of double-resuming a
-/// continuation.
-private final class ContinuationGuard: @unchecked Sendable {
+/// continuation. Shared with the series fetchers, whose
+/// HKElectrocardiogramQuery reports terminal events from HealthKit's queue
+/// with no ordering guarantee.
+final class ContinuationGuard: @unchecked Sendable {
     private let lock = NSLock()
     private var claimed = false
 
@@ -352,6 +354,14 @@ final class HealthKitService: HealthDataProviding {
     /// newest first. Used by the automatic engine while a category's
     /// historical reading is throttled so fresh samples reach the
     /// destination without waiting for the backfill.
+    ///
+    /// The HealthKit callback resumes its continuation with mapped samples
+    /// only; the (potentially slow) series expansion then runs in this
+    /// function's own task, so a cancelled sync stops it at the next
+    /// suspension instead of leaving an unstructured task holding the work.
+    /// HKSampleQuery is one-shot, but the same once-guard as the
+    /// long-running queries keeps a surprise repeat callback from
+    /// double-resuming.
     func latestRecords(
         for metric: HealthMetric,
         windowStart: Date,
@@ -372,9 +382,8 @@ final class HealthKitService: HealthDataProviding {
             key: HKSampleSortIdentifierEndDate,
             ascending: false
         )
-        let fetchers = seriesFetchers
         let store = healthStore
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HealthRecord], Error>) in
+        let mapped: [MappedSample] = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[MappedSample], Error>) in
             let once = ContinuationGuard()
             let query = HKSampleQuery(
                 sampleType: sampleType,
@@ -388,28 +397,19 @@ final class HealthKitService: HealthDataProviding {
                     return
                 }
                 // Map on HealthKit's callback thread so only Sendable values
-                // cross the continuation. Series expansion needs async work,
-                // so the callback hands over mapped samples and the task
-                // expands below.
-                let mapped = (samples ?? []).compactMap {
+                // cross the continuation.
+                continuation.resume(returning: (samples ?? []).compactMap {
                     HealthKitRecordMapper.makeMappedSample(from: $0, metric: metric)
-                }
-                Task {
-                    do {
-                        let records = try await Self.expandSeries(
-                            mapped,
-                            metric: metric,
-                            using: store,
-                            seriesFetchers: fetchers
-                        )
-                        continuation.resume(returning: records)
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                }
+                })
             }
             store.execute(query)
         }
+        return try await Self.expandSeries(
+            mapped,
+            metric: metric,
+            using: store,
+            seriesFetchers: seriesFetchers
+        )
     }
 
     private nonisolated static func queryChangePage(

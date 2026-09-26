@@ -74,15 +74,19 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
     }
 
     /// Streams voltage measurements until the query reports done. Only the
-    /// terminal callback resumes; the actor keeps collection off the
+    /// first terminal callback resumes — HealthKit does not promise the
+    /// error/done events are mutually exclusive, and a second resume of a
+    /// checked continuation is a trap. The actor keeps collection off the
     /// callback thread's type.
     private func fetchPoints(ecg: HKElectrocardiogram) async throws -> [[Double]] {
         let collector = MeasurementCollector()
         let microvolts = HKUnit.voltUnit(with: .micro)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let once = ContinuationGuard()
             let query = HKElectrocardiogramQuery(ecg) { _, result in
                 switch result {
                 case .error(let error):
+                    guard once.claim() else { return }
                     continuation.resume(throwing: error)
                 case .measurement(let measurement):
                     // Apple Watch ECGs carry a single lead.
@@ -93,6 +97,7 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
                         )
                     }
                 case .done:
+                    guard once.claim() else { return }
                     continuation.resume()
                 @unknown default:
                     // A future result kind carries no data this fetcher

@@ -94,7 +94,7 @@ extension HealthRecord {
         switch data {
         case .quantity(let payload):
             if payload.unit == "s" {
-                return "\(Int(payload.value / 60)) min"
+                return "\(Self.minutesLabel(payload.value)) min"
             }
             return "\(payload.value.formatted(.number.precision(.fractionLength(0...1)))) \(payload.unit)"
         case .category(let payload):
@@ -104,11 +104,10 @@ extension HealthRecord {
                 .map { "\($0.value.formatted(.number.precision(.fractionLength(0...1)))) \($0.unit)" }
                 .joined(separator: " / ")
         case .workout(let payload):
-            let minutes = Int(payload.duration / 60)
-            return "\(Self.humanizedCategoryName(payload.activityType)) · \(minutes) min"
+            return "\(Self.humanizedCategoryName(payload.activityType)) · \(Self.minutesLabel(payload.duration)) min"
         case .activitySummary(let payload):
             if let minutes = payload.exerciseTimeMinutes {
-                return "\(Int(minutes)) min exercise"
+                return "\(Self.clampedInt(minutes)) min exercise"
             }
             return "Daily summary"
         case .series(let payload):
@@ -118,6 +117,24 @@ extension HealthRecord {
         case .clinical(let payload):
             return payload.fhirType
         }
+    }
+
+    /// Whole minutes for dashboard copy. `Int(Double.self)` traps outside
+    /// Int's range, and display formats are reachable for records that were
+    /// never wire-validated, so an extreme finite value must render clamped
+    /// instead of crashing the view. Negative values are invalid data and
+    /// display as zero.
+    static func minutesLabel(_ seconds: Double) -> Int {
+        max(0, clampedInt(seconds / 60))
+    }
+
+    /// The Int init without the trap: finite values beyond Int's range
+    /// clamp to the nearest bound; non-finite values collapse to zero.
+    static func clampedInt(_ value: Double) -> Int {
+        guard value.isFinite else { return 0 }
+        if value >= Double(Int.max) { return Int.max }
+        if value <= Double(Int.min) { return Int.min }
+        return Int(value)
     }
 
     /// "asleepREM" -> "Asleep REM"; "sinusRhythm" -> "Sinus rhythm".

@@ -36,10 +36,13 @@ extension FHIRJSON: Codable {
         case object
     }
 
-    // Tagged encoding rather than raw JSON passthrough: the wire format
-    // must stay deterministic and self-describing, and the receiver's
-    // clinical validator expects `fhirResource` to decode back to exactly
-    // this shape. The receiver validates the *decoded object* form below.
+    // Transparent (untagged) encoding: each case writes its associated
+    // value through a single-value container, so a FHIR object round-trips
+    // as exactly the JSON the source produced — no case tag, no wrapper.
+    // That is what the receiver's clinical validator requires: it checks
+    // `fhirResource` as a plain JSON object and stores the encoded bytes
+    // verbatim. Determinism comes from the shared encoder's sorted keys,
+    // not from tagging.
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {

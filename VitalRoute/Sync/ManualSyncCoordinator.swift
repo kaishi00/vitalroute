@@ -544,14 +544,21 @@ final class ManualSyncCoordinator {
     }
 }
 
-private extension Array where Element == SyncChangeEvent {
-    /// Delivery batches bounded by both count and the same byte budget the
-    /// outbox path enforces, so a series-chunk-heavy page cannot exceed the
-    /// receiver's body limit (which the receiver rejects atomically, and a
-    /// resumable cursor would then retry forever). A single element larger
-    /// than the whole budget still ships alone — a legal batch of one.
-    func batchedForDelivery(maxCount: Int) -> [[Element]] {
+/// Delivery batches bounded by both count and the byte budget, so a
+/// series-chunk-heavy page cannot exceed the receiver's body limit (which
+/// the receiver rejects atomically, and a resumable cursor would then
+/// retry forever). The budget defaults to the single shared
+/// `Outbox.deliveryBatchByteLimit` — the same value the automatic outbox
+/// path batches by — so the two delivery paths cannot drift and tests can
+/// inject a small limit into either. A single element larger than the
+/// whole budget still ships alone — a legal batch of one.
+extension Array where Element == SyncChangeEvent {
+    func batchedForDelivery(
+        maxCount: Int,
+        byteLimit: Int = Outbox.deliveryBatchByteLimit
+    ) -> [[Element]] {
         precondition(maxCount > 0)
+        precondition(byteLimit > 0)
         let encoder = JSONEncoder()
         var batches: [[Element]] = []
         var current: [Element] = []
@@ -559,7 +566,7 @@ private extension Array where Element == SyncChangeEvent {
         for element in self {
             let size = (try? encoder.encode(element))?.count ?? Outbox.unknownFileSizeEstimate
             if current.count == maxCount
-                || (!current.isEmpty && bytes + size > Outbox.deliveryBatchByteLimit) {
+                || (!current.isEmpty && bytes + size > byteLimit) {
                 batches.append(current)
                 current = []
                 bytes = 0
