@@ -51,7 +51,7 @@ DEFAULT_MAX_RECORDS_PER_BATCH = 500
 # Metrics are client-owned identifiers, not a receiver-side allowlist. The
 # pattern keeps them safe to store, index, and group: short, single-token,
 # no whitespace or path/SQL-style surprises.
-_METRIC_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_METRIC_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _MAX_METRIC_LENGTH = 64
 
 _MAX_UNIT_LENGTH = 64
@@ -85,14 +85,17 @@ _RECORD_REQUIRED_KEYS = frozenset(
 # spelling of null) or present with null or a string.
 _RECORD_OPTIONAL_KEYS = frozenset({"sourceName", "deviceName"})
 
+# Patterns are anchored with \Z and applied via fullmatch: Python's `$`
+# also matches before a trailing newline, which would let "…uuid\n" or
+# "steps\n" slip through and later blow up (or corrupt stored data).
 _UUID_PATTERN = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
-_CHANNEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+_CHANNEL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
 # ISO 8601 date-time with a mandatory UTC offset ("Z" or "+HH:MM") and
 # optional fractional seconds (1-9 digits).
 _TIMESTAMP_PATTERN = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$"
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})\Z"
 )
 
 
@@ -107,7 +110,7 @@ class ValidationError(Exception):
 
 def parse_timestamp(value, where):
     """Parses an ISO 8601 date-time with offset; returns an aware datetime."""
-    if not isinstance(value, str) or not _TIMESTAMP_PATTERN.match(value):
+    if not isinstance(value, str) or not _TIMESTAMP_PATTERN.fullmatch(value):
         raise ValidationError(
             "invalid_record",
             "%s must be an ISO 8601 date-time with a UTC offset." % where,
@@ -140,16 +143,25 @@ def format_timestamp_utc(moment):
 
 
 def parse_record_id(value, where):
-    if not isinstance(value, str) or not _UUID_PATTERN.match(value):
+    if not isinstance(value, str) or not _UUID_PATTERN.fullmatch(value):
         raise ValidationError(
             "invalid_record", "%s must be a canonical UUID string." % where
         )
-    return str(uuid.UUID(value)).lower()
+    # The pattern only admits strings uuid.UUID can parse; the guard exists
+    # so a future pattern edit can never turn malformed input into an
+    # unhandled ValueError that drops the connection instead of answering
+    # with the documented 400.
+    try:
+        return str(uuid.UUID(value)).lower()
+    except ValueError:
+        raise ValidationError(
+            "invalid_record", "%s must be a canonical UUID string." % where
+        )
 
 
 def parse_metric(value, where):
     """Shape-checks a client-owned metric identifier (no allowlist)."""
-    if not isinstance(value, str) or not _METRIC_PATTERN.match(value):
+    if not isinstance(value, str) or not _METRIC_PATTERN.fullmatch(value):
         raise ValidationError(
             "invalid_metric",
             "%s has an invalid metric identifier." % where,
@@ -416,7 +428,7 @@ def _validate_series_data(data, where):
             % (where, _MAX_SERIES_CHANNELS),
         )
     for index, channel in enumerate(channels):
-        if not isinstance(channel, str) or not _CHANNEL_NAME_PATTERN.match(channel):
+        if not isinstance(channel, str) or not _CHANNEL_NAME_PATTERN.fullmatch(channel):
             raise ValidationError(
                 "invalid_record_data",
                 "%s channel %d has an invalid name." % (where, index),

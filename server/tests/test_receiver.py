@@ -621,6 +621,76 @@ class TypedDataValidationTests(ReceiverServerTestCase):
             make_payload(make_changes(make_upsert(make_record(id="6f9619ff-8b86-xxxx-b42d-00c04fc964ff")))),
         )
 
+    # ---- trailing-newline regressions -------------------------------------
+    #
+    # Python's `$` also matches before a trailing "\n", so `$`-anchored
+    # patterns let "…\n"-suffixed values through: a UUID then blew up inside
+    # uuid.UUID as an unhandled ValueError (dropping the connection instead
+    # of answering 400), and a metric/channel was stored with the newline.
+    # Patterns are fullmatch/\Z-anchored; these tests pin that behavior.
+
+    def test_rejects_batch_id_with_trailing_newline(self):
+        payload = make_payload(make_changes(make_upsert(make_record())))
+        payload["batchId"] = payload["batchId"] + "\n"
+        self.post_expect("invalid_record", payload)
+
+    def test_rejects_record_id_with_trailing_newline(self):
+        self.post_expect(
+            "invalid_record",
+            make_payload(make_changes(make_upsert(make_record(id=str(uuid.uuid4()) + "\n")))),
+        )
+
+    def test_rejects_delete_id_with_trailing_newline(self):
+        deletion = {
+            "kind": "delete",
+            "id": str(uuid.uuid4()) + "\n",
+            "metric": "steps",
+            "startDate": "2026-09-20T00:00:00.000Z",
+            "endDate": "2026-09-20T00:00:00.000Z",
+        }
+        self.post_expect(
+            "invalid_record", make_payload(make_changes(deletion))
+        )
+
+    def test_rejects_metric_with_trailing_newline(self):
+        self.post_expect(
+            "invalid_metric",
+            make_payload(make_changes(make_upsert(make_record(metric="steps\n")))),
+        )
+
+    def test_rejects_series_channel_with_trailing_newline(self):
+        self.post_expect(
+            "invalid_record_data",
+            make_payload(make_changes(make_upsert(make_record(kind="series", data={
+                "type": "series", "seriesType": "electrocardiogramVoltage",
+                "seriesID": str(uuid.uuid4()), "chunkIndex": 0,
+                "channels": ["t\n"], "points": [[0.0]],
+            })))),
+        )
+
+    def test_rejects_timestamp_with_trailing_newline(self):
+        self.post_expect(
+            "invalid_record",
+            make_payload(make_changes(make_upsert(make_record(
+                startDate="2026-09-20T00:00:00.000Z\n",
+            )))),
+        )
+
+    def test_malformed_uuid_answers_contract_error_not_connection_drop(self):
+        # Defense in depth: even if a value ever slips past the pattern,
+        # parse_record_id must convert the uuid.UUID ValueError into the
+        # documented ValidationError, and the server must answer 400.
+        self.assertFalse(validation._UUID_PATTERN.fullmatch("110e8400-e29b-41d4-a716-446655440000\n"))
+        with self.assertRaises(validation.ValidationError) as caught:
+            validation.parse_record_id("110e8400-e29b-41d4-a716-446655440000\n", "test")
+        self.assertEqual(caught.exception.code, "invalid_record")
+        # And over the wire: a 400 with a safe body, not a dropped socket.
+        payload = make_payload(make_changes(make_upsert(make_record())))
+        payload["batchId"] = "110e8400-e29b-41d4-a716-446655440000\n"
+        status, body = self.post("/v1/records", payload)
+        self.assertEqual(status, 400)
+        self.assertErrorCode(status, body, "invalid_record")
+
     def test_rejects_naive_dates(self):
         self.post_expect(
             "invalid_record",
