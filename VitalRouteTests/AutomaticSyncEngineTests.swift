@@ -2307,7 +2307,7 @@ final class ScriptedHealthProvider: HealthDataProviding {
     /// exactly-once completion whose releases are counted, so a test can
     /// prove the engine neither answers early nor answers twice.
     @discardableResult
-    func fireObserver() -> FiredNotification? {
+    fileprivate func fireObserver() -> FiredNotification? {
         guard let observerHandler else { return nil }
         let releases = ReleaseCounter()
         let completion = ObserverCompletion { releases.increment() }
