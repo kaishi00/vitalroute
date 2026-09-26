@@ -13,6 +13,9 @@ final class DestinationRecoveryTests: XCTestCase {
     private var defaults: UserDefaults!
     private var defaultsSuiteName: String!
     private var center: NotificationCenter!
+    /// Shared controllable clock; the fixture engines read it for backoff
+    /// and retry arithmetic.
+    private var clock: ClockBox!
 
     private let endpoint = "https://health.example.org/v1/records"
     private let token = "recovery-test-token-0001"
@@ -24,6 +27,7 @@ final class DestinationRecoveryTests: XCTestCase {
         defaults = UserDefaults(suiteName: defaultsSuiteName)
         defaults.removePersistentDomain(forName: defaultsSuiteName)
         center = NotificationCenter()
+        clock = ClockBox()
     }
 
     override func tearDown() async throws {
@@ -50,7 +54,8 @@ final class DestinationRecoveryTests: XCTestCase {
             client: client,
             stateStore: SyncStateStore(directory: tempDirectory),
             outbox: Outbox(directory: tempDirectory),
-            defaults: defaults
+            defaults: defaults,
+            now: { clock.now }
         )
     }
 
@@ -149,7 +154,10 @@ final class DestinationRecoveryTests: XCTestCase {
         let relaunched = makeEngine(provider: relaunchedProvider, client: relaunchedClient)
         await relaunched.restorePausedOnSecureStorage()
 
-        // The device was unlocked; secure storage is readable again.
+        // The device was unlocked; secure storage is readable again. The
+        // unlock also means the first process's delivery backoff has long
+        // elapsed.
+        clock.advance(by: 61)
         let coordinator = makeCoordinator(
             destinationStore: DestinationConfigurationStore(secureStore: secureStore),
             credentialStore: DestinationCredentialStore(secureStore: secureStore),
@@ -178,10 +186,12 @@ final class DestinationRecoveryTests: XCTestCase {
         secureStore.values[DestinationCredentialStore.storageKey(for: endpoint)] = token
         secureStore.failingKeys = [DestinationCredentialStore.storageKey(for: endpoint)]
 
+        // The persisted flag is read at engine init: a relaunch finds
+        // automatic sync on before anything else happens.
+        defaults.set(true, forKey: "automaticSync.enabled")
         let relaunchedProvider = ScriptedHealthProvider()
         let relaunchedClient = ScriptedSyncClient()
         let relaunched = makeEngine(provider: relaunchedProvider, client: relaunchedClient)
-        defaults.set(true, forKey: "automaticSync.enabled")
         await relaunched.restorePausedOnSecureStorage()
 
         let coordinator = makeCoordinator(
@@ -207,10 +217,10 @@ final class DestinationRecoveryTests: XCTestCase {
         secureStore.values["destination.endpoint"] = endpoint
         secureStore.values[DestinationCredentialStore.storageKey(for: endpoint)] = token
 
+        defaults.set(true, forKey: "automaticSync.enabled")
         let relaunchedProvider = ScriptedHealthProvider()
         let relaunchedClient = ScriptedSyncClient()
         let relaunched = makeEngine(provider: relaunchedProvider, client: relaunchedClient)
-        defaults.set(true, forKey: "automaticSync.enabled")
         await relaunched.restorePausedOnSecureStorage()
 
         let coordinator = makeCoordinator(
@@ -242,9 +252,9 @@ final class DestinationRecoveryTests: XCTestCase {
         secureStore.values[DestinationCredentialStore.storageKey(for: endpoint)] = token
         secureStore.failAllReads = true
 
+        defaults.set(true, forKey: "automaticSync.enabled")
         let relaunchedProvider = ScriptedHealthProvider()
         let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
-        defaults.set(true, forKey: "automaticSync.enabled")
         await relaunched.restorePausedOnSecureStorage()
 
         let coordinator = makeCoordinator(

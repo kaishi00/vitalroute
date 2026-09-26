@@ -2088,15 +2088,19 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let client = ScriptedSyncClient()
         _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
 
+        let clock = ClockBox()
         let relaunchedProvider = ScriptedHealthProvider()
         let relaunchedClient = ScriptedSyncClient()
-        let relaunched = makeEngine(provider: relaunchedProvider, client: relaunchedClient)
+        let relaunched = makeEngine(provider: relaunchedProvider, client: relaunchedClient, clock: clock)
         await relaunched.restorePausedOnSecureStorage()
 
         // Secure storage became readable: the recovery path reports the
         // persisted configuration — the same destination and token the
-        // queue was captured for. New live data arrives alongside.
+        // queue was captured for. Recovery happens at unlock, after the
+        // first process's delivery backoff has elapsed; new live data
+        // arrives alongside.
         relaunchedProvider.script = [.steps: [page(additions: [record(2)], anchor: "s2")]]
+        clock.advance(by: 61)
         await relaunched.configurationChanged(destination: endpoint, token: token, metrics: [.steps])
         await relaunched.waitUntilIdle()
 
