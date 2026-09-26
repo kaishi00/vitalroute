@@ -155,10 +155,15 @@ extension HealthRecord {
             )
         let words = spaced.split(separator: " ").map(String.init)
         guard !words.isEmpty else { return rawName }
-        let first = words[0].capitalized
-        let rest = words.dropFirst()
-            .map { ($0.count > 1 && $0 == $0.uppercased()) ? $0 : $0.lowercased() }
-            .joined(separator: " ")
+        // An all-capitals word keeps its casing wherever it appears; other
+        // words normalize (first capitalized, rest lowercased).
+        func cased(_ word: String) -> String {
+            (word.count > 1 && word == word.uppercased()) ? word : word.lowercased()
+        }
+        let first = words[0].count > 1 && words[0] == words[0].uppercased()
+            ? words[0]
+            : words[0].capitalized
+        let rest = words.dropFirst().map(cased).joined(separator: " ")
         return rest.isEmpty ? first : "\(first) \(rest)"
     }
 }

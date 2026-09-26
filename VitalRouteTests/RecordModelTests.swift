@@ -560,6 +560,7 @@ final class DisplayValueFormattingTests: XCTestCase {
         XCTAssertEqual(HealthRecord.humanizedCategoryName("asleepREM"), "Asleep REM")
         XCTAssertEqual(HealthRecord.humanizedCategoryName("sinusRhythm"), "Sinus rhythm")
         XCTAssertEqual(HealthRecord.humanizedCategoryName("awake"), "Awake")
+        XCTAssertEqual(HealthRecord.humanizedCategoryName("REM sleep"), "REM sleep")
         XCTAssertEqual(HealthRecord.humanizedCategoryName(""), "")
     }
 

@@ -122,7 +122,9 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
 
     /// Holds the query reference so the terminal callback can stop the
     /// long-running voltage query; the callback closure cannot capture the
-    /// query it is being constructed into.
+    /// query it is being constructed into. The box is intentionally part of
+    /// a retain cycle (query → handler → box → query): HealthKit releases
+    /// the handler when `stop(_:)` runs, which is what breaks the cycle.
     private final class ECGQueryBox: @unchecked Sendable {
         private let lock = NSLock()
         private var storedQuery: HKElectrocardiogramQuery?

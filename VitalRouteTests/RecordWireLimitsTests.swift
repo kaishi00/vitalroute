@@ -85,6 +85,16 @@ final class RecordWireLimitsTests: XCTestCase {
         XCTAssertFalse(RecordWireLimits.isTransmittable(record(data: ecg(chunks: 1_000_001))))
     }
 
+    func testFHIRKeyLengthMirrorsPythonCodePointCountsNotGraphemes() {
+        // Same trap as the envelope strings, on FHIR object keys: the
+        // receiver's len(key) counts code points.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
+        let under = FHIRJSON.object([(String(repeating: family, count: 30), .bool(true))]) // 210 code points
+        let over = FHIRJSON.object([(String(repeating: family, count: 40), .bool(true))]) // 280 code points
+        XCTAssertTrue(FHIRWireBudget.isWithinBudget(under))
+        XCTAssertFalse(FHIRWireBudget.isWithinBudget(over))
+    }
+
     func testNonFiniteAndNegativeValuesAreRejected() {
         XCTAssertFalse(RecordWireLimits.isTransmittable(record(
             data: .quantity(QuantityData(value: .infinity, unit: "count"))

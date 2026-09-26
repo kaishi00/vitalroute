@@ -246,7 +246,9 @@ enum FHIRWireBudget {
                 stack.append(contentsOf: items.map { ($0, depth + 1) })
             case .object(let entries):
                 for (key, nested) in entries {
-                    if key.isEmpty || key.count > 256 { return false }
+                    // Mirrors Python len(key) > 256: code points, not
+                    // graphemes.
+                    if key.isEmpty || key.unicodeScalars.count > 256 { return false }
                     stack.append((nested, depth + 1))
                 }
             case .double(let number):

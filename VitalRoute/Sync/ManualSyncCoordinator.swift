@@ -411,27 +411,31 @@ final class ManualSyncCoordinator {
                     windowStart: windowStart,
                     limit: SyncLimits.healthQueryPageSize
                 )
-            } catch let error as HealthKitServiceError
-                where (error == .corruptedAnchor || error == .seriesSampleUnavailable) && anchorData != nil {
-                // The saved cursor is unreadable (drop it and re-read the
-                // window from its start), or a sample vanished between the
-                // page read and its series fetch — an anchored re-read no
-                // longer reports it, and the receiver dedupes everything
-                // already acknowledged. Without this recovery the category
-                // would re-read the same doomed page on every sync.
-                anchorData = nil
-                do {
-                    try await stateStore.saveManualCursor(ManualExportCursor(
-                        destination: destination,
-                        metric: metric,
-                        windowStart: windowStart,
-                        anchorData: nil,
-                        updatedAt: Date()
-                    ))
-                } catch {
-                    throw ManualSyncError.progressNotSaved
+            } catch let error as HealthKitServiceError where anchorData != nil {
+                switch error {
+                case .corruptedAnchor, .seriesSampleUnavailable:
+                    // The saved cursor is unreadable (drop it and re-read the
+                    // window from its start), or a sample vanished between the
+                    // page read and its series fetch — an anchored re-read no
+                    // longer reports it, and the receiver dedupes everything
+                    // already acknowledged. Without this recovery the category
+                    // would re-read the same doomed page on every sync.
+                    anchorData = nil
+                    do {
+                        try await stateStore.saveManualCursor(ManualExportCursor(
+                            destination: destination,
+                            metric: metric,
+                            windowStart: windowStart,
+                            anchorData: nil,
+                            updatedAt: Date()
+                        ))
+                    } catch {
+                        throw ManualSyncError.progressNotSaved
+                    }
+                    continue
+                default:
+                    throw error
                 }
-                continue
             }
 
             summary.recordsFound += page.records.count
