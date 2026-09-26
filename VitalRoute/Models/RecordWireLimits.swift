@@ -51,13 +51,17 @@ enum RecordWireLimits {
     /// free-form strings and payload content need mirroring here.
     static func isTransmittable(_ record: HealthRecord) -> Bool {
         guard record.kind == record.data.kind else { return false }
-        if let source = record.sourceName, source.count > maxNameLength { return false }
-        if let device = record.deviceName, device.count > maxNameLength { return false }
+        // String lengths mirror Python's len(), which counts Unicode code
+        // points: `unicodeScalars.count`, not `count` (grapheme clusters).
+        // A family of merged emoji is one grapheme but many scalars, so
+        // the grapheme count can admit a string the receiver rejects.
+        if let source = record.sourceName, source.unicodeScalars.count > maxNameLength { return false }
+        if let device = record.deviceName, device.unicodeScalars.count > maxNameLength { return false }
         let metadata = record.metadata
         if metadata.count > Metadata.maxEntries { return false }
         for (key, value) in metadata {
-            if key.isEmpty || key.count > Metadata.maxKeyLength { return false }
-            if value.count > Metadata.maxValueLength { return false }
+            if key.isEmpty || key.unicodeScalars.count > Metadata.maxKeyLength { return false }
+            if value.unicodeScalars.count > Metadata.maxValueLength { return false }
         }
         guard isTransmittable(record.data) else { return false }
         // The receiver caps the CANONICAL data JSON it re-serializes with
@@ -88,33 +92,31 @@ enum RecordWireLimits {
     /// toward poisoning a batch server-side.
     static func canonicalByteCount(of encoded: Data) -> Int {
         var count = 0
-        var index = 0
-        let bytes = [UInt8](encoded)
-        while index < bytes.count {
-            let byte = bytes[index]
-            switch byte {
-            case 0x80...0xBF:
-                // UTF-8 continuation byte: its lead byte already accounted
-                // for the whole escaped scalar.
-                break
-            case 0xC2...0xDF:
-                count += 6 // 2-byte scalar -> short unicode escape
-            case 0xE0...0xEF:
-                count += 6 // 3-byte scalar -> short unicode escape
-            case 0xF0...0xF4:
-                count += 12 // astral scalar -> surrogate pair escape
-            case 0x5C:
-                count += 2 // backslash: canonical form always escapes it
-            case 0x22:
-                // Structural quotes cost 1, escaped quotes 2; counting 1
-                // and charging the escape lead covers both.
-                count += 1
-            default:
-                // Printable ASCII counts 1; control characters escape to
-                // at most 6 bytes.
-                count += (byte >= 0x20 && byte <= 0x7E) ? 1 : 6
+        encoded.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+            for byte in buffer {
+                switch byte {
+                case 0x80...0xBF:
+                    // UTF-8 continuation byte: its lead byte already accounted
+                    // for the whole escaped scalar.
+                    break
+                case 0xC2...0xDF:
+                    count += 6 // 2-byte scalar -> short unicode escape
+                case 0xE0...0xEF:
+                    count += 6 // 3-byte scalar -> short unicode escape
+                case 0xF0...0xF4:
+                    count += 12 // astral scalar -> surrogate pair escape
+                case 0x5C:
+                    count += 2 // backslash: canonical form always escapes it
+                case 0x22:
+                    // Structural quotes cost 1, escaped quotes 2; counting 1
+                    // and charging the escape lead covers both.
+                    count += 1
+                default:
+                    // Printable ASCII counts 1; control characters escape to
+                    // at most 6 bytes.
+                    count += (byte >= 0x20 && byte <= 0x7E) ? 1 : 6
+                }
             }
-            index += 1
         }
         return count
     }
@@ -125,7 +127,7 @@ enum RecordWireLimits {
             return payload.value.isFinite && isUnit(payload.unit)
         case .category(let payload):
             if payload.value < 0 || payload.value > maxInt32 { return false }
-            if let name = payload.name, name.count > maxShortStringLength { return false }
+            if let name = payload.name, name.unicodeScalars.count > maxShortStringLength { return false }
             return true
         case .correlation(let payload):
             let components = payload.components
@@ -183,11 +185,14 @@ enum RecordWireLimits {
             if let frequency = payload.samplingFrequency, !frequency.isFinite || frequency <= 0 {
                 return false
             }
+            if let chunks = payload.voltageChunkCount, chunks < 0 || chunks > 1_000_000 {
+                return false
+            }
             return true
         case .clinical(let payload):
             if !isShortString(payload.fhirType) { return false }
             if let identifier = payload.fhirIdentifier,
-                identifier.count > maxFHIRIdentifierLength {
+                identifier.unicodeScalars.count > maxFHIRIdentifierLength {
                 return false
             }
             return FHIRWireBudget.isWithinBudget(payload.fhirResource)
@@ -195,11 +200,11 @@ enum RecordWireLimits {
     }
 
     private static func isUnit(_ unit: String) -> Bool {
-        !unit.isEmpty && unit.count <= maxUnitLength
+        !unit.isEmpty && unit.unicodeScalars.count <= maxUnitLength
     }
 
     private static func isShortString(_ value: String) -> Bool {
-        !value.isEmpty && value.count <= maxShortStringLength
+        !value.isEmpty && value.unicodeScalars.count <= maxShortStringLength
     }
 
     /// The receiver's identifier shape, ASCII-only:

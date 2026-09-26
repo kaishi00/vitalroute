@@ -91,7 +91,7 @@ jobs:
       - name: Verify the app's pinned receiver revision matches server/
         run: |
           set -euo pipefail
-          pin="$(grep -m1 -oE '[0-9a-f]{40}' VitalRoute/Features/Destination/ServerSetup.swift)"
+          pin="$(grep -oE 'compatibleReceiverRef = "[0-9a-f]{40}"' VitalRoute/Features/Destination/ServerSetup.swift | grep -oE '[0-9a-f]{40}')"
           if [ "${#pin}" != "40" ]; then
             echo "::error::ServerSetup.compatibleReceiverRef is not a full 40-char commit SHA"
             exit 1

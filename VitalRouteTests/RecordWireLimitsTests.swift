@@ -46,6 +46,45 @@ final class RecordWireLimitsTests: XCTestCase {
         )))
     }
 
+    func testStringLengthsMirrorPythonCodePointCountsNotGraphemes() {
+        // A ZWJ family emoji is ONE grapheme cluster but ~7 Unicode scalars
+        // (Python len() counts code points, i.e. scalars). 100 of them are
+        // 100 graphemes but ~700 code points: Swift's String.count would
+        // admit the metadata value the receiver's len() rejects.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}" // 7 scalars, 1 grapheme
+        XCTAssertEqual(family.count, 1)
+        XCTAssertEqual(family.unicodeScalars.count, 7)
+        XCTAssertTrue(RecordWireLimits.isTransmittable(record(
+            metadata: ["k": String(repeating: family, count: 70)] // 490 code points: under 512
+        )))
+        XCTAssertFalse(RecordWireLimits.isTransmittable(record(
+            metadata: ["k": String(repeating: family, count: 74)] // 518 code points: over 512
+        )))
+        XCTAssertFalse(RecordWireLimits.isTransmittable(record(
+            sourceName: String(repeating: family, count: 40) // 280 code points > 256
+        )))
+    }
+
+    func testElectrocardiogramVoltageChunkCountMirror() {
+        func ecg(chunks: Int?) -> RecordData {
+            .electrocardiogram(ElectrocardiogramData(
+                classification: "sinusRhythm",
+                classificationRawValue: nil,
+                symptomStatus: nil,
+                symptomStatusRawValue: nil,
+                averageHeartRate: nil,
+                samplingFrequency: nil,
+                voltageSeriesID: nil,
+                voltageChunkCount: chunks
+            ))
+        }
+        XCTAssertTrue(RecordWireLimits.isTransmittable(record(data: ecg(chunks: nil))))
+        XCTAssertTrue(RecordWireLimits.isTransmittable(record(data: ecg(chunks: 0))))
+        XCTAssertTrue(RecordWireLimits.isTransmittable(record(data: ecg(chunks: 1_000_000))))
+        XCTAssertFalse(RecordWireLimits.isTransmittable(record(data: ecg(chunks: -1))))
+        XCTAssertFalse(RecordWireLimits.isTransmittable(record(data: ecg(chunks: 1_000_001))))
+    }
+
     func testNonFiniteAndNegativeValuesAreRejected() {
         XCTAssertFalse(RecordWireLimits.isTransmittable(record(
             data: .quantity(QuantityData(value: .infinity, unit: "count"))
@@ -166,7 +205,8 @@ final class RecordWireLimitsTests: XCTestCase {
 
     func testCanonicalByteCountMirrorsPythonEnsureASCII() {
         // BMP non-ASCII -> 6; astral -> 12; printable ASCII -> 1;
-        // backslash -> 2; quote -> 1; control -> 6.
+        // backslash -> 2; quote -> 1; and the five literal characters
+        // `u{01}` (backslash escaping aside, plain ASCII text) -> 5.
         XCTAssertEqual(
             RecordWireLimits.canonicalByteCount(
                 of: Data("\u{00E9}\u{1F600}a\"\\u{01}".utf8)

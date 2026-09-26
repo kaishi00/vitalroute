@@ -322,7 +322,6 @@ final class HealthKitRecordMapperTests: XCTestCase {
     func testSeriesChunkIDsDifferAcrossSeriesAndMatchTheSyntheticSenderScheme() {
         let first = HealthKitRecordMapper.deterministicChunkID(seriesID: UUID(), chunkIndex: 0)
         let second = HealthKitRecordMapper.deterministicChunkID(seriesID: UUID(), chunkIndex: 0)
-        let retried = HealthKitRecordMapper.deterministicChunkID(seriesID: first, chunkIndex: 7)
 
         XCTAssertNotEqual(first, second)
         // UUIDv4 formatting (version and variant bits) so the derived id is

@@ -53,12 +53,14 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
         let type = HKObjectType.electrocardiogramType()
         let predicate = HKQuery.predicateForObjects(with: [id])
         return try await withCheckedThrowingContinuation { continuation in
+            let once = ContinuationGuard()
             let query = HKSampleQuery(
                 sampleType: type,
                 predicate: predicate,
                 limit: 1,
                 sortDescriptors: nil
             ) { _, samples, error in
+                guard once.claim() else { return }
                 if let error {
                     continuation.resume(throwing: error)
                     return
@@ -75,18 +77,22 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
 
     /// Streams voltage measurements until the query reports done. Only the
     /// first terminal callback resumes — HealthKit does not promise the
-    /// error/done events are mutually exclusive, and a second resume of a
-    /// checked continuation is a trap. The actor keeps collection off the
-    /// callback thread's type.
+    /// error/done events are mutually exclusive — and the query is stopped
+    /// at that point so later measurements cannot accumulate unowned. The
+    /// actor keeps collection off the callback thread's type.
     private func fetchPoints(ecg: HKElectrocardiogram) async throws -> [[Double]] {
         let collector = MeasurementCollector()
         let microvolts = HKUnit.voltUnit(with: .micro)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let once = ContinuationGuard()
+            let queryBox = ECGQueryBox()
             let query = HKElectrocardiogramQuery(ecg) { _, result in
                 switch result {
                 case .error(let error):
                     guard once.claim() else { return }
+                    if let query = queryBox.query {
+                        self.healthStore.stop(query)
+                    }
                     continuation.resume(throwing: error)
                 case .measurement(let measurement):
                     // Apple Watch ECGs carry a single lead.
@@ -98,6 +104,9 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
                     }
                 case .done:
                     guard once.claim() else { return }
+                    if let query = queryBox.query {
+                        self.healthStore.stop(query)
+                    }
                     continuation.resume()
                 @unknown default:
                     // A future result kind carries no data this fetcher
@@ -105,9 +114,31 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
                     break
                 }
             }
+            queryBox.query = query
             healthStore.execute(query)
         }
         return collector.collected()
+    }
+
+    /// Holds the query reference so the terminal callback can stop the
+    /// long-running voltage query; the callback closure cannot capture the
+    /// query it is being constructed into.
+    private final class ECGQueryBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedQuery: HKElectrocardiogramQuery?
+
+        var query: HKElectrocardiogramQuery? {
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return storedQuery
+            }
+            set {
+                lock.lock()
+                storedQuery = newValue
+                lock.unlock()
+            }
+        }
     }
 
     private final class MeasurementCollector: @unchecked Sendable {

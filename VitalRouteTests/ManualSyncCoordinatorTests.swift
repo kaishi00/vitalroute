@@ -367,6 +367,37 @@ final class ManualSyncCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testVanishedSeriesSampleRecoversByReReadingTheWindow() async throws {
+        let provider = StubHealthDataProvider()
+        // First run completes and leaves a cursor.
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+
+        // A sample the page read reported disappears before its series data
+        // can load (deleted between the read and the fetch). The next sync
+        // must drop the cursor and re-read from the window start — the
+        // anchored re-read no longer reports the vanished sample — instead
+        // of re-reading the same doomed page forever.
+        provider.seriesSampleUnavailableForAnchoredRead = true
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([2], anchor: "a1", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(provider.exportQueries[0].sinceAnchor, Data("a1".utf8)) // offered the stored cursor
+        XCTAssertEqual(provider.exportQueries[1].sinceAnchor, nil) // rebuilt from the window start
+        XCTAssertEqual(coordinator.lastOutcome?.summary.recordsFound, 1)
+        XCTAssertEqual(client.sentBatches.count, 2) // the first run's and the recovery run's records
+    }
+
+    @MainActor
     func testNonAdvancingFullPageFailsHonestly() async throws {
         let provider = StubHealthDataProvider()
         let client = StubDestinationClient()
@@ -881,6 +912,10 @@ private final class StubHealthDataProvider: HealthDataProviding {
     /// When set, a query with a non-nil anchor throws a corrupted-anchor
     /// error (recovery tests).
     var corruptStoredAnchors = false
+    /// When set, a query with a non-nil anchor throws seriesSampleUnavailable
+    /// (recovery tests): a sample vanished between the page read and its
+    /// series fetch.
+    var seriesSampleUnavailableForAnchoredRead = false
     var shouldFailAuthorization = false
     private(set) var authorizationCount = 0
     private(set) var authorizationRequestedMetrics: [HealthMetric] = []
@@ -913,6 +948,9 @@ private final class StubHealthDataProvider: HealthDataProviding {
         exportQueries.append(RecordedQuery(metric: metric, sinceAnchor: anchorData, windowStart: windowStart))
         if corruptStoredAnchors, anchorData != nil {
             throw HealthKitServiceError.corruptedAnchor
+        }
+        if seriesSampleUnavailableForAnchoredRead, anchorData != nil {
+            throw HealthKitServiceError.seriesSampleUnavailable(metric: metric.rawValue)
         }
         let pages = script[metric] ?? []
 

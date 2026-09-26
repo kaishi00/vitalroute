@@ -411,11 +411,14 @@ final class ManualSyncCoordinator {
                     windowStart: windowStart,
                     limit: SyncLimits.healthQueryPageSize
                 )
-            } catch let error as HealthKitServiceError where error == .corruptedAnchor && anchorData != nil {
-                // The saved cursor is unreadable: drop it and re-read the
-                // window from its start, exactly like the change stream
-                // rebuilds its checkpoint. The receiver dedupes everything
-                // that was already acknowledged.
+            } catch let error as HealthKitServiceError
+                where (error == .corruptedAnchor || error == .seriesSampleUnavailable) && anchorData != nil {
+                // The saved cursor is unreadable (drop it and re-read the
+                // window from its start), or a sample vanished between the
+                // page read and its series fetch — an anchored re-read no
+                // longer reports it, and the receiver dedupes everything
+                // already acknowledged. Without this recovery the category
+                // would re-read the same doomed page on every sync.
                 anchorData = nil
                 do {
                     try await stateStore.saveManualCursor(ManualExportCursor(

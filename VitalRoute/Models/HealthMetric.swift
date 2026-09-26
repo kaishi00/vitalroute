@@ -31,11 +31,10 @@ struct HealthMetric: Hashable, Codable, Identifiable, Sendable, Comparable {
         self.rawValue = rawValue
     }
 
-    /// For catalog construction and decoding only. Callers outside
-    /// `MetricCatalog` must use the checked initializer; decoding uses it
-    /// so persisted selections and checkpoints of unknown metrics are
-    /// rejected instead of silently carried.
-    init(unchecked rawValue: String) {
+    /// For catalog construction in this file only; the compiler enforces
+    /// that: every other caller must use the checked initializer (or
+    /// decoding, which rejects unknown metrics instead of carrying them).
+    fileprivate init(unchecked rawValue: String) {
         self.rawValue = rawValue
     }
 

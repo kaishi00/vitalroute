@@ -229,8 +229,10 @@ actor Outbox {
 
     /// Live events first, topped up with backfill events to a full batch,
     /// bounded by both the event count and the byte budget. Scans the index
-    /// once and stops as soon as a limit is reached; a single oversized
-    /// event still ships alone (a legal batch of one).
+    /// once: the count limit ends the scan, while a byte-budget miss only
+    /// skips that entry and keeps scanning (smaller events later in the
+    /// queue may still fit). A single oversized event still ships alone (a
+    /// legal batch of one).
     private func pickBatchEntries() -> (entries: [Entry], skippedOversized: Int) {
         var chosen: [Entry] = []
         var bytes = 0
@@ -391,8 +393,9 @@ actor Outbox {
     /// Parses `evt-<sequence>-<lane>-<id>.json`. Files written before lanes
     /// existed (`evt-<sequence>-<id>.json`) read as backfill — they predate
     /// live prioritization, so classifying them as history keeps them behind
-    /// every live capture. The lane mark is never a hex digit, so the two
-    /// layouts are distinguishable.
+    /// every live capture. The layouts are distinguishable by group shape,
+    /// not alphabet: a legacy name's third hyphen-group is always an 8-char
+    /// UUID group or "del", never exactly "l" or "b".
     static func parse(fileName name: String) -> (sequence: UInt64, eventID: String, lane: Lane)? {
         guard name.hasPrefix("evt-") else { return nil }
         let probe = name.split(separator: "-", maxSplits: 3)

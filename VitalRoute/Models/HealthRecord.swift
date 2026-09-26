@@ -107,7 +107,7 @@ extension HealthRecord {
             return "\(Self.humanizedCategoryName(payload.activityType)) · \(Self.minutesLabel(payload.duration)) min"
         case .activitySummary(let payload):
             if let minutes = payload.exerciseTimeMinutes {
-                return "\(Self.clampedInt(minutes)) min exercise"
+                return "\(max(0, Self.clampedInt(minutes))) min exercise"
             }
             return "Daily summary"
         case .series(let payload):
@@ -138,14 +138,27 @@ extension HealthRecord {
     }
 
     /// "asleepREM" -> "Asleep REM"; "sinusRhythm" -> "Sinus rhythm".
+    /// Splits at lower→upper boundaries and before an acronym run's last
+    /// upper (so consecutive capitals stay together), and leaves an
+    /// all-capitals word's casing alone.
     static func humanizedCategoryName(_ rawName: String) -> String {
-        let words = rawName
-            .replacingOccurrences(of: "([A-Z])", with: " $1", options: .regularExpression)
-            .split(separator: " ")
-            .map(String.init)
+        let spaced = rawName
+            .replacingOccurrences(
+                of: "([a-z0-9])([A-Z])",
+                with: "$1 $2",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: "([A-Z])([A-Z][a-z])",
+                with: "$1 $2",
+                options: .regularExpression
+            )
+        let words = spaced.split(separator: " ").map(String.init)
         guard !words.isEmpty else { return rawName }
         let first = words[0].capitalized
-        let rest = words.dropFirst().joined(separator: " ").lowercased()
+        let rest = words.dropFirst()
+            .map { ($0.count > 1 && $0 == $0.uppercased()) ? $0 : $0.lowercased() }
+            .joined(separator: " ")
         return rest.isEmpty ? first : "\(first) \(rest)"
     }
 }

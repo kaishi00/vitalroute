@@ -546,6 +546,23 @@ final class DisplayValueFormattingTests: XCTestCase {
         XCTAssertEqual(record.displayValue, "\(Int.max) min exercise")
     }
 
+    func testNegativeExerciseMinutesRenderAsZero() {
+        let record = HealthRecord(
+            metric: .steps,
+            startDate: date,
+            endDate: date,
+            data: .activitySummary(ActivitySummaryData(exerciseTimeMinutes: -3))
+        )
+        XCTAssertEqual(record.displayValue, "0 min exercise")
+    }
+
+    func testHumanizedCategoryNameKeepsAcronymsAndSplitsCamelCase() {
+        XCTAssertEqual(HealthRecord.humanizedCategoryName("asleepREM"), "Asleep REM")
+        XCTAssertEqual(HealthRecord.humanizedCategoryName("sinusRhythm"), "Sinus rhythm")
+        XCTAssertEqual(HealthRecord.humanizedCategoryName("awake"), "Awake")
+        XCTAssertEqual(HealthRecord.humanizedCategoryName(""), "")
+    }
+
     func testClampedIntCoversTheBoundaries() {
         XCTAssertEqual(HealthRecord.clampedInt(.greatestFiniteMagnitude), Int.max)
         XCTAssertEqual(HealthRecord.clampedInt(-.greatestFiniteMagnitude), Int.min)
