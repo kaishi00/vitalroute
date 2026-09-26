@@ -149,12 +149,13 @@ envelope `metric`), a finite number, and a unit.
 }
 ```
 
-`activityType`: non-empty string ≤ 64 chars. `activityTypeRawValue`: integer.
-`duration`: finite number ≥ 0. The energy/distance fields are optional finite
-numbers ≥ 0.
+`activityType`: non-empty string ≤ 64 chars. `activityTypeRawValue`: integer
+0…2³¹−1. `duration`: finite number ≥ 0. The energy/distance fields are
+optional finite numbers ≥ 0.
 
 **`activitySummary`** — a daily activity summary. All fields optional except
-`type`; every numeric field is a finite number ≥ 0.
+`type`; every numeric field is a finite number ≥ 0; `dateComponentsUTC` is an
+optional string ≤ 64 characters.
 
 ```json
 {
@@ -192,8 +193,9 @@ records, one per chunk; see "Large records and series" below.
 HealthKit series. `parentID`: optional UUID of the owning record (the workout
 or ECG); required in practice so deletions cascade — see below.
 `chunkIndex`: integer 0…1,000,000. `channels`: array of 1–16 names, each
-matching the metric-identifier pattern ≤ 32 chars. `points`: array of at most
-2048 rows, each row exactly `len(channels)` finite numbers.
+matching the metric-identifier pattern ≤ 32 chars. `points`: array of 1–2048
+rows, each row exactly `len(channels)` finite numbers (an empty points array
+is rejected).
 
 **`electrocardiogram`** — an ECG sample's structured facts. Voltage data
 travels as `series` chunks whose `parentID`/`seriesID` reference this record.
@@ -215,8 +217,9 @@ travels as `series` chunks whose `parentID`/`seriesID` reference this record.
 `classification`: non-empty string ≤ 64 chars. `symptomStatus`: optional
 string ≤ 64 chars. `averageHeartRate`: optional finite ≥ 0 (count/min).
 `samplingFrequency`: optional finite > 0 (Hz). `voltageSeriesID`: optional
-UUID. `voltageChunkCount`: optional integer ≥ 0. The `*RawValue` fields are
-optional integers carrying the client's raw enum values alongside the names.
+UUID. `voltageChunkCount`: optional integer 0…1,000,000. The `*RawValue`
+fields are optional integers 0…2³¹−1 carrying the client's raw enum values
+alongside the names.
 
 **`clinical`** — a clinical record whose FHIR resource is preserved
 structurally, never flattened into strings.
