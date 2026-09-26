@@ -35,7 +35,17 @@ enum ServerSetup {
     /// Receiver revision this app's documentation and setup prompt are
     /// written for. A full commit SHA is used on purpose — branch names
     /// move and `main` may not be compatible; deploy exactly this revision.
-    static let compatibleReceiverRef = "5f2b8a3affad2c7e7ecce7a612af08489c2748fc"
+    ///
+    /// Maintainers: this must always reference a revision whose `server/`
+    /// tree is identical to the current tree's. CI enforces that (the
+    /// receiver-pin check fails when `server/` moves past the pin), so
+    /// changing anything under `server/` requires bumping this SHA in the
+    /// same change. Pinning an early revision of a branch is exactly the
+    /// failure the check exists to prevent: revision 5f2b8a3 (the first
+    /// contract-v3 draft) predates the fail-closed schema reset, the
+    /// unversioned-table boot protection, orphan-chunk suppression, and
+    /// the transport-limit hardening, and must never be referenced again.
+    static let compatibleReceiverRef = "39c31b5d0b3a3860c42ab70ae7e691bce5a393d3"
 
     /// The URL shape the app expects. The configured endpoint is the exact
     /// ingestion URL; the connection test is `GET` on the same URL.
@@ -73,7 +83,7 @@ enum ServerSetup {
     needs to enter in the app.
 
     Repository: https://github.com/kaishi00/vitalroute
-    Required receiver revision (full commit SHA): 5f2b8a3affad2c7e7ecce7a612af08489c2748fc
+    Required receiver revision (full commit SHA): 39c31b5d0b3a3860c42ab70ae7e691bce5a393d3
     The app requires contract v\#(compatibleContractVersion) for everything it does:
     connection test plus change-batch ingestion of additions and deletions
     (`apiVersion >= \#(compatibleContractVersion)`,
@@ -86,7 +96,7 @@ enum ServerSetup {
     Before acting, read these files at that revision:
     - server/README.md      (what the receiver is; configuration; HTTPS)
     - server/API.md          (the HTTP contract: connection test, ingestion,
-                              contract v2 semantics, limits)
+                              contract v3 semantics, limits)
     - server/DEPLOYMENT.md   (supported installation, HTTPS, day-2 operations)
 
     Ask the owner before choosing anything:

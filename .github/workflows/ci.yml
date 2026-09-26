@@ -88,6 +88,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Verify the app's pinned receiver revision matches server/
+        run: |
+          set -euo pipefail
+          pin="$(grep -m1 -oE '[0-9a-f]{40}' VitalRoute/Features/Destination/ServerSetup.swift)"
+          if [ "${#pin}" != "40" ]; then
+            echo "::error::ServerSetup.compatibleReceiverRef is not a full 40-char commit SHA"
+            exit 1
+          fi
+          echo "pinned receiver revision: $pin"
+          git fetch --no-tags --depth 1 origin "$pin" || git fetch --no-tags --unshallow origin
+          git cat-file -e "$pin:server/validation.py" || {
+            echo "::error::pinned revision $pin has no server/validation.py"
+            exit 1
+          }
+          # The in-app setup guide links the receiver docs and install
+          # instructions at this revision, so the pin must never drift
+          # behind the current server/ tree (this is what catches a pin
+          # left on an early draft of a branch). Any server/ change — code
+          # or documentation — requires bumping compatibleReceiverRef.
+          if ! git diff --quiet "$pin" HEAD -- server/; then
+            echo "::error::ServerSetup.compatibleReceiverRef ($pin) predates the current server/ tree; bump the pin to a commit containing the final server implementation."
+            git diff --stat "$pin" HEAD -- server/
+            exit 1
+          fi
+
       - name: Run receiver tests
         run: python3 -m unittest discover -s server/tests -v
 

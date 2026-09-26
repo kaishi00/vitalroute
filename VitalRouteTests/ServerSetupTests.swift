@@ -18,6 +18,20 @@ final class ServerSetupTests: XCTestCase {
                         "receiver ref must be a full 40-char lowercase commit SHA")
     }
 
+    func testPinnedRevisionIsNotAnObsoleteBranchDraft() {
+        // 5f2b8a3 is the first contract-v3 draft of the record-architecture
+        // branch: it predates the fail-closed schema reset, the
+        // unversioned-table boot protection, orphan-chunk suppression, and
+        // the transport-limit hardening. A PR review caught the guide
+        // pinned to it; this assertion and CI's receiver-pin check (which
+        // verifies the pinned revision's server/ tree matches HEAD's) keep
+        // an early draft from ever shipping as the setup target again.
+        XCTAssertNotEqual(
+            ServerSetup.compatibleReceiverRef,
+            "5f2b8a3affad2c7e7ecce7a612af08489c2748fc"
+        )
+    }
+
     func testContractConstantMatchesTheAutomaticSyncGate() {
         // The pin exists so sync works: contract v3 with additions and
         // deletions — the same predicate the engine checks, and the only
