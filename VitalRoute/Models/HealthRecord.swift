@@ -128,10 +128,10 @@ extension HealthRecord {
         max(0, clampedInt(seconds / 60))
     }
 
-    /// The Int init without the trap: finite values beyond Int's range
-    /// clamp to the nearest bound; non-finite values collapse to zero.
+    /// The Int init without the trap: values beyond Int's range (including
+    /// ±infinity) clamp to the nearest bound; only NaN collapses to zero.
     static func clampedInt(_ value: Double) -> Int {
-        guard value.isFinite else { return 0 }
+        if value.isNaN { return 0 }
         if value >= Double(Int.max) { return Int.max }
         if value <= Double(Int.min) { return Int.min }
         return Int(value)
