@@ -33,7 +33,7 @@ enum AutomaticSyncPauseReason: Equatable {
         case .receiverIncompatible(let detail):
             "Automatic sync is paused: the destination is not compatible (\(detail)). Update the receiver, then turn automatic sync off and on again."
         case .queueAtCapacity:
-            "Automatic sync is paused: too many pending changes are waiting to upload. Once they are delivered it will resume automatically."
+            "Automatic sync is uploading a large backlog before it captures more history. Once the backlog shrinks, history capture resumes automatically."
         case .authenticationFailed:
             "Automatic sync is paused: the destination rejected the API key. Fix the key, then turn automatic sync off and on again."
         case .protocolFailure(let detail):
@@ -80,6 +80,35 @@ enum BackgroundSyncLimits {
     static let changePageSize = 500
     static let pagesPerCategoryPerPass = 20
     static let maxDeliveryBatchesPerRun = 30
+
+    /// Backfill capture throttles when the historical queue reaches the
+    /// high-water mark and resumes only below the low-water mark. The gap
+    /// keeps a capture that is faster than delivery from flapping around a
+    /// single threshold. Live capture is never throttled by these.
+    static let backfillCaptureHighWater = 6_000
+    static let backfillCaptureLowWater = 1_500
+}
+
+/// The engine's state as the user should see it. Deliberately richer than
+/// `AutomaticSyncMode`: capture throttling and delivery are independent, and
+/// reporting "Paused" while the queue is actively draining tells the user
+/// the opposite of what is happening.
+enum AutomaticSyncDisplayStatus: Equatable {
+    /// Automatic sync is off.
+    case off
+    /// On, with nothing waiting and no work in flight.
+    case idle
+    /// On, with a pass running and no historical catch-up involved.
+    case working
+    /// On, with a pass reading a category's historical window.
+    case backfilling
+    /// On, with delivery draining a backlog while capture is throttled.
+    /// New records keep flowing to the front of the queue.
+    case deliveringBacklog
+    /// On, with pending changes waiting for the next execution opportunity.
+    case waitingRetry
+    /// On, but stopped for a reason that needs the user (or time).
+    case paused(AutomaticSyncPauseReason)
 }
 
 /// How a delivery failure should be handled.
@@ -114,6 +143,10 @@ final class AutomaticSyncEngine {
     private let workGate: SyncWorkGate
     private let defaults: UserDefaults
     private let now: @Sendable () -> Date
+    /// Backfill-capture hysteresis thresholds. Injectable so tests can
+    /// exercise the throttle with a handful of events.
+    @ObservationIgnored private let backfillHighWater: Int
+    @ObservationIgnored private let backfillLowWater: Int
 
     /// Injectable so tests can observe scheduling without BackgroundTasks;
     /// production sets the BGTaskScheduler-backed closure. Returns whether a
@@ -128,9 +161,18 @@ final class AutomaticSyncEngine {
     private(set) var lastStatusMessage: String?
     private(set) var isRunning = false
     private(set) var nextRetryAt: Date?
+    /// How many pending events belong to historical backfill lanes.
+    private(set) var backfillPendingCount = 0
+    /// Categories still reading their historical window.
+    private(set) var backfillingMetrics: Set<HealthMetric> = []
 
     @ObservationIgnored private var activeRunTask: Task<Void, Never>?
     @ObservationIgnored private var needsCatchUp = false
+    /// True while backfill capture is held back by the historical queue's
+    /// high-water mark. Cleared with hysteresis once delivery has drained it.
+    /// Observed: `displayStatus` projects it, so flipping it must invalidate
+    /// the views reading the status.
+    private var isBackfillThrottled = false
     /// Set when captured changes were discarded without being delivered.
     ///
     /// Dropping health data the user chose to send is not a transient
@@ -163,7 +205,9 @@ final class AutomaticSyncEngine {
         outbox: Outbox,
         workGate: SyncWorkGate = SyncWorkGate(),
         defaults: UserDefaults = .standard,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        backfillHighWater: Int = BackgroundSyncLimits.backfillCaptureHighWater,
+        backfillLowWater: Int = BackgroundSyncLimits.backfillCaptureLowWater
     ) {
         self.healthData = healthData
         self.client = client
@@ -172,6 +216,12 @@ final class AutomaticSyncEngine {
         self.workGate = workGate
         self.defaults = defaults
         self.now = now
+        self.backfillHighWater = backfillHighWater
+        self.backfillLowWater = backfillLowWater
+        precondition(
+            backfillLowWater <= backfillHighWater,
+            "hysteresis requires low <= high water"
+        )
         if defaults.bool(forKey: Self.enabledFlagKey) {
             mode = .active
         }
@@ -179,6 +229,35 @@ final class AutomaticSyncEngine {
 
     var isEnabled: Bool {
         mode != .disabled
+    }
+
+    /// The state as the UI should present it. The mode's `queueAtCapacity`
+    /// pause is backpressure on historical capture only — delivery drains on
+    /// every pass — so it is never reported as a paused engine, and a
+    /// deferred pause between retries reads as waiting, not stopped.
+    /// Prerequisite and destination-fault pauses keep the paused wording:
+    /// nothing will upload until the user acts, and saying otherwise would
+    /// be the same lie in the opposite direction.
+    var displayStatus: AutomaticSyncDisplayStatus {
+        guard mode != .disabled else { return .off }
+        if case .paused(let reason) = mode {
+            switch reason {
+            case .deferred, .queueAtCapacity:
+                break
+            default:
+                return .paused(reason)
+            }
+        }
+        if isRunning {
+            if isBackfillThrottled {
+                return .deliveringBacklog
+            }
+            if case .paused(.queueAtCapacity) = mode {
+                return .deliveringBacklog
+            }
+            return backfillingMetrics.isEmpty ? .working : .backfilling
+        }
+        return pendingCount > 0 ? .waitingRetry : .idle
     }
 
     /// Prepares the durable stores' on-disk layout (app-launch step).
@@ -353,6 +432,8 @@ final class AutomaticSyncEngine {
 
         activeRunTask?.cancel()
         observersRegistered = false
+        isBackfillThrottled = false
+        backfillingMetrics = []
         defaults.set(false, forKey: Self.enabledFlagKey)
         mode = .disabled
         // Nothing will capture these now; the next enable re-reads from the
@@ -392,6 +473,10 @@ final class AutomaticSyncEngine {
         destination = Self.normalizedDestination(endpoint)
         token = Self.normalizedToken(bearerToken)
         selectedMetrics = metrics
+        // Category states are re-derived from persisted checkpoints by the
+        // launch pass; nothing from the previous process carries over.
+        isBackfillThrottled = false
+        backfillingMetrics = []
         if let reason = unsatisfiedPrerequisite() {
             mode = .paused(reason)
             lastStatusMessage = reason.userMessage
@@ -476,6 +561,8 @@ final class AutomaticSyncEngine {
             // The claim is dropped with the rest of the purged state; a
             // trigger arriving from here on belongs to whatever comes next.
             needsCatchUp = false
+            isBackfillThrottled = false
+            backfillingMetrics = []
             let passWasRunning = activeRunTask != nil
             activeRunTask?.cancel()
             if let task = activeRunTask {
@@ -513,6 +600,7 @@ final class AutomaticSyncEngine {
         for removed in previousMetrics where !newMetrics.contains(removed) {
             await outbox.removeCategory(removed)
             await stateStore.clearCheckpoint(for: removed)
+            backfillingMetrics.remove(removed)
         }
         await refreshPendingCount()
 
@@ -795,12 +883,17 @@ final class AutomaticSyncEngine {
             }
         }
 
+        let counts = (try? await outbox.laneCounts()) ?? (live: 0, backfill: 0)
+        guard isCurrent(generation) else { return false }
+        updateBackfillThrottle(backfillPending: counts.backfill)
+
         let atCapacity = (try? await outbox.isAtCapacity()) ?? false
         guard isCurrent(generation) else { return false }
         if atCapacity {
-            // Backpressure: stop capturing, keep draining. The pause is
-            // auto-recoverable — once delivery drains below capacity, the
-            // next pass resumes queries.
+            // Extreme backpressure at the queue's total capacity: even live
+            // capture waits. Delivery is untouched and drains on this pass;
+            // the pause is auto-recoverable, clearing once delivery has
+            // made room.
             mode = .paused(.queueAtCapacity)
         } else {
             try await runQueryPass(generation: generation)
@@ -808,9 +901,31 @@ final class AutomaticSyncEngine {
         return true
     }
 
+    /// Hysteresis for historical capture: throttle at the high-water mark,
+    /// resume below the low-water mark. Evaluated once per pass; within a
+    /// pass only setting (never clearing) applies, so a single pass cannot
+    /// oscillate.
+    private func updateBackfillThrottle(backfillPending: Int) {
+        if isBackfillThrottled {
+            if backfillPending <= backfillLowWater {
+                isBackfillThrottled = false
+            }
+        } else if backfillPending >= backfillHighWater {
+            isBackfillThrottled = true
+        }
+    }
+
     /// Bounded incremental capture: for every selected category, page
     /// through additions and deletions since the checkpoint, appending to
     /// the outbox *before* advancing the checkpoint.
+    ///
+    /// Each page rides the lane its content belongs to: pages of a category
+    /// still draining its historical window are backfill, delivered behind
+    /// live captures; once a read reaches the head of the stream (a page
+    /// that is not full), the category is live and everything it reads —
+    /// including that tail page — rides the live lane. Live capture is never
+    /// throttled; only historical reading pauses at the backfill high-water
+    /// mark, so a huge backfill can never delay newly arriving samples.
     private func runQueryPass(generation: Int) async throws {
         guard !selectedMetrics.isEmpty else { return }
         // Record the queue's owner before anything is added to it: if the
@@ -820,7 +935,7 @@ final class AutomaticSyncEngine {
         // would read a correctly-attributed queue as foreign and discard it.
         try await stateStore.savePendingScope(destination)
 
-        let capacity = Outbox.capacityLimit
+        let capacity = await outbox.capacityLimitValue()
         // The configured backfill depth decides how far a bootstrap reaches.
         // An existing scope survives unless the depth now reaches DEEPER
         // than the scope's fixed window (a shallower preference never
@@ -828,12 +943,14 @@ final class AutomaticSyncEngine {
         // category changed — the identity rules below.
         let desiredWindowStart = BackfillDepth.stored(in: defaults)
             .windowStart(from: now())
+        var backfillPending = ((try? await outbox.laneCounts())?.backfill) ?? 0
         for metric in HealthMetric.allCases where selectedMetrics.contains(metric) {
             try Task.checkCancellation()
 
             let checkpoint = await stateStore.loadCheckpoint(for: metric)
             let scope: CategoryScope
             var anchorData: Data?
+            var isCaughtUp: Bool
             if let checkpoint,
                checkpoint.scope.destination == destination,
                checkpoint.scope.metric == metric,
@@ -843,6 +960,7 @@ final class AutomaticSyncEngine {
                 // least as deep as the current preference.
                 scope = checkpoint.scope
                 anchorData = checkpoint.anchorData
+                isCaughtUp = checkpoint.isCaughtUp
             } else {
                 // Bootstrap: fresh generation, fixed window from the
                 // configured depth (down to the entire history). Never a
@@ -854,6 +972,50 @@ final class AutomaticSyncEngine {
                     windowStart: desiredWindowStart
                 )
                 anchorData = nil
+                isCaughtUp = false
+            }
+            if isCaughtUp {
+                backfillingMetrics.remove(metric)
+            } else {
+                backfillingMetrics.insert(metric)
+            }
+
+            // Backpressure on historical reading only: a category still
+            // working through its window pauses that reading while a large
+            // backfill queue waits to upload, resuming with hysteresis once
+            // delivery drains it. Its FRESH samples are still served — the
+            // head read below keeps them flowing on the live lane — so a
+            // deep backfill can never delay newly arriving data.
+            if !isCaughtUp, isBackfillThrottled {
+                do {
+                    let fresh = try await healthData.latestRecords(
+                        for: metric,
+                        windowStart: scope.windowStart,
+                        limit: BackgroundSyncLimits.changePageSize
+                    )
+                    if !fresh.isEmpty {
+                        // The checkpoint is untouched: these additions ride
+                        // the live lane ahead of the queued history, and the
+                        // unthrottled anchored read re-reports them later —
+                        // the outbox dedupes by event identity and the
+                        // receiver answers idempotently. Deletions for these
+                        // samples are captured by that same later read.
+                        _ = try await outbox.append(fresh.map { SyncChangeEvent.upsert($0) }, lane: .live)
+                    }
+                } catch let cancellation as CancellationError {
+                    throw cancellation
+                } catch {
+                    // A sick head-read must not take the pass down: later
+                    // live categories and the delivery phase still run, and
+                    // the next pass retries from the untouched checkpoint.
+                    continue
+                }
+                let pendingNow = (try? await outbox.pendingCount()) ?? 0
+                if pendingNow >= capacity {
+                    mode = .paused(.queueAtCapacity)
+                    return
+                }
+                continue
             }
 
             for pageLoopIndex in 0..<BackgroundSyncLimits.pagesPerCategoryPerPass {
@@ -875,10 +1037,22 @@ final class AutomaticSyncEngine {
                 // A page captured while a destination change or category
                 // disable began must not be committed after that purge.
                 try Task.checkCancellation()
+                // A full page belongs to the historical catch-up; the page
+                // that drains the stream to its head is live data.
+                let lane: Outbox.Lane = isCaughtUp || !page.isFull ? .live : .backfill
                 var events: [SyncChangeEvent] = page.additions.map { .upsert($0) }
                 events.append(contentsOf: page.deletions.map { .delete($0) })
                 if !events.isEmpty {
-                    _ = try await outbox.append(events)
+                    let written = try await outbox.append(events, lane: lane)
+                    if lane == .backfill {
+                        // Only actually-written events count toward the
+                        // high-water mark: crash-replay pages dedupe to zero.
+                        backfillPending += written
+                    }
+                }
+                if !page.isFull, !isCaughtUp {
+                    isCaughtUp = true
+                    backfillingMetrics.remove(metric)
                 }
                 // Checkpoint advance happens only after the page's changes
                 // are durably recorded: a crash before this line replays
@@ -887,7 +1061,8 @@ final class AutomaticSyncEngine {
                 try await stateStore.save(CategoryCheckpoint(
                     scope: scope,
                     anchorData: anchorData,
-                    updatedAt: now()
+                    updatedAt: now(),
+                    isCaughtUp: isCaughtUp
                 ))
                 if !page.isFull {
                     break
@@ -904,9 +1079,16 @@ final class AutomaticSyncEngine {
                 if pageLoopIndex == BackgroundSyncLimits.pagesPerCategoryPerPass - 1 {
                     needsCatchUp = true
                 }
+                // Historical reading yields to delivery at the high-water
+                // mark without blocking later live categories in this pass.
+                if !isCaughtUp, backfillPending >= backfillHighWater {
+                    isBackfillThrottled = true
+                    break
+                }
             }
 
             guard isCurrent(generation) else { return }
+            backfillPending = ((try? await outbox.laneCounts())?.backfill) ?? backfillPending
             let pending = (try? await outbox.pendingCount()) ?? 0
             if pending >= capacity {
                 mode = .paused(.queueAtCapacity)
@@ -1047,7 +1229,9 @@ final class AutomaticSyncEngine {
     }
 
     private func refreshPendingCount() async {
-        pendingCount = (try? await outbox.pendingCount()) ?? 0
+        let counts = (try? await outbox.laneCounts()) ?? (live: 0, backfill: 0)
+        backfillPendingCount = counts.backfill
+        pendingCount = counts.live + counts.backfill
     }
 
     private func scheduleRetryIfNeeded(generation: Int) async {
@@ -1112,6 +1296,8 @@ final class AutomaticSyncEngine {
         await refreshPendingCount()
         // The retry belonged to the queue being discarded.
         nextRetryAt = nil
+        isBackfillThrottled = false
+        backfillingMetrics = []
         await stateStore.clearAllCheckpoints()
         await stateStore.clearPendingScope()
         await stateStore.saveRetryState(.initial)
@@ -1142,6 +1328,8 @@ final class AutomaticSyncEngine {
         await stateStore.saveRetryState(.initial)
         await refreshPendingCount()
         nextRetryAt = nil
+        isBackfillThrottled = false
+        backfillingMetrics = []
         discardedWorkNotice = "\(pending) queued change(s) were discarded because they were captured for a different destination. They will never be sent anywhere else."
         // The fact is recorded unconditionally — a user must not silently
         // lose queued health data — but the visible line is only this pass's

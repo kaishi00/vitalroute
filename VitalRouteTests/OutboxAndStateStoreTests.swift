@@ -49,9 +49,9 @@ final class OutboxAndStateStoreTests: XCTestCase {
         let outbox = makeOutbox()
         try await outbox.prepare()
 
-        _ = try await outbox.append([.upsert(record(1)), .upsert(record(2))])
+        _ = try await outbox.append([.upsert(record(1)), .upsert(record(2))], lane: .backfill)
         // Crash-replay of the same events must not duplicate.
-        _ = try await outbox.append([.upsert(record(2)), .upsert(record(3))])
+        _ = try await outbox.append([.upsert(record(2)), .upsert(record(3))], lane: .backfill)
 
         let snapshot = try await outbox.nextBatch()
         XCTAssertEqual(snapshot.totalPending, 3)
@@ -66,7 +66,7 @@ final class OutboxAndStateStoreTests: XCTestCase {
         let outbox = makeOutbox()
         try await outbox.prepare()
         let events = (1...250).map { SyncChangeEvent.upsert(record($0)) }
-        _ = try await outbox.append(events)
+        _ = try await outbox.append(events, lane: .backfill)
 
         let first = try await outbox.nextBatch()
         XCTAssertEqual(first.events.count, Outbox.deliveryBatchSize)
@@ -81,7 +81,7 @@ final class OutboxAndStateStoreTests: XCTestCase {
     func testRemoveOnlyAfterAcknowledgedKeepsOthers() async throws {
         let outbox = makeOutbox()
         try await outbox.prepare()
-        _ = try await outbox.append([.upsert(record(1)), deletion(2), .upsert(record(3))])
+        _ = try await outbox.append([.upsert(record(1)), deletion(2), .upsert(record(3))], lane: .backfill)
 
         // Simulate: only record 1's batch was acknowledged.
         await outbox.remove(eventIDs: [SyncChangeEvent.upsert(record(1)).eventID])
@@ -97,7 +97,7 @@ final class OutboxAndStateStoreTests: XCTestCase {
             .upsert(record(1, metric: .steps)),
             .upsert(record(2, metric: .sleep)),
             deletion(3, metric: .sleep),
-        ])
+        ], lane: .backfill)
 
         await outbox.removeCategory(.sleep)
 
@@ -113,7 +113,7 @@ final class OutboxAndStateStoreTests: XCTestCase {
         for index in 0..<Outbox.capacityLimit {
             events.append(.upsert(record(index + 1)))
         }
-        _ = try await outbox.append(events)
+        _ = try await outbox.append(events, lane: .backfill)
 
         let atCapacity = try await outbox.isAtCapacity()
         XCTAssertTrue(atCapacity)
@@ -128,7 +128,7 @@ final class OutboxAndStateStoreTests: XCTestCase {
     func testCorruptEventFileIsQuarantinedNotStalling() async throws {
         let outbox = makeOutbox()
         try await outbox.prepare()
-        _ = try await outbox.append([.upsert(record(1)), .upsert(record(2))])
+        _ = try await outbox.append([.upsert(record(1)), .upsert(record(2))], lane: .backfill)
 
         // Corrupt the first event file in insertion order.
         let files = try FileManager.default.contentsOfDirectory(atPath: tempDirectory.appendingPathComponent("outbox").path)
@@ -151,7 +151,7 @@ final class OutboxAndStateStoreTests: XCTestCase {
     func testRemoveAllPurgesQuarantineToo() async throws {
         let outbox = makeOutbox()
         try await outbox.prepare()
-        _ = try await outbox.append([.upsert(record(1))])
+        _ = try await outbox.append([.upsert(record(1))], lane: .backfill)
         let outboxDir = tempDirectory.appendingPathComponent("outbox")
         let files = try FileManager.default.contentsOfDirectory(atPath: outboxDir.path)
         let target = files.first { $0.hasPrefix("evt-") }!
@@ -164,6 +164,150 @@ final class OutboxAndStateStoreTests: XCTestCase {
         let pending = try await outbox.pendingCount()
         XCTAssertEqual(pending, 0)
     }
+
+    // MARK: Lanes
+
+    func testLiveLaneIsDeliveredBeforeBackfill() async throws {
+        let outbox = makeOutbox()
+        try await outbox.prepare()
+
+        _ = try await outbox.append(
+            (1...5).map { SyncChangeEvent.upsert(record($0)) },
+            lane: .backfill
+        )
+        _ = try await outbox.append([.upsert(record(100))], lane: .live)
+
+        let counts = try await outbox.laneCounts()
+        XCTAssertEqual(counts.live, 1)
+        XCTAssertEqual(counts.backfill, 5)
+
+        // The fresh sample rides the first batch; history follows.
+        let snapshot = try await outbox.nextBatch()
+        XCTAssertEqual(snapshot.events.first?.eventID, SyncChangeEvent.upsert(record(100)).eventID)
+        XCTAssertEqual(snapshot.totalPending, 6)
+    }
+
+    func testBackfillBatchIsToppedUpToFullSize() async throws {
+        let outbox = makeOutbox()
+        try await outbox.prepare()
+        _ = try await outbox.append([.upsert(record(1))], lane: .live)
+        _ = try await outbox.append(
+            (2...50).map { SyncChangeEvent.upsert(record($0)) },
+            lane: .backfill
+        )
+
+        let snapshot = try await outbox.nextBatch()
+        XCTAssertEqual(snapshot.events.count, 50)
+        XCTAssertEqual(snapshot.events.first?.eventID, SyncChangeEvent.upsert(record(1)).eventID)
+    }
+
+    func testLaneAssignmentSurvivesRelaunch() async throws {
+        let outbox = makeOutbox()
+        try await outbox.prepare()
+        _ = try await outbox.append([.upsert(record(1))], lane: .live)
+        _ = try await outbox.append([.upsert(record(2))], lane: .backfill)
+
+        // A fresh instance rebuilds its index from the file names.
+        let revived = makeOutbox()
+        let counts = try await revived.laneCounts()
+        XCTAssertEqual(counts.live, 1)
+        XCTAssertEqual(counts.backfill, 1)
+        let snapshot = try await revived.nextBatch()
+        XCTAssertEqual(snapshot.events.first?.eventID, SyncChangeEvent.upsert(record(1)).eventID)
+    }
+
+    func testLegacyFileNamesReadAsBackfill() async throws {
+        let outbox = makeOutbox()
+        try await outbox.prepare()
+        let event = SyncChangeEvent.upsert(record(7))
+        let data = try JSONEncoder().encode(event)
+        let legacyURL = tempDirectory
+            .appendingPathComponent("outbox", isDirectory: true)
+            .appendingPathComponent("evt-000000000000002A-\(event.eventID).json")
+        try data.write(to: legacyURL)
+
+        let revived = makeOutbox()
+        let counts = try await revived.laneCounts()
+        XCTAssertEqual(counts.live, 0)
+        XCTAssertEqual(counts.backfill, 1)
+        let snapshot = try await revived.nextBatch()
+        XCTAssertEqual(snapshot.events.first?.eventID, event.eventID)
+        XCTAssertEqual(snapshot.totalPending, 1)
+    }
+
+    func testAppendFailureDoesNotPoisonDedupOnReplay() async throws {
+        let outbox = makeOutbox()
+        try await outbox.prepare()
+        let queueDirectory = tempDirectory.appendingPathComponent("outbox", isDirectory: true)
+
+        // A read-only queue directory fails every event write (a locked
+        // device does the equivalent with file protection).
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o444],
+            ofItemAtPath: queueDirectory.path
+        )
+        do {
+            _ = try await outbox.append([.upsert(record(1))], lane: .live)
+            XCTFail("the write should have failed")
+        } catch {
+            // expected
+        }
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: queueDirectory.path
+        )
+
+        // The replay after the failure must be able to append the event:
+        // a poisoned dedup index here silently loses the record while the
+        // checkpoint advances over it.
+        _ = try await outbox.append([.upsert(record(1))], lane: .live)
+        let snapshot = try await outbox.nextBatch()
+        XCTAssertEqual(snapshot.events.count, 1)
+        XCTAssertEqual(snapshot.totalPending, 1)
+    }
+
+    func testLegacyDeleteEventFileNamesReadAsBackfill() async throws {
+        let outbox = makeOutbox()
+        try await outbox.prepare()
+        let event = deletion(9)
+        let data = try JSONEncoder().encode(event)
+        // Legacy layout, and the id's first hyphen-group is "del" -- the one
+        // legacy shape that could be mistaken for a lane mark.
+        let legacyURL = tempDirectory
+            .appendingPathComponent("outbox", isDirectory: true)
+            .appendingPathComponent("evt-0000000000000044-" + event.eventID + ".json")
+        try data.write(to: legacyURL)
+
+        let revived = makeOutbox()
+        let counts = try await revived.laneCounts()
+        XCTAssertEqual(counts.live, 0)
+        XCTAssertEqual(counts.backfill, 1)
+        let snapshot = try await revived.nextBatch()
+        XCTAssertEqual(snapshot.events.first?.eventID, event.eventID)
+    }
+
+    func testCheckpointWithoutCaughtUpKeyDecodesAsBackfill() async throws {
+        let store = makeStateStore()
+        try await store.prepare()
+        let scope = CategoryScope(
+            destination: "https://health.example.org/v1/records",
+            metric: .steps,
+            generation: UUID(),
+            // JSONDecoder's default date strategy decodes the JSON's raw
+            // double as a timeIntervalSinceReferenceDate.
+            windowStart: Date(timeIntervalSinceReferenceDate: 1_000_000)
+        )
+        // Pre-lane checkpoint JSON: no isCaughtUp key at all.
+        let legacyJSON = "{\"scope\":{\"destination\":\"https://health.example.org/v1/records\",\"metric\":\"steps\",\"generation\":\"\(scope.generation.uuidString.lowercased())\",\"windowStart\":1000000.0},\"anchorData\":\"YTE=\",\"updatedAt\":1000060.0}"
+        let url = tempDirectory.appendingPathComponent("state").appendingPathComponent("chk-steps.json")
+        try legacyJSON.write(to: url, atomically: true, encoding: .utf8)
+
+        let checkpoint = await store.loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.isCaughtUp, false, "pre-lane checkpoints decode as still-backfilling")
+        XCTAssertEqual(checkpoint?.scope, scope)
+    }
+
+    // MARK: Checkpoints
 
     func testCheckpointRoundTripPersistsAcrossStoreInstances() async throws {
         let scope = CategoryScope(

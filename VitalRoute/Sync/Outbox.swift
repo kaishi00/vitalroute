@@ -8,8 +8,19 @@ import Foundation
 /// acknowledgments make re-sends safe. Events are removed only after a
 /// reconciled acknowledgment.
 ///
+/// Events carry a lane (`live` or `backfill`). Live lanes hold changes read
+/// at the head of a category's stream — the records HealthKit just wrote —
+/// and are always delivered first; backfill lanes hold a category's
+/// historical catch-up, so new health data never waits behind years of
+/// history. The lane is encoded in the file name, which keeps the event
+/// payload (also the wire format) untouched; files written before lanes
+/// existed read as backfill.
+///
 /// Order comes from a monotonic sequence prefix in the file name, so
-/// delivery order is insertion order regardless of directory enumeration.
+/// delivery order is insertion order within a lane. A pending index is kept
+/// in memory and rebuilt from disk on `prepare()`; with the index, counting
+/// and batching a five-figure backlog costs the same per pass as a small
+/// one, which matters inside a short background execution window.
 actor Outbox {
     struct PendingSnapshot: Equatable {
         let events: [SyncChangeEvent]
@@ -19,20 +30,57 @@ actor Outbox {
         var quarantinedCount: Int = 0
     }
 
+    /// Delivery priority of a pending event.
+    enum Lane: Sendable, Equatable {
+        case live
+        case backfill
+
+        /// Single-character mark for the lane in the file name. The
+        /// disambiguation from legacy names rests on group shape, not the
+        /// alphabet: a legacy name's third hyphen-group is always an 8-char
+        /// UUID group or "del", never exactly "l" or "b".
+        var fileMark: String {
+            switch self {
+            case .live: "l"
+            case .backfill: "b"
+            }
+        }
+
+        static func from(fileMark: some StringProtocol) -> Lane {
+            fileMark == "l" ? .live : .backfill
+        }
+    }
+
     static let capacityLimit = 10_000
     static let deliveryBatchSize = 200
 
+    private struct Entry {
+        let sequence: UInt64
+        let eventID: String
+        let lane: Lane
+        let fileName: String
+    }
+
     private let directory: URL
     private let protection: FileProtectionType
+    private let capacityLimit: Int
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
-    private var nextSequence: UInt64
+    private var nextSequence: UInt64 = 0
     private var loaded = false
+    /// Pending events, sorted by sequence. Rebuilt from the directory in
+    /// `prepare()` and maintained by every mutation afterwards.
+    private var index: [Entry] = []
+    private var knownIDs: Set<String> = []
 
-    init(directory: URL, protection: FileProtectionType = .completeUntilFirstUserAuthentication) {
+    init(
+        directory: URL,
+        protection: FileProtectionType = .completeUntilFirstUserAuthentication,
+        capacityLimit: Int = Outbox.capacityLimit
+    ) {
         self.directory = directory.appendingPathComponent("outbox", isDirectory: true)
         self.protection = protection
-        self.nextSequence = 0
+        self.capacityLimit = capacityLimit
     }
 
     func prepare() throws {
@@ -43,7 +91,7 @@ actor Outbox {
         )
         excludeFromBackup(directory)
         sweepTemporaryFiles()
-        nextSequence = (try? currentMaxSequence()) ?? 0
+        rebuildIndex()
         loaded = true
     }
 
@@ -58,46 +106,111 @@ actor Outbox {
         }
     }
 
-    /// Appends events, deduplicating against files already present. Returns
-    /// the number of new files written.
+    private func rebuildIndex() {
+        var entries: [Entry] = []
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) {
+            for name in names {
+                guard let parsed = Self.parse(fileName: name) else { continue }
+                entries.append(Entry(
+                    sequence: parsed.sequence,
+                    eventID: parsed.eventID,
+                    lane: parsed.lane,
+                    fileName: name
+                ))
+            }
+        }
+        // Deterministic on collision (which crash-replay prevents anyway):
+        // keep the earliest-sequence file for an eventID.
+        entries.sort { $0.sequence < $1.sequence }
+        var deduped: [Entry] = []
+        var ids = Set<String>()
+        for entry in entries {
+            guard ids.insert(entry.eventID).inserted else {
+                // The earliest-sequence file wins; the loser is dead bytes
+                // that would otherwise resurrect on the next rebuild.
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent(entry.fileName))
+                continue
+            }
+            deduped.append(entry)
+        }
+        index = deduped
+        knownIDs = ids
+        nextSequence = deduped.last?.sequence ?? 0
+    }
+
+    /// Appends events, deduplicating against pending events already present.
+    /// Returns the number of new files written.
+    ///
+    /// A failed write must leave no dedup trace: the engine replays the same
+    /// page after a storage failure, and the replay must be able to re-append
+    /// the event whose write failed, or its checkpoint would advance over
+    /// health data that was never persisted. The ID is therefore claimed only
+    /// after the write succeeds. A sequence number burned by a failed write
+    /// stays burned — names never collide, so the gap is harmless.
     @discardableResult
-    func append(_ events: [SyncChangeEvent]) throws -> Int {
+    func append(_ events: [SyncChangeEvent], lane: Lane) throws -> Int {
         try ensurePrepared()
-        var existing = allEventIDs()
         var written = 0
-        for event in events where existing.insert(event.eventID).inserted {
+        for event in events {
+            guard !knownIDs.contains(event.eventID) else { continue }
             let data = try encoder.encode(event)
             nextSequence += 1
-            let name = fileName(sequence: nextSequence, eventID: event.eventID)
+            let name = Self.fileName(sequence: nextSequence, lane: lane, eventID: event.eventID)
             try atomicWrite(data, to: directory.appendingPathComponent(name))
+            // nextSequence only grows, so appending keeps the index sorted.
+            knownIDs.insert(event.eventID)
+            index.append(Entry(
+                sequence: nextSequence,
+                eventID: event.eventID,
+                lane: lane,
+                fileName: name
+            ))
             written += 1
         }
         return written
     }
 
     /// The next delivery batch plus the total number of pending events.
-    /// Undecodable event files are quarantined (moved to `quarantine/`) so
-    /// one corrupt file cannot stall delivery forever; the count is
-    /// reported for surfacing.
+    ///
+    /// Live events are always taken before backfill events (insertion order
+    /// within each lane), so fresh samples ride in the first batches of a
+    /// pass while a historical catch-up is still draining. Undecodable event
+    /// files are quarantined (moved to `quarantine/`) so one corrupt file
+    /// cannot stall delivery forever; the count is reported for surfacing.
     func nextBatch() throws -> PendingSnapshot {
         try ensurePrepared()
-        var files = try sortedEventFiles()
+        let chosen = pickBatchEntries()
         var events: [SyncChangeEvent] = []
         var quarantined = 0
-        for file in files {
-            guard events.count < Self.deliveryBatchSize else { break }
-            if let data = try? Data(contentsOf: file.url),
+        for entry in chosen {
+            let url = directory.appendingPathComponent(entry.fileName)
+            if let data = try? Data(contentsOf: url),
                let event = try? decoder.decode(SyncChangeEvent.self, from: data) {
                 events.append(event)
             } else {
-                quarantine(file.url)
+                quarantine(url)
+                knownIDs.remove(entry.eventID)
+                index.removeAll { $0.eventID == entry.eventID }
                 quarantined += 1
             }
         }
-        if quarantined > 0 {
-            files = try sortedEventFiles()
+        return PendingSnapshot(events: events, totalPending: index.count, quarantinedCount: quarantined)
+    }
+
+    /// Live events first, topped up with backfill events to a full batch.
+    /// Scans the index once and stops as soon as the batch is full.
+    private func pickBatchEntries() -> [Entry] {
+        var chosen: [Entry] = []
+        chosen.reserveCapacity(Self.deliveryBatchSize)
+        for entry in index where entry.lane == .live {
+            chosen.append(entry)
+            if chosen.count == Self.deliveryBatchSize { return chosen }
         }
-        return PendingSnapshot(events: events, totalPending: files.count, quarantinedCount: quarantined)
+        for entry in index where entry.lane == .backfill {
+            chosen.append(entry)
+            if chosen.count == Self.deliveryBatchSize { break }
+        }
+        return chosen
     }
 
     /// Keeps a corrupt file for inspection without letting it block the
@@ -118,18 +231,42 @@ actor Outbox {
 
     func pendingCount() throws -> Int {
         try ensurePrepared()
-        return try sortedEventFiles().count
+        return index.count
+    }
+
+    /// Pending counts per lane: `(live, backfill)`.
+    func laneCounts() throws -> (live: Int, backfill: Int) {
+        try ensurePrepared()
+        var live = 0
+        var backfill = 0
+        for entry in index {
+            if entry.lane == .live {
+                live += 1
+            } else {
+                backfill += 1
+            }
+        }
+        return (live, backfill)
+    }
+
+    /// The capacity this outbox applies. The engine reads it rather than the
+    /// static default so tests can exercise the backpressure paths with a
+    /// small queue.
+    func capacityLimitValue() -> Int {
+        capacityLimit
     }
 
     /// Removes acknowledged events. A crash before removal is safe: the
     /// event is re-sent and the receiver answers idempotently.
     func remove(eventIDs: [String]) {
+        try? ensurePrepared()
         let targets = Set(eventIDs)
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else {
-            return
-        }
-        for name in names where targets.contains(eventID(fromFileName: name)) {
-            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        guard !targets.isEmpty else { return }
+        index.removeAll { entry in
+            guard targets.contains(entry.eventID) else { return false }
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(entry.fileName))
+            knownIDs.remove(entry.eventID)
+            return true
         }
     }
 
@@ -140,23 +277,25 @@ actor Outbox {
     }
 
     func removeAll() {
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else {
-            return
-        }
-        for name in names {
-            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) {
+            for name in names {
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+            }
         }
         // Quarantined files are health data too: a full clear discards them.
         try? FileManager.default.removeItem(
             at: directory.appendingPathComponent("quarantine", isDirectory: true)
         )
-        nextSequence = 0
+        // Re-derive from disk rather than assuming the empty state: if the
+        // enumeration above failed, surviving files must stay counted, and
+        // the sequence must not restart over them.
+        rebuildIndex()
     }
 
-    /// True when the queue has reached its capacity and query passes must
-    /// stop applying backpressure instead of discarding changes.
+    /// True when the queue has reached its capacity and capture must stop
+    /// applying backpressure instead of discarding changes.
     func isAtCapacity() throws -> Bool {
-        try pendingCount() >= Self.capacityLimit
+        try pendingCount() >= capacityLimit
     }
 
     // MARK: - Files
@@ -171,62 +310,57 @@ actor Outbox {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else {
             return
         }
+        var removed = false
         for name in names {
+            guard Self.parse(fileName: name) != nil else { continue }
             let url = directory.appendingPathComponent(name)
-            if let data = try? Data(contentsOf: url),
-               let event = try? decoder.decode(SyncChangeEvent.self, from: data),
-               predicate(event) {
-                try? FileManager.default.removeItem(at: url)
+            guard let data = try? Data(contentsOf: url),
+                  let event = try? decoder.decode(SyncChangeEvent.self, from: data) else {
+                // Undecodable: unattributable to any category, so a purge
+                // must not leave its bytes behind counted and undeliverable.
+                quarantine(url)
+                removed = true
+                continue
             }
+            guard predicate(event) else { continue }
+            try? FileManager.default.removeItem(at: url)
+            removed = true
+        }
+        // A category purge is a rare configuration event; one rescan keeps
+        // the index exact without tracking metrics per entry.
+        if removed {
+            rebuildIndex()
         }
     }
 
-    private struct EventFile {
-        let sequence: UInt64
-        let url: URL
-    }
-
-    private func sortedEventFiles() throws -> [EventFile] {
-        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
-        return names
-            .compactMap { name -> EventFile? in
-                guard name.hasPrefix("evt-") else { return nil }
-                // Subdirectories never match the file pattern above.
-                let url = directory.appendingPathComponent(name)
-                let sequence = sequence(fromFileName: name)
-                return EventFile(sequence: sequence, url: url)
-            }
-            .sorted { $0.sequence < $1.sequence }
-    }
-
-    private func allEventIDs() -> Set<String> {
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else {
-            return []
-        }
-        return Set(names.filter { $0.hasPrefix("evt-") }.map(eventID(fromFileName:)))
-    }
-
-    private func currentMaxSequence() throws -> UInt64 {
-        try sortedEventFiles().last?.sequence ?? 0
-    }
-
-    private func fileName(sequence: UInt64, eventID: String) -> String {
+    static func fileName(sequence: UInt64, lane: Lane, eventID: String) -> String {
         // Fixed-width sequence keeps lexicographic == numeric order.
-        "evt-\(String(format: "%016llX", sequence))-\(eventID).json"
+        "evt-\(String(format: "%016llX", sequence))-\(lane.fileMark)-\(eventID).json"
     }
 
-    private func sequence(fromFileName name: String) -> UInt64 {
-        let parts = name.split(separator: "-", maxSplits: 2)
-        guard parts.count == 3, let value = UInt64(parts[1], radix: 16) else {
-            return 0
+    /// Parses `evt-<sequence>-<lane>-<id>.json`. Files written before lanes
+    /// existed (`evt-<sequence>-<id>.json`) read as backfill — they predate
+    /// live prioritization, so classifying them as history keeps them behind
+    /// every live capture. The lane mark is never a hex digit, so the two
+    /// layouts are distinguishable.
+    static func parse(fileName name: String) -> (sequence: UInt64, eventID: String, lane: Lane)? {
+        guard name.hasPrefix("evt-") else { return nil }
+        let probe = name.split(separator: "-", maxSplits: 3)
+        guard probe.count >= 3, let sequence = UInt64(probe[1], radix: 16) else {
+            return nil
         }
-        return value
+        if probe.count == 4, probe[2] == "l" || probe[2] == "b" {
+            let id = Self.stripJSONSuffix(String(probe[3]))
+            return (sequence, id, Lane.from(fileMark: probe[2]))
+        }
+        let parts = name.split(separator: "-", maxSplits: 2)
+        guard parts.count == 3 else { return nil }
+        let id = Self.stripJSONSuffix(String(parts[2]))
+        return (sequence, id, .backfill)
     }
 
-    private func eventID(fromFileName name: String) -> String {
-        let parts = name.split(separator: "-", maxSplits: 2)
-        guard parts.count == 3 else { return name }
-        return String(parts[2]).replacingOccurrences(of: ".json", with: "")
+    private static func stripJSONSuffix(_ name: String) -> String {
+        name.hasSuffix(".json") ? String(name.dropLast(5)) : name
     }
 
     private func atomicWrite(_ data: Data, to destination: URL) throws {

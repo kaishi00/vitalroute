@@ -59,6 +59,18 @@ protocol HealthDataProviding {
         limit: Int
     ) async throws -> HealthChangePage
 
+    /// The newest additions for a category, read from the head of its
+    /// stream (newest first) without an anchor. Used while a category's
+    /// historical reading is throttled: fresh samples must reach the
+    /// destination without waiting for the backfill to drain. Deletions are
+    /// deliberately not reported here — the later unthrottled anchored read
+    /// recovers them, and re-reported additions dedupe downstream.
+    func latestRecords(
+        for metric: HealthMetric,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> [HealthRecord]
+
     /// Registers change observers for the categories; re-registering replaces
     /// the previous observer set, and a failed registration leaves none of
     /// its partial work behind.

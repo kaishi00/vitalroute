@@ -281,6 +281,54 @@ final class HealthKitService: HealthDataProviding {
         )
     }
 
+    /// Head-of-stream read: newest additions for the category, no anchor,
+    /// newest first. Used by the automatic engine while a category's
+    /// historical reading is throttled so fresh samples reach the
+    /// destination without waiting for the backfill.
+    func latestRecords(
+        for metric: HealthMetric,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> [HealthRecord] {
+        guard isAvailable else {
+            throw HealthKitServiceError.unavailable
+        }
+        guard let sampleType = HealthKitRecordMapper.sampleType(for: metric) else {
+            return []
+        }
+        let predicate = HKQuery.predicateForSamples(
+            withStart: windowStart,
+            end: nil,
+            options: [.strictStartDate]
+        )
+        let sort = NSSortDescriptor(
+            key: HKSampleSortIdentifierEndDate,
+            ascending: false
+        )
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[HealthRecord], Error>) in
+            let once = ContinuationGuard()
+            let query = HKSampleQuery(
+                sampleType: sampleType,
+                predicate: predicate,
+                limit: limit,
+                sortDescriptors: [sort]
+            ) { _, samples, error in
+                guard once.claim() else { return }
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                // Map on HealthKit's callback thread so only Sendable values
+                // cross the continuation.
+                let records = (samples ?? []).compactMap {
+                    HealthKitRecordMapper.makeRecord(from: $0, metric: metric)
+                }
+                continuation.resume(returning: records)
+            }
+            healthStore.execute(query)
+        }
+    }
+
     private nonisolated static func queryChangePage(
         for metric: HealthMetric,
         using healthStore: HKHealthStore,

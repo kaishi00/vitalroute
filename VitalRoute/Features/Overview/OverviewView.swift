@@ -274,11 +274,19 @@ struct OverviewView: View {
         let pending = autoSyncEngine.pendingCount > 0
             ? " · \(autoSyncEngine.pendingCount) pending"
             : ""
-        switch autoSyncEngine.mode {
-        case .disabled:
+        switch autoSyncEngine.displayStatus {
+        case .off:
             return ""
-        case .active:
-            return "Automatic sync is on\(pending). iOS throttles background delivery; it is never guaranteed to be immediate."
+        case .idle:
+            return "Automatic sync is on and up to date. VitalRoute is woken by Apple Health when new data arrives; iOS controls how soon background work runs."
+        case .working:
+            return "Automatic sync is delivering new records now."
+        case .backfilling:
+            return "Automatic sync is catching up on history — \(autoSyncEngine.backfillPendingCount) backfilled change(s) waiting to upload. New records are delivered ahead of them."
+        case .deliveringBacklog:
+            return "Automatic sync is uploading a backlog of \(autoSyncEngine.pendingCount) change(s) before it catches up on history. Delivery runs on every wake until the backlog is gone."
+        case .waitingRetry:
+            return "Automatic sync is on; \(autoSyncEngine.pendingCount) change(s) are waiting to upload and a retry has been requested. iOS decides when background work actually runs."
         case .paused(let reason):
             return "\(reason.userMessage)\(pending)"
         }

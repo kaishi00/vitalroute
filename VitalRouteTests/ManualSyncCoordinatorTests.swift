@@ -918,6 +918,15 @@ private final class StubHealthDataProvider: HealthDataProviding {
         HealthChangePage(additions: [], deletions: [], anchorData: anchorData, isFull: false)
     }
 
+
+    func latestRecords(
+        for metric: HealthMetric,
+        windowStart: Date,
+        limit: Int
+    ) async throws -> [HealthRecord] {
+        []
+    }
+
     func observeChanges(
         for metrics: Set<HealthMetric>,
         handler: @escaping @Sendable (ObserverCompletion) -> Void
