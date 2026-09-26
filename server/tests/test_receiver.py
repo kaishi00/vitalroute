@@ -388,6 +388,53 @@ class TypedDataValidationTests(ReceiverServerTestCase):
         raw = json.dumps(make_payload(make_changes(make_upsert(make_record())))).replace("8000", "1e999").encode("utf-8")
         self.post_expect("invalid_record_data", raw=raw)
 
+    def test_rejects_integer_literal_too_large_for_float(self):
+        # An unbounded JSON integer literal reaches _require_finite_number
+        # as a Python int; math.isfinite would raise OverflowError (an
+        # unhandled exception that drops the connection) unless converted
+        # into the documented 400.
+        raw = json.dumps(make_payload(make_changes(make_upsert(make_record())))).replace("8000", "1" + "0" * 400).encode("utf-8")
+        self.post_expect("invalid_record_data", raw=raw)
+
+    def test_rejects_huge_integer_inside_fhir_resource(self):
+        raw = json.dumps(make_payload(make_changes(make_upsert(make_record(
+            kind="clinical",
+            data={"type": "clinical", "fhirType": "Observation",
+                  "fhirResource": {"valueQuantity": {"value": 10 ** 400}}},
+        ))))).encode("utf-8")
+        self.post_expect("invalid_record_data", raw=raw)
+
+    def test_rejects_record_date_outside_representable_utc_range(self):
+        # Year 1 with +05:30 normalizes to year 0: the astimezone probe in
+        # parse_timestamp must convert the OverflowError into a 400.
+        self.post_expect(
+            "invalid_record",
+            make_payload(make_changes(make_upsert(make_record(
+                startDate="0001-01-01T00:00:00.000+05:30",
+            )))),
+        )
+        self.post_expect(
+            "invalid_record",
+            make_payload(make_changes(make_upsert(make_record(
+                endDate="9999-12-31T23:59:59.999-05:30",
+            )))),
+        )
+
+    def test_rejects_batch_created_at_outside_representable_utc_range(self):
+        payload = make_payload(make_changes(make_upsert(make_record())))
+        payload["createdAt"] = "0001-01-01T00:00:00.000+05:30"
+        self.post_expect("invalid_record", payload)
+
+    def test_rejects_delete_interval_outside_representable_utc_range(self):
+        deletion = {
+            "kind": "delete",
+            "id": str(uuid.uuid4()),
+            "metric": "steps",
+            "startDate": "0001-01-01T00:00:00.000+05:30",
+            "endDate": "0001-01-01T00:00:00.000+05:30",
+        }
+        self.post_expect("invalid_record", make_payload(make_changes(deletion)))
+
     def test_rejects_unknown_data_type(self):
         self.post_expect(
             "unknown_record_data_type",
@@ -1178,18 +1225,28 @@ class RoutingAndFramingTests(ReceiverServerTestCase):
         self.assertEqual(status, 404)
         self.assertEqual(body["error"]["code"], "not_found")
 
+        status, body = self.get("/admin")
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"]["code"], "not_found")
+
     def test_query_string_is_not_part_of_the_contract(self):
         status, body = self.get("/v1/records?verbose=1")
         self.assertEqual(status, 404)
 
     def test_unsupported_method_is_405(self):
-        status, body, _ = self.request("PUT", "/v1/records", body=make_payload(make_changes(make_upsert(make_record()))))
+        status, body, response = self.request("PUT", "/v1/records", body=make_payload(make_changes(make_upsert(make_record()))))
+        self.assertEqual(status, 405)
+        self.assertIn("GET", response.getheader("Allow") or "")
+
+        status, body, _ = self.request("DELETE", "/v1/records")
         self.assertEqual(status, 405)
 
     def test_head_and_options_get_safe_json_errors(self):
-        for method in ("HEAD", "OPTIONS"):
-            status, body, _ = self.request(method, "/v1/records")
-            self.assertIn(status, (405, 200))
+        status, body, _ = self.request("HEAD", "/v1/records")
+        self.assertEqual(status, 405)
+        status, body, _ = self.request("OPTIONS", "/v1/records")
+        self.assertEqual(status, 405)
+        self.assertEqual(body["error"]["code"], "method_not_allowed")
 
     def test_post_to_health_path_is_405(self):
         status, body = self.post("/v1/health", make_payload(make_changes(make_upsert(make_record()))))
@@ -1203,9 +1260,10 @@ class RoutingAndFramingTests(ReceiverServerTestCase):
         connection.putheader("Content-Length", "-5")
         connection.endheaders()
         response = connection.getresponse()
-        response.read()
+        body = json.loads(response.read())
         connection.close()
         self.assertEqual(response.status, 400)
+        self.assertEqual(body["error"]["code"], "invalid_content_length")
 
     def test_transfer_encoding_rejected_on_ingestion(self):
         connection = http.client.HTTPConnection(HOST, self.port, timeout=10)
@@ -1217,9 +1275,11 @@ class RoutingAndFramingTests(ReceiverServerTestCase):
         connection.endheaders()
         connection.send(b"%x\r\n%s\r\n0\r\n\r\n" % (len(body), body))
         response = connection.getresponse()
-        response.read()
+        body = json.loads(response.read())
         connection.close()
         self.assertEqual(response.status, 400)
+        self.assertEqual(body["error"]["code"], "invalid_transfer_encoding")
+        self.assertEqual(self.stored_count(), 0)
 
     def test_missing_content_length_rejected(self):
         connection = http.client.HTTPConnection(HOST, self.port, timeout=10)
@@ -1235,7 +1295,66 @@ class RoutingAndFramingTests(ReceiverServerTestCase):
     def test_error_responses_have_safe_shape(self):
         status, body = self.post("/v1/records", "{not json")
         self.assertEqual(body["error"]["code"], "invalid_json")
+        self.assertEqual(set(body.keys()), {"error"})
+        self.assertEqual(set(body["error"].keys()), {"code", "message"})
         self.assertNotIn(TOKEN, json.dumps(body))
+
+    def test_connection_is_reusable_after_errors_that_did_read_the_body(self):
+        connection = http.client.HTTPConnection(HOST, self.port, timeout=10)
+        try:
+            # 1) A valid request primes the connection.
+            connection.request(
+                "GET", "/v1/records", headers={"Authorization": "Bearer " + TOKEN}
+            )
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 200)
+
+            # 2) An error whose body was fully read must not poison framing.
+            bad = json.dumps(make_payload(make_changes(make_upsert(make_record(id="not-a-uuid"))))).encode("utf-8")
+            connection.request(
+                "POST",
+                "/v1/records",
+                body=bad,
+                headers={
+                    "Authorization": "Bearer " + TOKEN,
+                    "Content-Type": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 400)
+
+            # 3) The same connection still serves the next request.
+            connection.request(
+                "GET", "/v1/records", headers={"Authorization": "Bearer " + TOKEN}
+            )
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 200)
+        finally:
+            connection.close()
+
+    def test_error_before_body_read_closes_the_connection(self):
+        # Unauthorized POST with a body: the server must close the
+        # connection rather than leave the unread body to be parsed as a
+        # subsequent request (request-smuggling framing).
+        connection = http.client.HTTPConnection(HOST, self.port, timeout=10)
+        body = json.dumps(make_payload(make_changes(make_upsert(make_record())))).encode("utf-8")
+        connection.request(
+            "POST",
+            "/v1/records",
+            body=body,
+            headers={
+                "Authorization": "Bearer wrong-token-aaaaaaaaa",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+        self.assertEqual(response.status, 401)
+        self.assertEqual(response.getheader("Connection"), "close")
+        connection.close()
 
 
 class SlowClientTimeoutTests(unittest.TestCase):

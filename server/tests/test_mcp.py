@@ -156,6 +156,24 @@ class ToolTests(QueryServerTestCase):
         finally:
             connection.close()
 
+    def test_deeply_nested_json_answers_parse_error_not_connection_drop(self):
+        # Adversarially deep nesting during json.loads raises RecursionError
+        # (not a ValueError); the handler must convert it to the documented
+        # parse error instead of letting it escape and drop the socket.
+        depth = 100_000
+        payload = ("[" * depth + "]" * depth).encode("utf-8")
+        connection = http.client.HTTPConnection(HOST, self.port, timeout=10)
+        try:
+            connection.request("POST", "/", body=payload,
+                               headers={"Authorization": "Bearer " + TOKEN,
+                                        "Content-Type": "application/json"})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            self.assertEqual(response.status, 400)
+            self.assertEqual(body["error"]["code"], -32700)
+        finally:
+            connection.close()
+
     def test_get_healthz_and_405(self):
         status, body = self.request("GET", "/healthz", token=None)
         self.assertEqual((status, body["status"]), (200, "ok"))

@@ -306,7 +306,9 @@ class QueryHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length > 0 else b""
         try:
             message = json.loads(body.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError: adversarially deep nesting during JSON parse
+            # must answer the parse error, not escape and drop the socket.
             self._send_json(400, {"jsonrpc": "2.0", "id": None,
                                   "error": {"code": -32700, "message": "Parse error."}})
             return

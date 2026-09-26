@@ -133,6 +133,17 @@ def parse_timestamp(value, where):
         raise ValidationError(
             "invalid_record", "%s must include a UTC offset." % where
         )
+    try:
+        # Fail here, with a code, rather than in format_timestamp_utc:
+        # normalizing an extreme date to UTC (year 1 or 9999 with a large
+        # offset) leaves datetime's representable range, and that must
+        # answer 400 instead of escaping and dropping the connection.
+        parsed.astimezone(datetime.timezone.utc)
+    except (OverflowError, ValueError):
+        raise ValidationError(
+            "invalid_record",
+            "%s is outside the representable UTC date range." % where,
+        )
     return parsed
 
 
@@ -212,6 +223,17 @@ def _require_metadata(value, where):
     return value
 
 
+def _is_finite(value):
+    """math.isfinite raises OverflowError for integers too large to convert
+    to float (JSON has no integer magnitude bound). Such a value is not a
+    finite number by any useful definition and must answer 400 rather than
+    escape as an unhandled error that drops the connection."""
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _require_finite_number(value, where):
     """A JSON number that is not bool, NaN, or Infinity.
 
@@ -223,7 +245,7 @@ def _require_finite_number(value, where):
         raise ValidationError(
             "invalid_record_data", "%s must be a number." % where
         )
-    if not math.isfinite(value):
+    if not _is_finite(value):
         raise ValidationError(
             "invalid_record_data", "%s must be a finite number." % where
         )
@@ -578,7 +600,7 @@ def _validate_fhir_value(value, where):
         if current is None or isinstance(current, (bool, str)):
             continue
         if isinstance(current, (int, float)):
-            if not math.isfinite(current):
+            if not _is_finite(current):
                 raise ValidationError(
                     "invalid_record_data",
                     "%s contains a non-finite number." % where,
