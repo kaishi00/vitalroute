@@ -3,18 +3,22 @@ import XCTest
 @testable import VitalRoute
 
 /// Exercises the real Keychain (the hosted test runner's keychain is
-/// per-instance and these items are unique per test and cleaned up). Covers
-/// the accessibility class written at insert time and the in-place migration
-/// of items written by earlier builds.
+/// per-instance). Everything happens under a dedicated test service string:
+/// the production store is service-scoped to the app's bundle identifier,
+/// and the migration is service-wide, so tests must never touch accounts the
+/// app itself might have written.
 final class KeychainValueStoreTests: XCTestCase {
-    private var service: String {
-        Bundle.main.bundleIdentifier ?? "com.milim.vitalroute"
+    /// Unique per run; never the app's real service.
+    private let testService = "com.milim.vitalroute.tests.\(UUID().uuidString)"
+
+    private var store: KeychainValueStore {
+        KeychainValueStore(service: testService)
     }
 
     private func baseQuery(_ account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: testService,
             kSecAttrAccount as String: account
         ]
     }
@@ -42,7 +46,7 @@ final class KeychainValueStoreTests: XCTestCase {
         cleanup(account)
         defer { cleanup(account) }
 
-        let store = KeychainValueStore()
+        let store = store
         try store.saveValue("https://health.example.org/v1/records", forKey: account)
 
         XCTAssertEqual(
@@ -65,7 +69,6 @@ final class KeychainValueStoreTests: XCTestCase {
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         XCTAssertEqual(SecItemAdd(addQuery as CFDictionary, nil), errSecSuccess)
 
-        let store = KeychainValueStore()
         try store.migrateToBackgroundAccessibility()
 
         XCTAssertEqual(
@@ -99,7 +102,6 @@ final class KeychainValueStoreTests: XCTestCase {
             XCTAssertEqual(SecItemAdd(addQuery as CFDictionary, nil), errSecSuccess)
         }
 
-        let store = KeychainValueStore()
         try store.migrateToBackgroundAccessibility()
 
         XCTAssertEqual(
@@ -118,11 +120,9 @@ final class KeychainValueStoreTests: XCTestCase {
         let account = "test.accessibility.empty"
         cleanup(account)
 
-        // With nothing seeded under this account, the migration must take
+        // With nothing seeded under this service, the migration must take
         // its not-found path and succeed — the not-throwing contract for a
-        // fresh install. (Other items may exist under the shared test
-        // service; the service-scoped update covers them idempotently.)
-        let store = KeychainValueStore()
+        // fresh install. The dedicated test service makes "empty" real.
         try store.migrateToBackgroundAccessibility()
     }
 }

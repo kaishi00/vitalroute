@@ -162,6 +162,18 @@ final class AutomaticSyncEngine {
     /// not.
     @ObservationIgnored var scheduleBackgroundRetry: (@Sendable (TimeInterval) -> Bool)?
 
+    /// The app's launch-restoration task. A BGTask can fire before
+    /// restoration has loaded the configuration; its handler awaits this so
+    /// the wake is not burned on a pass that would find no configuration
+    /// (and complete before restoration could use it).
+    @ObservationIgnored var launchRestoration: Task<Void, Never>?
+
+    /// Returns once the launch-restoration task has settled. No-op when no
+    /// restoration is pending (tests, or an engine restored earlier).
+    func waitForLaunchRestoration() async {
+        await launchRestoration?.value
+    }
+
     private(set) var mode: AutomaticSyncMode = .disabled
     private(set) var pendingCount = 0
     private(set) var lastDeliveryAt: Date?
@@ -506,7 +518,30 @@ final class AutomaticSyncEngine {
             return
         }
         guard isCurrent(generation) else { return }
+        if case .paused(let reason) = mode, reason.isAutoRecoverable {
+            mode = .active
+            lastStatusMessage = nil
+        }
         startPass(trigger: .foregroundCatchUp)
+    }
+
+    /// The settled stores report the destination was removed (an empty
+    /// endpoint). For an engine holding a destination this lands as the
+    /// destination-changed purge; for an engine waiting on secure storage —
+    /// which holds no destination, so the changed-destination purge cannot
+    /// see the removal — it ends the wait the same way: disabled, queue
+    /// discarded, visible notice. No-op when sync is already off.
+    func configurationRemoved() async {
+        guard mode != .disabled else { return }
+        guard destination.isEmpty else {
+            await configurationChanged(destination: "", token: nil, metrics: selectedMetrics)
+            return
+        }
+        await disable()
+        await discardPendingWork(
+            generation: configurationGeneration,
+            notice: .destinationRemoved
+        )
     }
 
     /// Launch restoration when the persisted configuration could not be
@@ -1313,6 +1348,7 @@ final class AutomaticSyncEngine {
     private enum DiscardNotice {
         case destinationChanged(passWasRunning: Bool)
         case destinationChangedWhileOff
+        case destinationRemoved
 
         /// `discarded` is reported so the user learns how much was dropped;
         /// with nothing queued the notice says only what actually happened.
@@ -1322,6 +1358,8 @@ final class AutomaticSyncEngine {
                 "Automatic sync turned off because the destination changed."
             case .destinationChangedWhileOff:
                 "The destination changed while automatic sync was off."
+            case .destinationRemoved:
+                "Automatic sync turned off because the destination was removed."
             }
             guard discarded > 0 else { return base }
             let inFlight: String

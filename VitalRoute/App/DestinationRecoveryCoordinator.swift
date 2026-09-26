@@ -63,10 +63,15 @@ final class DestinationRecoveryCoordinator {
     /// Upgrades the Keychain items' accessibility class once per process
     /// until it succeeds; items written by earlier builds stay unreadable
     /// from locked-device launches until this converges on first unlock.
-    func migrateSecureStorageIfNeeded() {
+    /// The `SecItemUpdate` runs off the main actor — the same reason reads
+    /// do: it can block on a busy keychain.
+    func migrateSecureStorageIfNeeded() async {
         guard !migrationConverged else { return }
+        let store = secureStore
         do {
-            try secureStore.migrateToBackgroundAccessibility()
+            try await Task.detached(priority: .utility) {
+                try store.migrateToBackgroundAccessibility()
+            }.value
             migrationConverged = true
         } catch {
             // Locked device: retried on the next recovery trigger.
@@ -77,13 +82,19 @@ final class DestinationRecoveryCoordinator {
     /// after this update), retry the stores that have not settled, and —
     /// only once endpoint and credential describe the same destination —
     /// report the configuration to the engine so a waiting engine resumes
-    /// without user interaction.
+    /// without user interaction. A settled empty endpoint means removal and
+    /// ends the wait through the removal path instead.
     func recoverNow() async {
-        migrateSecureStorageIfNeeded()
+        await migrateSecureStorageIfNeeded()
 
         await destinationStore.loadSavedEndpoint()
         guard destinationStore.isLoaded else { return }
         let endpoint = destinationStore.savedEndpoint
+
+        if endpoint.isEmpty {
+            await engine.configurationRemoved()
+            return
+        }
 
         await credentialStore.loadCredential(for: endpoint)
         // An endpoint may only be paired with its own credential: reporting

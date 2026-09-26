@@ -68,7 +68,35 @@ struct VitalRouteApp: App {
         )
         _recovery = State(initialValue: recovery)
 
-        // Must happen before the app finishes launching.
+        // Must happen before the app finishes launching. Registration
+        // happens after the restoration task exists (but both within init),
+        // so a BGTask firing immediately can await it instead of completing
+        // as a no-op pass before the engine knows its configuration.
+        let restoration = Task { @MainActor in
+            await recovery.migrateSecureStorageIfNeeded()
+            await destinationStore.loadSavedEndpoint()
+            if destinationStore.isLoaded {
+                await credentialStore.loadCredential(for: destinationStore.savedEndpoint)
+            }
+            await engine.prepareStorage()
+            let configurationIsReadable = destinationStore.isLoaded
+                && credentialStore.credentialEndpoint == destinationStore.savedEndpoint
+            if configurationIsReadable {
+                await engine.restoreOnLaunch(
+                    destination: destinationStore.savedEndpoint,
+                    token: credentialStore.loadedToken,
+                    metrics: selectionStore.selectedMetrics
+                )
+            } else {
+                // Locked launch: the endpoint or its own credential could
+                // not be read. Waiting keeps the queue and the destination
+                // identity intact until the recovery path settles the
+                // stores; an endpoint is never paired with a credential that
+                // belongs to a different endpoint.
+                await engine.restorePausedOnSecureStorage()
+            }
+        }
+        engine.launchRestoration = restoration
         BackgroundSyncTasks.register(engine: engine)
         // The coordinator observes protected-data availability for the whole
         // process, scene or no scene.
@@ -95,30 +123,6 @@ struct VitalRouteApp: App {
         // claim always wins ordering because it runs before the scene's
         // onChange hooks can observe a settled store — so a duplicate pass
         // is redundant work at worst, never lost work.
-        Task { @MainActor in
-            recovery.migrateSecureStorageIfNeeded()
-            await destinationStore.loadSavedEndpoint()
-            if destinationStore.isLoaded {
-                await credentialStore.loadCredential(for: destinationStore.savedEndpoint)
-            }
-            await engine.prepareStorage()
-            let configurationIsReadable = destinationStore.isLoaded
-                && credentialStore.credentialEndpoint == destinationStore.savedEndpoint
-            if configurationIsReadable {
-                await engine.restoreOnLaunch(
-                    destination: destinationStore.savedEndpoint,
-                    token: credentialStore.loadedToken,
-                    metrics: selectionStore.selectedMetrics
-                )
-            } else {
-                // Locked launch: the endpoint or its own credential could
-                // not be read. Waiting keeps the queue and the destination
-                // identity intact until the recovery path settles the
-                // stores; an endpoint is never paired with a credential that
-                // belongs to a different endpoint.
-                await engine.restorePausedOnSecureStorage()
-            }
-        }
     }
 
     nonisolated private static func syncDirectory() -> URL {
@@ -198,11 +202,19 @@ struct VitalRouteApp: App {
     }
 
     private func syncConfigurationWithEngine() {
-        // Only report a credential that belongs to the configured endpoint: a
-        // transient read failure must never pair the previous destination's
-        // key with the new destination. Empty reports still propagate — they
-        // are how destination removal reaches the engine — and the engine
-        // itself ignores an empty report that has nothing to purge.
+        // A settled empty endpoint means removal, even for an engine still
+        // waiting on secure storage; route it to the removal path. An
+        // unreadable store (not loaded) reports nothing — there is nothing
+        // known to act on. Otherwise only report a credential that belongs
+        // to the configured endpoint: a transient read failure must never
+        // pair the previous destination's key with the new destination.
+        if destinationStore.savedEndpoint.isEmpty {
+            if destinationStore.isLoaded {
+                let engine = autoSyncEngine
+                Task { await engine.configurationRemoved() }
+            }
+            return
+        }
         guard credentialStore.credentialEndpoint == destinationStore.savedEndpoint else { return }
         let engine = autoSyncEngine
         let endpoint = destinationStore.savedEndpoint

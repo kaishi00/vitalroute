@@ -2209,6 +2209,108 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertEqual(relaunched.pendingCount, 1, "the wait must not discard queued work")
     }
 
+    func testRestoreOnLaunchClearsTheSecureStorageWait() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // A future caller can legitimately restore after the wait was set
+        // (stores settled between the wait and the restore): the engine must
+        // come up instead of staying paused with a valid configuration.
+        relaunchedProvider.script = [.steps: [page(additions: [record(4)], anchor: "s4")]]
+        await relaunched.restoreOnLaunch(destination: endpoint, token: token, metrics: [.steps])
+        await relaunched.waitUntilIdle()
+
+        XCTAssertEqual(relaunched.mode, .active)
+        XCTAssertFalse(relaunchedProvider.observedMetrics.isEmpty)
+    }
+
+    func testConfigurationRemovedWhileWaitingDisablesAndPurgesTheQueue() async throws {
+        let client = ScriptedSyncClient()
+        _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        let relaunchedProvider = ScriptedHealthProvider()
+        let relaunched = makeEngine(provider: relaunchedProvider, client: ScriptedSyncClient())
+        await relaunched.restorePausedOnSecureStorage()
+
+        // The user removes the destination while the engine still waits on
+        // secure storage: the wait ends the same way an active removal does.
+        await relaunched.configurationRemoved()
+        await relaunched.waitUntilIdle()
+
+        XCTAssertFalse(relaunched.isEnabled)
+        XCTAssertEqual(relaunched.pendingCount, 0, "the queue for the removed destination is discarded")
+        XCTAssertTrue(
+            relaunched.lastStatusMessage?.contains("removed") == true,
+            relaunched.lastStatusMessage ?? ""
+        )
+        XCTAssertTrue(relaunchedProvider.observedMetrics.isEmpty)
+    }
+
+    func testConfigurationRemovedWhileActivePurgesAndDisables() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(5)], anchor: "s5")]]
+        let client = ScriptedSyncClient()
+        client.failNextDelivery(with: .connectionFailed)
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 1)
+
+        // The removal path also serves an active engine (it delegates to the
+        // same purge a destination change uses).
+        await engine.configurationRemoved()
+        await engine.waitUntilIdle()
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.pendingCount, 0)
+        XCTAssertTrue(
+            engine.lastStatusMessage?.contains("discarded") == true,
+            engine.lastStatusMessage ?? ""
+        )
+    }
+
+    func testConfigurationRemovedWhileDisabledStaysOff() async throws {
+        let engine = makeEngine(provider: ScriptedHealthProvider(), client: ScriptedSyncClient())
+
+        await engine.configurationRemoved()
+
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(engine.pendingCount, 0)
+    }
+
+    func testBackgroundTaskWaitsForLaunchRestorationToSettle() async throws {
+        let client = ScriptedSyncClient()
+        let engine = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
+
+        // A launch restoration that is still parked: the BGTask handler must
+        // wait for it rather than run a pass that finds no configuration.
+        let gate = AsyncGate()
+        engine.launchRestoration = Task { [gate, engine] in
+            await gate.enter()
+            await engine.restoreOnLaunch(destination: endpoint, token: token, metrics: [.steps])
+        }
+
+        let returned = FlagBox()
+        let waiter = Task { [engine, returned] in
+            await engine.waitForLaunchRestoration()
+            returned.set()
+        }
+        // Generous window: a waiter that ignored the parked restoration
+        // would long since have returned.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(returned.isSet, "waitForLaunchRestoration must wait for the restoration task")
+
+        gate.open()
+        await waiter
+        XCTAssertTrue(returned.isSet)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.mode, .active)
+    }
+
     func testDestinationChangeWhileWaitingPurgesWithHonestNoticeNotCrossDelivery() async throws {
         let client = ScriptedSyncClient()
         _ = await enableWithQueuedWork(provider: ScriptedHealthProvider(), client: client)
@@ -2667,5 +2769,23 @@ private final class AsyncGate: @unchecked Sendable {
 
     func openAndWait() async {
         open()
+    }
+}
+
+/// Thread-safe boolean for asserting whether a detached task has returned.
+private final class FlagBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }

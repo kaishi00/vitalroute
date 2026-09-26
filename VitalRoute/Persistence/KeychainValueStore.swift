@@ -24,7 +24,14 @@ protocol SecureValueStoring: Sendable {
 private let vitalRouteKeychainAccessibility = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
 final class KeychainValueStore: SecureValueStoring {
-    private let service = Bundle.main.bundleIdentifier ?? "com.milim.vitalroute"
+    /// Service-scoped identity for this app's destination items. Injectable
+    /// for tests: the accessibility migration is service-wide, so tests use
+    /// a dedicated service rather than the app's real accounts.
+    private let service: String
+
+    init(service: String = Bundle.main.bundleIdentifier ?? "com.milim.vitalroute") {
+        self.service = service
+    }
 
     func readValue(forKey key: String) throws -> String? {
         var query = baseQuery(forKey: key)
