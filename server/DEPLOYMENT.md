@@ -252,6 +252,16 @@ Treat backup files like the live database: they contain health records;
 keep them on the same protected storage (`/srv/vitalroute/backups` is mode
 0700, files 0600).
 
+Each database also carries a **datastore identity** (`storeGeneration`, a
+random UUID persisted in the database and exposed on the health response).
+A backup restores the generation stored inside it, so a client that
+synchronized against the pre-backup datastore detects the rollback and
+re-syncs; a reset (`VITALROUTE_ALLOW_SCHEMA_RESET=1`) or any replacement
+of the database file mints a new generation with the same effect. Clients
+therefore never silently assume a replaced receiver is caught up — they
+re-send the configured history, and the receiver's idempotency dedupes
+whatever the datastore already had.
+
 ### Uninstall (keeping data)
 
 ```sh

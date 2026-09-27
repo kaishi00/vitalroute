@@ -273,6 +273,10 @@ class ReceiverHandler(BaseHTTPRequestHandler):
                 "service": validation.SERVICE_NAME,
                 "apiVersion": validation.SUPPORTED_API_VERSION,
                 "capabilities": list(validation.RECEIVER_CAPABILITIES),
+                # Datastore identity: clients bind sync progress to it, so a
+                # replaced/reset receiver is detected instead of assumed
+                # caught-up. Opaque, generated once per database lifetime.
+                "storeGeneration": self.record_store.store_generation(),
             },
         )
         self._log_request(200)

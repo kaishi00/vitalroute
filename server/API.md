@@ -349,9 +349,20 @@ Response:
   "status": "ok",
   "service": "vitalroute-receiver",
   "apiVersion": 3,
-  "capabilities": ["additions", "deletions"]
+  "capabilities": ["additions", "deletions"],
+  "storeGeneration": "0e2c5a41-9b3d-4c8e-a6f2-1d7b8e5a4c90"
 }
 ```
+
+`storeGeneration` is the receiver's **datastore identity**: a random UUID
+minted when the database is created, persisted inside it, and therefore
+stable across restarts, moves, and restores of that database — while an
+intentional reset (or any replacement of the database file) mints a new
+one. Clients bind their synchronization progress to it: a client that
+last synchronized against generation X, and now sees generation Y, must
+re-bootstrap instead of trusting progress that describes data the current
+datastore never received. The field is opaque, contains no health data,
+and is safe to expose to anyone who can already authenticate.
 
 Clients that only need additions may ignore `capabilities`; clients that
 synchronize deletions must see `apiVersion >= 3` and `"deletions"` in

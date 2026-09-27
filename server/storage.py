@@ -17,13 +17,22 @@ issued after a successful commit. Duplicate ids are ignored (first write
 wins), which makes client retries safe. Deleting a record tombstones its
 id and cascades to live child rows (series chunks) that reference it as
 parent, so a deleted parent can never leave orphaned chunks behind.
+
+Datastore identity: a fresh database mints a random ``store_generation``
+UUID persisted in ``schema_info``. It survives restarts, moves, and
+restores (it travels inside the database file); a reset creates a new
+one. Clients compare it against the generation they last synchronized
+with, so a replaced datastore is detected instead of silently assumed
+caught-up.
 """
 
 import datetime
 import os
 import sqlite3
+import uuid
 
 _SCHEMA_VERSION = 3
+_STORE_GENERATION_KEY = "store_generation"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS records (
@@ -188,6 +197,14 @@ class RecordStore:
             connection.execute(
                 "INSERT OR REPLACE INTO schema_info (key, value) VALUES ('schema_version', ?)",
                 (str(_SCHEMA_VERSION),),
+            )
+            # Mint the datastore identity exactly once per database
+            # lifetime: INSERT OR IGNORE keeps the generation a reset-
+            # restored or copied database already carries, and the drop-
+            # tables path above is what mints a fresh one.
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_info (key, value) VALUES (?, ?)",
+                (_STORE_GENERATION_KEY, str(uuid.uuid4())),
             )
             connection.commit()
             if version_mismatch or unversioned_tables:
@@ -387,5 +404,17 @@ class RecordStore:
         connection = self._connect()
         try:
             return self._read_schema_version(connection)
+        finally:
+            connection.close()
+
+    def store_generation(self):
+        """The persisted datastore identity, or None before first init."""
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT value FROM schema_info WHERE key = ?",
+                (_STORE_GENERATION_KEY,),
+            ).fetchone()
+            return row[0] if row else None
         finally:
             connection.close()

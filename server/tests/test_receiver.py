@@ -8,6 +8,7 @@ import http.client
 import json
 import os
 import pathlib
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -1229,6 +1230,98 @@ class SchemaResetTests(unittest.TestCase):
         reopened = storage.RecordStore(self.db_path)
         self.assertEqual(reopened.record_count(), 1)
         self.assertEqual(reopened.schema_version(), "3")
+
+
+class StoreGenerationTests(ReceiverServerTestCase):
+    """Datastore identity: clients bind sync progress to it.
+
+    A fresh database mints a random UUID; restarts, copies, and restores
+    keep it; an intentional reset mints a new one. The health response
+    exposes it so a replaced datastore is detected instead of silently
+    assumed caught-up.
+    """
+
+    def setUp(self):
+        super().setUp()
+        status, body = self.get("/v1/records")
+        self.assertEqual(status, 200)
+        self.generation = body["storeGeneration"]
+
+    def test_fresh_db_exposes_canonical_uuid_generation(self):
+        # Canonical: parses, and round-trips through the canonical lowercase
+        # form uuid.UUID itself produces.
+        self.assertEqual(str(uuid.UUID(self.generation)), self.generation.lower())
+        self.assertEqual(self.generation, self.generation.lower())
+
+    def test_health_response_shape_is_exactly_the_contract(self):
+        status, body = self.get("/v1/records")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            set(body.keys()),
+            {"status", "service", "apiVersion", "capabilities", "storeGeneration"},
+        )
+        # No credentials or data in the response.
+        self.assertNotIn(TOKEN, json.dumps(body))
+
+    def test_restart_preserves_generation(self):
+        for _ in range(2):
+            status, body = self.get("/v1/records")
+            self.assertEqual(body["storeGeneration"], self.generation)
+        self.assertEqual(storage.RecordStore(self.db_path).store_generation(), self.generation)
+
+    def test_reset_mints_a_new_generation(self):
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute(
+                "UPDATE schema_info SET value = '99' WHERE key = 'schema_version'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(storage.IncompatibleSchema):
+            storage.RecordStore(self.db_path)
+        store = storage.RecordStore(self.db_path, allow_schema_reset=True)
+        self.assertNotEqual(store.store_generation(), self.generation)
+        self.assertNotEqual(store.store_generation(), None)
+
+    def test_legacy_upgrade_reset_also_mints_a_generation(self):
+        # The v1-era database carried no generation at all; the reset path
+        # that upgrades it must still mint one.
+        with tempfile.TemporaryDirectory() as tempdir:
+            legacy_path = os.path.join(tempdir, "records.sqlite3")
+            connection = sqlite3.connect(legacy_path)
+            try:
+                connection.executescript(
+                    """
+                    CREATE TABLE records (id TEXT PRIMARY KEY, value REAL NOT NULL);
+                    CREATE TABLE schema_info (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO schema_info VALUES ('schema_version', '1');
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            store = storage.RecordStore(legacy_path, allow_schema_reset=True)
+            generation = store.store_generation()
+            self.assertIsNotNone(generation)
+            self.assertEqual(str(uuid.UUID(generation)), generation)
+
+    def test_copied_database_restores_its_generation(self):
+        copy_path = self.db_path + ".copy"
+        storage.RecordStore(self.db_path)  # ensure settled
+        connection = sqlite3.connect(self.db_path)
+        try:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
+        shutil.copyfile(self.db_path, copy_path)
+        self.assertEqual(storage.RecordStore(copy_path).store_generation(), self.generation)
+
+    def test_health_generation_matches_the_persisted_row(self):
+        self.assertEqual(
+            self.generation,
+            storage.RecordStore(self.db_path).store_generation(),
+        )
 
 
 class RoutingAndFramingTests(ReceiverServerTestCase):
