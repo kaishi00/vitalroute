@@ -172,7 +172,12 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         await waitForCompletion(coordinator)
 
         provider.exportQueries.removeAll()
-        provider.script[.steps] = [page([2], anchor: "a2", full: false)]
+        // The anchor chain must stay resolvable: the resumed read offers
+        // a1, and the page that follows it is the next one delivered.
+        provider.script[.steps] = [
+            page([1], anchor: "a1", full: false),
+            page([2], anchor: "a2", full: false),
+        ]
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
         await waitForCompletion(coordinator)
 

@@ -163,6 +163,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let store = SyncStateStore(directory: tempDirectory)
         await store.clearReceiverGeneration(destination: endpoint)
         client.healthResponse.storeGeneration = "00000000-0000-4000-8000-000000000009"
+        provider.resetConsumption()
         await engine.disable()
 
         let result = await enable(engine)
@@ -201,6 +202,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         // The receiver's datastore is replaced: same URL, new identity.
         client.healthResponse.storeGeneration = "00000000-0000-4000-8000-000000000002"
         client.resetDelivery()
+        provider.resetConsumption()
         provider.changeQueries.removeAll()
         provider.script = [
             .steps: [HealthChangePage(
