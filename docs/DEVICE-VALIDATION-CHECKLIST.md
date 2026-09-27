@@ -138,3 +138,23 @@ registered device is needed to sign.
   on a physical iPhone via TestFlight has not started. Simulator
   evidence still does not apply, and no background-scheduling behavior
   may be inferred until these cases run on hardware.
+
+## Receiver datastore reset rehearsal
+
+Reproduces the stale-cursor regression a real-device rehearsal exposed
+(the receiver was reset while the app kept pre-reset delivery progress,
+and a manual sync honestly reported zero new records).
+
+1. Sync at least once so delivery progress exists on the phone.
+2. On the receiver host, reset the database the supported way
+   (`VITALROUTE_ALLOW_SCHEMA_RESET=1`, then remove the flag and restart).
+   The URL, token, and app state stay unchanged.
+3. Tap Sync Now.
+4. Expect: the run does NOT complete with zero records; the destination
+   summary says the destination was reset and history is being rebuilt;
+   records found is greater than zero when HealthKit has data in the
+   configured window; the receiver repopulates.
+5. Tap Sync Now again: it resumes/dedupes under the same generation with
+   no rebuild message.
+6. Restart the receiver container: the next sync must NOT rebuild (same
+   `storeGeneration`).

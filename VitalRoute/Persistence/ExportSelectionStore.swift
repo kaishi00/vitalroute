@@ -17,7 +17,11 @@ final class ExportSelectionStore {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let rawValues = defaults.stringArray(forKey: storageKey) ?? []
+        // Only user-selectable metrics are valid selections; unknown
+        // identifiers and component-only metrics (which exist to describe
+        // parts of other records) are dropped at load.
         selectedMetrics = Set(rawValues.compactMap(HealthMetric.init(rawValue:)))
+            .filter { $0.descriptor.userSelectable }
     }
 
     var hasSelection: Bool {
@@ -26,11 +30,16 @@ final class ExportSelectionStore {
 
     /// Selected categories in catalog order for deterministic payloads.
     var orderedSelection: [HealthMetric] {
-        HealthMetric.allCases.filter { selectedMetrics.contains($0) }
+        MetricCatalog.selectableMetrics.map(\.metric).filter { selectedMetrics.contains($0) }
     }
 
     func setMetric(_ metric: HealthMetric, selected: Bool) {
         if selected {
+            // Component-only metrics are never user selections; the
+            // load-time filter would drop them anyway, so refusing here
+            // keeps the invariant at the write site too. Deselection is
+            // always allowed so stale persisted values can be cleaned up.
+            guard metric.descriptor.userSelectable else { return }
             selectedMetrics.insert(metric)
         } else {
             selectedMetrics.remove(metric)

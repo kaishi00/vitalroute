@@ -17,10 +17,19 @@ how to run and deploy the receiver.
   query service — see DEPLOYMENT.md — not this ingestion surface.)
 
 Background delivery from the client, anchored incremental sync, deletion
-propagation through contract v2 (see [API.md](API.md)), and a read-only
+propagation through contract v3 (see [API.md](API.md)), and a read-only
 MCP query service for agent access (`mcp_server.py`; see
 [DEPLOYMENT.md](DEPLOYMENT.md)) are implemented. Not in scope: accounts,
 multi-user access, or any write path beyond ingestion.
+
+The MCP service opens a fresh read-only SQLite connection for each tool call,
+starts one read snapshot for that call, and closes the connection before it
+returns. Replacing or restoring the database file is therefore visible on the
+next tool call without restarting the service. If the database is missing,
+corrupt, or incompatible, the tool returns a generic safe error and can
+recover when a valid database is restored. Its unauthenticated `/healthz`
+endpoint is a lightweight liveness check; it does not validate database
+readability or query results.
 
 For production installation as a managed Docker Compose service — including
 HTTPS exposure, upgrades, token rotation, and backups — see
@@ -78,9 +87,10 @@ server — treat the file, and any backups of it, as sensitive:
   service user (`chmod 600`, or store it under a dedicated directory).
 - Back it up with the same care as any health record store; the file is the
   only copy of the data (the receiver is append-only and does not re-export).
-- Each stored row keeps the record `id`, category, value, unit, UTC start/end
-  timestamps, source/device strings, JSON metadata, plus receiver-side
-  `batch_created_at` / `first_seen_at` for auditing.
+- Each stored row keeps the record `id`, metric, kind, UTC start/end
+  timestamps, source/device strings, the JSON metadata map, the record's
+  typed `data` payload as JSON, plus receiver-side `batch_created_at` /
+  `first_seen_at` for auditing.
 
 ## HTTPS
 

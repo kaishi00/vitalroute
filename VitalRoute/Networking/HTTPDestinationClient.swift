@@ -8,6 +8,7 @@ enum DestinationClientError: Error, Equatable, LocalizedError {
     case redirected
     case serverRejected(status: Int)
     case malformedAcknowledgment
+    case malformedHealthResponse
     case requestTimedOut
     case tlsValidationFailed
     case connectionFailed
@@ -29,6 +30,8 @@ enum DestinationClientError: Error, Equatable, LocalizedError {
             "The destination returned an error (HTTP \(status)). No data from this batch was confirmed delivered."
         case .malformedAcknowledgment:
             "The destination acknowledged the batch in an unexpected format, so delivery could not be confirmed."
+        case .malformedHealthResponse:
+            "The destination returned a malformed health response. Check that this URL points to a compatible VitalRoute receiver."
         case .requestTimedOut:
             "The destination did not respond in time."
         case .tlsValidationFailed:
@@ -84,37 +87,6 @@ final class HTTPDestinationClient: DestinationClient {
 
     deinit {
         ownedSession?.finishTasksAndInvalidate()
-    }
-
-    func send(
-        _ payload: SyncPayload,
-        to endpoint: URL,
-        authorization: DestinationAuthorization
-    ) async throws -> SyncAcknowledgment {
-        try Self.requireHTTPS(endpoint)
-        // The contract rejects empty batches; an empty payload here is a
-        // caller bug that must not be reported as a successful delivery.
-        guard !payload.records.isEmpty else {
-            throw DestinationClientError.emptyBatch
-        }
-        let body = try SyncPayloadEncoder.encode(payload)
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        Self.authorize(request: &request, authorization: authorization)
-
-        let data = try await perform(request)
-        let acknowledgment = try Self.decodeAcknowledgment(data)
-        // The contract guarantees accepted + duplicates equals the batch
-        // size; a receiver that acknowledges fewer records than it was given
-        // has not confirmed the whole batch, so treat it as undelivered.
-        guard let delivered = acknowledgment.delivered,
-              delivered == payload.records.count else {
-            throw DestinationClientError.malformedAcknowledgment
-        }
-        return acknowledgment
     }
 
     func testConnection(
@@ -227,45 +199,29 @@ final class HTTPDestinationClient: DestinationClient {
         }
     }
 
-    private static func decodeAcknowledgment(_ data: Data) throws -> SyncAcknowledgment {
-        struct Shape: Decodable {
-            let status: String
-            let accepted: Int
-            let duplicates: Int
-        }
-        let shape: Shape
-        do {
-            shape = try JSONDecoder().decode(Shape.self, from: data)
-        } catch {
-            throw DestinationClientError.malformedAcknowledgment
-        }
-        guard shape.status == "accepted", shape.accepted >= 0, shape.duplicates >= 0 else {
-            throw DestinationClientError.malformedAcknowledgment
-        }
-        return SyncAcknowledgment(accepted: shape.accepted, duplicates: shape.duplicates)
-    }
-
     private static func decodeHealthResponse(_ data: Data) throws -> ReceiverHealthResponse {
         struct Shape: Decodable {
             let status: String
             let service: String
             let apiVersion: Int
             let capabilities: [String]?
+            let storeGeneration: String?
         }
         let shape: Shape
         do {
             shape = try JSONDecoder().decode(Shape.self, from: data)
         } catch {
-            throw DestinationClientError.malformedAcknowledgment
+            throw DestinationClientError.malformedHealthResponse
         }
         guard shape.status == "ok", !shape.service.isEmpty, shape.apiVersion >= 1 else {
-            throw DestinationClientError.malformedAcknowledgment
+            throw DestinationClientError.malformedHealthResponse
         }
         return ReceiverHealthResponse(
             status: shape.status,
             service: shape.service,
             apiVersion: shape.apiVersion,
-            capabilities: Set(shape.capabilities ?? [])
+            capabilities: Set(shape.capabilities ?? []),
+            storeGeneration: shape.storeGeneration
         )
     }
 }

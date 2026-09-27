@@ -3,6 +3,7 @@ import SwiftUI
 struct DestinationView: View {
     @Environment(DestinationConfigurationStore.self) private var destinationStore
     @Environment(DestinationCredentialStore.self) private var credentialStore
+    @Environment(ManualSyncCoordinator.self) private var syncCoordinator
     @State private var endpointDraft = ""
     @State private var tokenDraft = ""
     @State private var isEditingEndpoint = false
@@ -12,6 +13,8 @@ struct DestinationView: View {
     @State private var connectionResult: String?
     @State private var connectionSucceeded: Bool?
     @State private var connectionClient = HTTPDestinationClient()
+    @State private var isConfirmingRebuild = false
+    @State private var isRebuildingHistory = false
 
     var body: some View {
         Form {
@@ -47,12 +50,25 @@ struct DestinationView: View {
             }
 
             if destinationStore.isConfigured {
+                rebuildSection
                 Section {
                     Button("Remove saved destination", role: .destructive) {
                         removeDestination()
                     }
                 }
             }
+        }
+        .confirmationDialog(
+            "Rebuild sync history?",
+            isPresented: $isConfirmingRebuild,
+            titleVisibility: .visible
+        ) {
+            Button("Rebuild sync history", role: .destructive) {
+                rebuildHistory()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The next sync re-sends the selected categories' configured history to the destination. The receiver keeps one copy of each record, so nothing is duplicated. Your endpoint, API key, and selection are kept.")
         }
         .onAppear {
             enterEditingIfUnconfigured()
@@ -261,6 +277,29 @@ struct DestinationView: View {
         }
     }
 
+    /// A deliberate escape hatch for a receiver whose datastore changed in
+    /// a way the automatic generation detection should already cover —
+    /// offered so a user is never waiting on automation to notice.
+    private var rebuildSection: some View {
+        Section {
+            Button {
+                isConfirmingRebuild = true
+            } label: {
+                HStack {
+                    if isRebuildingHistory {
+                        ProgressView()
+                    }
+                    Text("Rebuild sync history")
+                }
+            }
+            .disabled(isRebuildingHistory || syncCoordinator.isSyncing)
+        } header: {
+            Text("Sync history")
+        } footer: {
+            Text("Clears this destination's delivery progress so the next sync re-sends the configured history — for example after resetting or replacing your receiver's database. The endpoint, API key, selection, and Health access are kept; the receiver keeps one copy of each record.")
+        }
+    }
+
     // MARK: Actions
 
     /// The saved endpoint loads asynchronously, so the unconfigured check may
@@ -333,6 +372,20 @@ struct DestinationView: View {
             statusMessage = "API key removed."
         } catch {
             statusMessage = error.localizedDescription
+        }
+    }
+
+    private func rebuildHistory() {
+        isRebuildingHistory = true
+        statusMessage = nil
+        Task {
+            let rebuilt = await syncCoordinator.rebuildDestinationHistory(
+                endpoint: destinationStore.savedEndpoint
+            )
+            isRebuildingHistory = false
+            statusMessage = rebuilt
+                ? "Sync history cleared. The next sync re-sends the configured history to this destination."
+                : "Sync history could not be cleared. Check the saved destination and try again."
         }
     }
 

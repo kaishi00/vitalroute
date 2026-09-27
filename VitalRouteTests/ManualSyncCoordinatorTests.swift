@@ -24,10 +24,9 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         HealthRecord(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", index))!,
             metric: metric,
-            value: Double(index),
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600 + start),
-            endDate: Date(timeIntervalSince1970: 1_735_689_600 + start + 60)
+            endDate: Date(timeIntervalSince1970: 1_735_689_600 + start + 60),
+            data: .quantity(QuantityData(value: Double(index), unit: "count"))
         )
     }
 
@@ -47,14 +46,16 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         client: StubDestinationClient,
         defaults: UserDefaults? = nil,
         store: SyncStateStore? = nil,
-        workGate: SyncWorkGate = SyncWorkGate()
+        workGate: SyncWorkGate = SyncWorkGate(),
+        deliveryByteLimit: Int = Outbox.deliveryBatchByteLimit
     ) -> ManualSyncCoordinator {
         ManualSyncCoordinator(
             healthData: provider,
             client: client,
             stateStore: store ?? makeStore(),
             defaults: defaults ?? makeDefaults(),
-            workGate: workGate
+            workGate: workGate,
+            deliveryByteLimit: deliveryByteLimit
         )
     }
 
@@ -78,6 +79,167 @@ final class ManualSyncCoordinatorTests: XCTestCase {
             await Task.yield()
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
+    }
+
+    // MARK: - Receiver datastore generation
+
+    /// The Build 9 regression: a receiver datastore reset (same URL) left
+    /// the manual cursor describing data the new datastore never received,
+    /// and a sync honestly reported zero new records. The generation gate
+    /// must invalidate that progress and re-read the window instead.
+    @MainActor
+    func testReceiverResetInvalidatesStaleCursorAndRereadsHistory() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(client.sentBatches.count, 1)
+
+        // The receiver's datastore is replaced: same URL, new identity.
+        client.storeGeneration = "00000000-0000-4000-8000-000000000002"
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [
+            page([1], anchor: "a1", full: false),
+            page([2], anchor: "a2", full: false),
+        ]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
+        await waitForCompletion(coordinator)
+
+        // The stale cursor was invalidated: the window was re-read from its
+        // start (the re-sent record dedupes at the receiver), the summary
+        // says so, and the run is not a zero-record "success".
+        XCTAssertEqual(provider.exportQueries.first?.sinceAnchor, nil)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.rebuiltHistory, true)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.recordsFound, 1)
+        XCTAssertEqual(client.sentBatches.count, 2)
+
+        // The new generation sticks: the following sync resumes from the
+        // cursor instead of rebuilding again.
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([2], anchor: "a2", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(120))
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(provider.exportQueries.first?.sinceAnchor, Data("a1".utf8))
+        XCTAssertEqual(coordinator.lastOutcome?.summary.rebuiltHistory, false)
+        let binding = await store.loadReceiverGeneration(destination: endpoint)
+        XCTAssertEqual(binding, UUID(uuidString: "00000000-0000-4000-8000-000000000002"))
+    }
+
+    /// Case D: progress from a pre-generation app version, no remembered
+    /// receiver generation. Old state cannot prove compatibility with a
+    /// generation-aware receiver, so it is invalidated and the history is
+    /// re-sent rather than trusted.
+    @MainActor
+    func testLegacyProgressWithoutRememberedGenerationIsInvalidated() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+
+        // The pre-generation world: progress exists, no receiver generation
+        // was ever recorded. The receiver now reports an identity.
+        await store.clearReceiverGeneration(destination: endpoint)
+        client.storeGeneration = "00000000-0000-4000-8000-000000000003"
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false), page([2], anchor: "a2", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueries.first?.sinceAnchor, nil)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.rebuiltHistory, true)
+        let binding = await store.loadReceiverGeneration(destination: endpoint)
+        XCTAssertEqual(binding, UUID(uuidString: "00000000-0000-4000-8000-000000000003"))
+    }
+
+    /// Case A: the same receiver across syncs must not rebuild — the cursor
+    /// is reused and nothing is re-sent.
+    @MainActor
+    func testSameGenerationResumesWithoutRebuilding() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: makeStore())
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+
+        provider.exportQueries.removeAll()
+        // The anchor chain must stay resolvable: the resumed read offers
+        // a1, and the page that follows it is the next one delivered.
+        provider.script[.steps] = [
+            page([1], anchor: "a1", full: false),
+            page([2], anchor: "a2", full: false),
+        ]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(provider.exportQueries.first?.sinceAnchor, Data("a1".utf8))
+        XCTAssertEqual(coordinator.lastOutcome?.summary.rebuiltHistory, false)
+        XCTAssertEqual(client.sentBatches.count, 2)
+    }
+
+    /// Case E: a receiver that answers without a usable datastore identity
+    /// must fail the sync with an actionable message — never sync under
+    /// ambiguous identity.
+    @MainActor
+    func testSyncFailsWhenReceiverReportsNoDatastoreIdentity() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        client.storeGeneration = nil
+        let coordinator = makeCoordinator(provider: provider, client: client, store: makeStore())
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: Date())
+        await waitForCompletion(coordinator)
+
+        guard case .failed(let message)? = coordinator.lastOutcome?.result else {
+            XCTFail("expected a failure for a receiver without a datastore identity")
+            return
+        }
+        XCTAssertTrue(message.contains("datastore identity"), message)
+        XCTAssertEqual(client.sentBatches.count, 0)
+    }
+
+    /// The "Rebuild sync history" escape hatch: clears progress and the
+    /// remembered generation, keeps configuration, and the next sync
+    /// re-reads the window.
+    @MainActor
+    func testRebuildDestinationHistoryClearsProgressAndKeepsConfiguration() async throws {
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let defaults = makeDefaults()
+        let coordinator = makeCoordinator(provider: provider, client: client, defaults: defaults, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        XCTAssertNotNil(coordinator.lastSuccessfulSync)
+
+        let rebuilt = await coordinator.rebuildDestinationHistory(endpoint: endpoint)
+        XCTAssertTrue(rebuilt)
+        XCTAssertNil(coordinator.lastSuccessfulSync)
+        let binding = await store.loadReceiverGeneration(destination: endpoint)
+        XCTAssertNil(binding)
+        let cursor = await store.manualCursor(
+            destination: endpoint, metric: .steps, windowStart: Date(timeIntervalSince1970: 0)
+        )
+        XCTAssertNil(cursor)
+
+        provider.exportQueries.removeAll()
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(provider.exportQueries.first?.sinceAnchor, nil)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.recordsFound, 1)
     }
 
     // MARK: Happy path
@@ -124,7 +286,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
         XCTAssertEqual(coordinator.lastOutcome?.summary.recordsFound, 0)
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertEqual(client.sentBatches.count, 0)
     }
 
     @MainActor
@@ -138,12 +300,101 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
 
-        XCTAssertEqual(client.sentPayloads.count, 2)
-        XCTAssertEqual(client.sentPayloads[0].records.count, SyncLimits.recordsPerUploadBatch)
-        XCTAssertEqual(client.sentPayloads[1].records.count, 50)
-        XCTAssertEqual(client.sentPayloads[0].records.first?.id, ids.first.map { record($0).id })
+        XCTAssertEqual(client.sentBatches.count, 2)
+        XCTAssertEqual(client.sentBatches[0].count, SyncLimits.recordsPerUploadBatch)
+        XCTAssertEqual(client.sentBatches[1].count, 50)
+        XCTAssertEqual(client.sentBatches[0].first?.sampleID, ids.first.map { record($0).id })
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
         XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, ids.count)
+    }
+
+    @MainActor
+    func testManualBatchesHonorTheConfiguredOutboxByteBudget() async throws {
+        let records = [1, 2, 3].map { index -> HealthRecord in
+            let base = record(index)
+            return HealthRecord(
+                id: base.id,
+                metric: base.metric,
+                startDate: base.startDate,
+                endDate: base.endDate,
+                sourceName: String(repeating: "s", count: RecordWireLimits.maxNameLength),
+                metadata: ["note": String(repeating: "x", count: RecordWireLimits.Metadata.maxValueLength)],
+                data: base.data
+            )
+        }
+        let events = records.map(SyncChangeEvent.upsert)
+        let encoder = JSONEncoder()
+        let batchID = UUID(uuidString: "00000000-0000-4000-8000-000000000000")!
+        let requestDate = Date(timeIntervalSince1970: 0)
+        let byteLimit = try XCTUnwrap(events.map {
+            try ChangeBatchEncoder.encode(
+                batchID: batchID,
+                createdAt: requestDate,
+                changes: [$0]
+            ).count
+        }.max())
+        let eventSizes = try events.map { try encoder.encode($0).count }
+        XCTAssertGreaterThan(eventSizes.sorted().prefix(2).reduce(0, +), byteLimit)
+
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [HealthExportPage(
+            records: records, anchorData: Data("budget".utf8), isFull: false
+        )]
+        let client = StubDestinationClient()
+        // The automatic outbox exposes the same immutable setting for its
+        // delivery path; custom configurations can pass this exact value to
+        // both coordinators.
+        let outbox = Outbox(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("manual-budget-\(UUID().uuidString)"),
+            deliveryByteLimit: byteLimit)
+        XCTAssertEqual(outbox.deliveryByteLimit, byteLimit)
+        let coordinator = makeCoordinator(provider: provider, client: client,
+                                          deliveryByteLimit: outbox.deliveryByteLimit)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(client.sentBatches.count, records.count)
+        for batch in client.sentBatches {
+            XCTAssertLessThanOrEqual(try ChangeBatchEncoder.encode(
+                batchID: batchID,
+                createdAt: requestDate,
+                changes: batch
+            ).count, byteLimit)
+        }
+    }
+
+    @MainActor
+    func testRecordsExceedingTransportLimitsAreSkippedAndSurfaced() async throws {
+        // A record the receiver would always reject must not poison its
+        // batch: it is skipped, counted, and the run still completes.
+        let poison = HealthRecord(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000009999")!,
+            metric: .steps,
+            startDate: Date(timeIntervalSince1970: 1_735_689_600),
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            metadata: ["blob": String(repeating: "v", count: 600)],
+            data: .quantity(QuantityData(value: 1, unit: "count"))
+        )
+        let sendable = record(1)
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [HealthExportPage(
+            records: [sendable, poison],
+            anchorData: Data("a1".utf8),
+            isFull: false
+        )]
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.skippedRecords, 1)
+        XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, 1)
+        XCTAssertEqual(client.sentBatches.count, 1)
+        XCTAssertEqual(client.sentBatches[0].count, 1)
     }
 
     // MARK: Chunked backfill
@@ -173,7 +424,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(provider.exportQueries[2].sinceAnchor, Data("a2".utf8))
         XCTAssertEqual(provider.exportQueries[3].sinceAnchor, Data("a3".utf8))
         // One batch per record page, all acknowledged.
-        XCTAssertEqual(client.sentPayloads.count, 4)
+        XCTAssertEqual(client.sentBatches.count, 4)
         XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, 4)
         // The final cursor reflects the last acknowledged page.
         let cursor = await store.manualCursor(
@@ -336,6 +587,103 @@ final class ManualSyncCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testVanishedSeriesSampleRecoversByReReadingTheWindow() async throws {
+        let provider = StubHealthDataProvider()
+        // First run completes and leaves a cursor.
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+
+        // A sample the page read reported disappears before its series data
+        // can load (deleted between the read and the fetch). The next sync
+        // must drop the cursor and re-read from the window start — the
+        // anchored re-read no longer reports the vanished sample — instead
+        // of re-reading the same doomed page forever.
+        provider.seriesSampleUnavailableForAnchoredRead = true
+        provider.exportQueries.removeAll()
+        provider.script[.steps] = [page([2], anchor: "a1", full: false)]
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(provider.exportQueries[0].sinceAnchor, Data("a1".utf8)) // offered the stored cursor
+        XCTAssertEqual(provider.exportQueries[1].sinceAnchor, nil) // rebuilt from the window start
+        XCTAssertEqual(coordinator.lastOutcome?.summary.recordsFound, 1)
+        XCTAssertEqual(client.sentBatches.count, 2) // the first run's and the recovery run's records
+    }
+
+    @MainActor
+    func testVanishedSeriesSampleOnFirstPageRetriesFromWindowStart() async throws {
+        let provider = StubHealthDataProvider()
+        provider.seriesSampleUnavailableOnFirstPageReads = 1
+        provider.script[.steps] = [page([7], anchor: "recovered", full: false)]
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(provider.exportQueries.map(\.sinceAnchor), [nil, nil])
+        XCTAssertEqual(coordinator.lastOutcome?.summary.recordsFound, 1)
+        XCTAssertEqual(client.sentBatches.flatMap { $0 }.count, 1)
+    }
+
+    @MainActor
+    func testPersistentFirstPageSeriesFailureStopsAfterOneRecoveryRetry() async throws {
+        let provider = StubHealthDataProvider()
+        provider.seriesSampleUnavailableEveryRead = true
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        guard case .failed = coordinator.lastOutcome?.result else {
+            XCTFail("expected persistent series failure to stop after bounded recovery")
+            return
+        }
+        XCTAssertEqual(provider.exportQueries.map(\.sinceAnchor), [nil, nil])
+        XCTAssertEqual(client.sentBatches.count, 0)
+    }
+
+    @MainActor
+    func testNonRecoverablePageErrorPropagatesInsteadOfRecovery() async throws {
+        let provider = StubHealthDataProvider()
+        // First run completes and leaves a cursor.
+        provider.script[.steps] = [page([1], anchor: "a1", full: false)]
+        let client = StubDestinationClient()
+        let store = makeStore()
+        let coordinator = makeCoordinator(provider: provider, client: client, store: store)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now)
+        await waitForCompletion(coordinator)
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+
+        // An error the window rebuild cannot fix (HealthKit unavailable)
+        // must stop the run honestly — the recovery switch must not swallow
+        // it and must not drop the stored cursor.
+        provider.nonRecoverablePageError = .unavailable
+        provider.exportQueries.removeAll()
+        let batchesBefore = client.sentBatches.count
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps], now: now.addingTimeInterval(60))
+        await waitForCompletion(coordinator)
+
+        guard case .failed(let message)? = coordinator.lastOutcome?.result else {
+            XCTFail("expected an honest failure for a non-recoverable page error")
+            return
+        }
+        XCTAssertFalse(message.isEmpty)
+        XCTAssertEqual(provider.exportQueries.count, 1) // offered the cursor once, no recovery re-read
+        XCTAssertEqual(client.sentBatches.count, batchesBefore)
+    }
+
+    @MainActor
     func testNonAdvancingFullPageFailsHonestly() async throws {
         let provider = StubHealthDataProvider()
         let client = StubDestinationClient()
@@ -346,7 +694,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         provider.script[.steps] = [page([1], anchor: "same", full: false)]
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
-        XCTAssertEqual(client.sentPayloads.count, 1)
+        XCTAssertEqual(client.sentBatches.count, 1)
 
         // A full page whose anchor equals the anchor it was read with:
         // continuing would re-send the same page forever, so the run stops
@@ -365,7 +713,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         }
         XCTAssertTrue(message.contains("could not be read past"), message)
         // The offending page WAS delivered before the stop.
-        XCTAssertEqual(client.sentPayloads.count, 2)
+        XCTAssertEqual(client.sentBatches.count, 2)
     }
 
     @MainActor
@@ -620,7 +968,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         coordinator.startSync(endpoint: endpoint, token: nil, metrics: [.steps])
 
         XCTAssertFalse(coordinator.isSyncing)
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertEqual(client.sentBatches.count, 0)
         XCTAssertEqual(provider.authorizationCount, 0)
         guard case .failed(let message)? = coordinator.lastOutcome?.result else {
             XCTFail("expected failure outcome")
@@ -701,7 +1049,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
             return
         }
         XCTAssertTrue(message.contains("Apple Health"))
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertEqual(client.sentBatches.count, 0)
     }
 
     @MainActor
@@ -719,7 +1067,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         await waitForCompletion(coordinator)
 
         // The overlapping call was ignored: exactly one payload.
-        XCTAssertEqual(client.sentPayloads.count, 1)
+        XCTAssertEqual(client.sentBatches.count, 1)
     }
 
     @MainActor
@@ -786,13 +1134,13 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
         XCTAssertFalse(coordinator.isSyncing)
         XCTAssertEqual(coordinator.lastOutcome?.result, .cancelled)
-        XCTAssertEqual(client.sentPayloads.count, 0)
+        XCTAssertEqual(client.sentBatches.count, 0)
         // The cleared state must not wedge later syncs.
         provider.script[.steps] = [page([9], anchor: "z1", full: false)]
         coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
         await waitForCompletion(coordinator)
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
-        XCTAssertEqual(client.sentPayloads.count, 1)
+        XCTAssertEqual(client.sentBatches.count, 1)
     }
 
     @MainActor
@@ -819,7 +1167,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
         // The failed attempt never checkpointed its page, so the retry reads
         // it again — the receiver keeps one copy of each record.
-        XCTAssertEqual(client.sentPayloads.count, 2)
+        XCTAssertEqual(client.sentBatches.count, 2)
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
         XCTAssertNotNil(coordinator.lastSuccessfulSync)
     }
@@ -850,6 +1198,19 @@ private final class StubHealthDataProvider: HealthDataProviding {
     /// When set, a query with a non-nil anchor throws a corrupted-anchor
     /// error (recovery tests).
     var corruptStoredAnchors = false
+    /// When set, a query with a non-nil anchor throws seriesSampleUnavailable
+    /// (recovery tests): a sample vanished between the page read and its
+    /// series fetch.
+    var seriesSampleUnavailableForAnchoredRead = false
+    /// A first-page fetch can lose its series parent too; this count scripts
+    /// the transient failure before any cursor exists.
+    var seriesSampleUnavailableOnFirstPageReads = 0
+    /// Repeats the unavailable-series error regardless of anchor, allowing
+    /// the one-retry recovery bound to be pinned.
+    var seriesSampleUnavailableEveryRead = false
+    /// When set, a query with a non-nil anchor throws this error even though
+    /// recovery cannot help (propagation tests).
+    var nonRecoverablePageError: HealthKitServiceError?
     var shouldFailAuthorization = false
     private(set) var authorizationCount = 0
     private(set) var authorizationRequestedMetrics: [HealthMetric] = []
@@ -880,8 +1241,21 @@ private final class StubHealthDataProvider: HealthDataProviding {
         limit: Int
     ) async throws -> HealthExportPage {
         exportQueries.append(RecordedQuery(metric: metric, sinceAnchor: anchorData, windowStart: windowStart))
+        if seriesSampleUnavailableEveryRead {
+            throw HealthKitServiceError.seriesSampleUnavailable(metric: metric.rawValue)
+        }
+        if anchorData == nil, seriesSampleUnavailableOnFirstPageReads > 0 {
+            seriesSampleUnavailableOnFirstPageReads -= 1
+            throw HealthKitServiceError.seriesSampleUnavailable(metric: metric.rawValue)
+        }
         if corruptStoredAnchors, anchorData != nil {
             throw HealthKitServiceError.corruptedAnchor
+        }
+        if seriesSampleUnavailableForAnchoredRead, anchorData != nil {
+            throw HealthKitServiceError.seriesSampleUnavailable(metric: metric.rawValue)
+        }
+        if let error = nonRecoverablePageError, anchorData != nil {
+            throw error
         }
         let pages = script[metric] ?? []
 
@@ -936,7 +1310,7 @@ private final class StubHealthDataProvider: HealthDataProviding {
 }
 
 private final class StubDestinationClient: DestinationClient, @unchecked Sendable {
-    private(set) var sentPayloads: [SyncPayload] = []
+    private(set) var sentBatches: [[SyncChangeEvent]] = []
     private(set) var receivedEndpoints: [URL] = []
     private(set) var receivedAuthorizations: [DestinationAuthorization] = []
 
@@ -946,34 +1320,23 @@ private final class StubDestinationClient: DestinationClient, @unchecked Sendabl
     var failOnBatchNumber: Int?
     var failure: DestinationClientError?
 
-    func send(
-        _ payload: SyncPayload,
-        to endpoint: URL,
-        authorization: DestinationAuthorization
-    ) async throws -> SyncAcknowledgment {
-        let batchNumber = sentPayloads.count + 1
-        sentPayloads.append(payload)
-        receivedEndpoints.append(endpoint)
-        receivedAuthorizations.append(authorization)
-
-        if let gate = sendGate {
-            await gate.enter()
-        }
-        if failOnBatchNumber == batchNumber, let failure {
-            throw failure
-        }
-        return SyncAcknowledgment(accepted: payload.records.count, duplicates: 0)
-    }
+    /// The datastore identity the stub's health reports. A stable default
+    /// keeps the per-sync generation gate on the "same receiver" path;
+    /// generation tests override (or clear) this.
+    var storeGeneration: String? = "00000000-0000-4000-8000-000000000001"
+    private(set) var testConnectionCalls = 0
 
     func testConnection(
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse {
-        ReceiverHealthResponse(
+        testConnectionCalls += 1
+        return ReceiverHealthResponse(
             status: "ok",
             service: "vitalroute-receiver",
-            apiVersion: 1,
-            capabilities: []
+            apiVersion: 3,
+            capabilities: ["additions", "deletions"],
+            storeGeneration: storeGeneration
         )
     }
 
@@ -983,9 +1346,21 @@ private final class StubDestinationClient: DestinationClient, @unchecked Sendabl
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ChangeAcknowledgment {
-        ChangeAcknowledgment(
-            accepted: changes.count,
-            duplicates: 0,
+        let batchNumber = sentBatches.count + 1
+        sentBatches.append(changes)
+        receivedEndpoints.append(endpoint)
+        receivedAuthorizations.append(authorization)
+
+        if let gate = sendGate {
+            await gate.enter()
+        }
+        if failOnBatchNumber == batchNumber, let failure {
+            throw failure
+        }
+        let upserts = changes.filter { if case .upsert = $0 { return true } else { return false } }.count
+        return ChangeAcknowledgment(
+            accepted: upserts,
+            duplicates: changes.count - upserts,
             superseded: 0,
             appliedDeletions: 0,
             duplicateDeletions: 0

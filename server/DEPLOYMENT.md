@@ -203,6 +203,17 @@ The checkout moves to the new revision, the image is rebuilt, and the
 container is recreated in place. The data volume and the token are not
 touched. The revision file is updated.
 
+**Schema compatibility (pre-release policy).** There is no migration
+machinery between storage-schema generations. When the receiver opens a
+database that does not match its schema generation, it refuses to start
+rather than discard health data. To proceed with a reset, start the
+container once with `VITALROUTE_ALLOW_SCHEMA_RESET=1` in the environment
+(e.g. add it to the compose environment for one `up -d --force-recreate`,
+then remove it): the database is recreated empty and the receiver logs one
+line. Then re-sync from the device, or restore from a backup taken before
+the upgrade. Verify afterwards with the connection test
+(`apiVersion >= 3`).
+
 ### Token rotation
 
 1. Generate a replacement with the receiver's ownership and permissions:
@@ -241,6 +252,16 @@ Treat backup files like the live database: they contain health records;
 keep them on the same protected storage (`/srv/vitalroute/backups` is mode
 0700, files 0600).
 
+Each database also carries a **datastore identity** (`storeGeneration`, a
+random UUID persisted in the database and exposed on the health response).
+A backup restores the generation stored inside it, so a client that
+synchronized against the pre-backup datastore detects the rollback and
+re-syncs; a reset (`VITALROUTE_ALLOW_SCHEMA_RESET=1`) or any replacement
+of the database file mints a new generation with the same effect. Clients
+therefore never silently assume a replaced receiver is caught up — they
+re-send the configured history, and the receiver's idempotency dedupes
+whatever the datastore already had.
+
 ### Uninstall (keeping data)
 
 ```sh
@@ -269,7 +290,7 @@ hdr="$(mktemp)"; chmod 600 "$hdr"
 printf 'header = "Authorization: Bearer %s"\n' "$(sudo cat /srv/vitalroute/token)" >"$hdr"
 
 curl -s -o /dev/null -w '%{http_code}\n' "$URL/v1/health"        # 401 unauthorized
-curl -s -K "$hdr" "$URL/v1/health"                                # 200 + apiVersion 2 + capabilities
+curl -s -K "$hdr" "$URL/v1/health"                                # 200 + apiVersion 3 + capabilities
 rm -f "$hdr"
 # The synthetic sender has no token-file option; run it from an admin
 # machine where the token is already protected.

@@ -41,10 +41,9 @@ final class DestinationRecoveryTests: XCTestCase {
         HealthRecord(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", id))!,
             metric: .steps,
-            value: Double(id),
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600),
-            endDate: Date(timeIntervalSince1970: 1_735_689_660)
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            data: .quantity(QuantityData(value: Double(id), unit: "count"))
         )
     }
 

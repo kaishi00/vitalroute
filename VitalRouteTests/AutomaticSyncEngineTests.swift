@@ -71,10 +71,9 @@ final class AutomaticSyncEngineTests: XCTestCase {
         HealthRecord(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", id))!,
             metric: metric,
-            value: Double(id),
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600),
-            endDate: Date(timeIntervalSince1970: 1_735_689_660)
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            data: .quantity(QuantityData(value: Double(id), unit: "count"))
         )
     }
 
@@ -141,6 +140,413 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertFalse(engine.isEnabled)
     }
 
+    /// An enablement that detects a receiver reset must surface the rebuild
+    /// notice: the enablement pass reconciles as "same" (the binding was
+    /// committed during enable), so this is the only place the user can see
+    /// why history is being re-sent.
+    func testEnableAfterReceiverResetSurfacesRebuildNotice() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)], deletions: [],
+                anchorData: Data("a1".utf8), isFull: false
+            )],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        // Simulate the pre-generation world after a receiver reset: the
+        // binding is gone while progress (a caught-up checkpoint) remains,
+        // and the receiver now reports a new identity.
+        let store = SyncStateStore(directory: tempDirectory)
+        await store.clearReceiverGeneration(destination: endpoint)
+        client.healthResponse.storeGeneration = "00000000-0000-4000-8000-000000000009"
+        provider.resetConsumption()
+        await engine.disable()
+
+        let result = await enable(engine)
+        XCTAssertEqual(result, .enabled)
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(
+            engine.lastStatusMessage,
+            SyncGenerationReconciler.rebuiltHistoryNotice
+        )
+        // The stale checkpoint was invalidated: the re-bootstrap offered a
+        // nil anchor and re-sent the record (deduped by the receiver).
+        XCTAssertEqual(provider.changeQueries.last?.anchorData, nil)
+        XCTAssertEqual(client.sentChangeBatches.count, 2)
+    }
+
+    /// The automatic path of the Build 9 regression: a receiver reset left
+    /// a caught-up checkpoint describing a datastore that no longer exists.
+    /// The generation gate must invalidate it and re-bootstrap, so the new
+    /// receiver is repopulated instead of silently assumed caught-up.
+    func testReceiverResetInvalidatesCaughtUpCheckpointAndRebootstraps() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)], deletions: [],
+                anchorData: Data("a1".utf8), isFull: false
+            )],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(client.sentChangeBatches.count, 1)
+        XCTAssertEqual(provider.changeQueries[0].anchorData, nil)
+
+        // The receiver's datastore is replaced: same URL, new identity.
+        client.healthResponse.storeGeneration = "00000000-0000-4000-8000-000000000002"
+        client.resetDelivery()
+        provider.resetConsumption()
+        provider.changeQueries.removeAll()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)], deletions: [],
+                anchorData: Data("a1".utf8), isFull: false
+            )],
+        ]
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        // This pass captures against the checkpoint it started with, then
+        // discovers the reset. Its follow-up re-bootstrap starts at nil.
+        XCTAssertEqual(provider.changeQueries[0].anchorData, Data("a1".utf8))
+        XCTAssertEqual(provider.changeQueries.last?.anchorData, nil)
+        XCTAssertEqual(client.sentChangeBatches.count, 1)
+        XCTAssertTrue(engine.lastStatusMessage?.contains("rebuilding sync history") == true)
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.scope.destination, endpoint)
+    }
+
+    func testFirstCaptureWithoutLegacyProgressAdoptsIdentityWithoutRebootstrap() async throws {
+        defaults.set(true, forKey: "automaticSync.enabled")
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(71)], anchor: "fresh")]]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+
+        await engine.restoreOnLaunch(destination: endpoint, token: token, metrics: [.steps])
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.count, 1)
+        XCTAssertNil(provider.changeQueries.first?.anchorData)
+        XCTAssertEqual(client.sentChangeBatches.flatMap(\.changes), [.upsert(record(71))])
+        XCTAssertFalse(engine.lastStatusMessage?.contains("reset") == true)
+        let store = SyncStateStore(directory: tempDirectory)
+        let binding = await store.loadReceiverGeneration(destination: endpoint)
+        XCTAssertEqual(binding, UUID(uuidString: ScriptedSyncClient.defaultStoreGeneration))
+        let checkpoint = await store.loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.anchorData, Data("fresh".utf8))
+    }
+
+    func testPreexistingLegacyCheckpointStillRebootstrapsAfterCapture() async throws {
+        defaults.set(true, forKey: "automaticSync.enabled")
+        let clock = ClockBox()
+        let store = SyncStateStore(directory: tempDirectory)
+        let legacyScope = CategoryScope(
+            destination: endpoint, metric: .steps, generation: UUID(),
+            windowStart: BackfillDepth.sevenDays.windowStart(from: clock.now)
+        )
+        try await store.save(CategoryCheckpoint(
+            scope: legacyScope, anchorData: Data("legacy".utf8),
+            updatedAt: clock.now, isCaughtUp: true
+        ))
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [
+            page(additions: [record(72)], anchor: "delta"),
+            page(additions: [record(73)], anchor: "rebuilt"),
+        ]]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
+
+        await engine.restoreOnLaunch(destination: endpoint, token: token, metrics: [.steps])
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.map(\.anchorData), [Data("legacy".utf8), nil])
+        let checkpoint = await store.loadCheckpoint(for: .steps)
+        XCTAssertNotEqual(checkpoint?.scope.generation, legacyScope.generation)
+        XCTAssertEqual(checkpoint?.anchorData, Data("rebuilt".utf8))
+        XCTAssertEqual(Set(client.sentChangeBatches.flatMap(\.changes).map(\.sampleID)),
+                       Set([record(72).id, record(73).id]))
+        XCTAssertTrue(engine.lastStatusMessage?.contains("rebuilding") == true)
+    }
+
+    /// A receiver restart (same datastore identity) must NOT cause a
+    /// needless rebuild: the checkpoint is reused as-is.
+    func testSameGenerationRestartDoesNotRebootstrap() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)], deletions: [],
+                anchorData: Data("a1".utf8), isFull: false
+            )],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        let queriesAfterFirstPass = provider.changeQueries.count
+
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        // The continuation query resumes from the saved anchor; no rebuild.
+        XCTAssertEqual(provider.changeQueries.count, queriesAfterFirstPass + 1)
+        XCTAssertEqual(provider.changeQueries.last?.anchorData, Data("a1".utf8))
+        XCTAssertTrue(engine.lastStatusMessage?.contains("rebuilding") != true)
+        XCTAssertEqual(client.sentChangeBatches.count, 1)
+    }
+
+    func testSuccessfulIdentityRetryClearsDeadlineWhenOutboxIsEmpty() async throws {
+        let clock = ClockBox()
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
+        let scheduled = ReleaseCounter()
+        engine.scheduleBackgroundRetry = { _ in scheduled.increment(); return true }
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(engine.pendingCount, 0)
+        let connectionsBeforeFailure = client.testConnectionCount
+
+        client.failNextConnection(with: .connectionFailed)
+        guard let notification = provider.fireObserver() else {
+            return XCTFail("no observer was registered")
+        }
+        await waitFor("the failed identity request") {
+            client.testConnectionCount == connectionsBeforeFailure + 1
+        }
+        await engine.waitUntilIdle()
+        XCTAssertEqual(notification.releases.count, 1)
+        XCTAssertNotNil(engine.nextRetryAt)
+        let retryAfterFailure = await SyncStateStore(directory: tempDirectory).loadRetryState()
+        XCTAssertNotNil(retryAfterFailure.nextAttemptAt)
+        XCTAssertEqual(scheduled.count, 1)
+
+        clock.advance(by: 61)
+        engine.backgroundTaskFired()
+        await engine.waitUntilIdle()
+
+        XCTAssertNil(engine.nextRetryAt, "successful empty-queue recovery clears the old deadline")
+        let retryAfterRecovery = await SyncStateStore(directory: tempDirectory).loadRetryState()
+        XCTAssertNil(retryAfterRecovery.nextAttemptAt)
+        XCTAssertEqual(engine.pendingCount, 0)
+        XCTAssertEqual(scheduled.count, 1, "recovery must not schedule another retry")
+    }
+
+    func testCaptureIsDurableAndCompletionReleasesBeforeIdentityFailure() async throws {
+        let clock = ClockBox()
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        let capturedRecord = record(61)
+        provider.script = [.steps: [page(additions: [capturedRecord], anchor: "durable-before-network")]]
+        provider.resetConsumption()
+        provider.changeQueries.removeAll()
+        client.failNextConnection(with: .connectionFailed)
+        let identityGate = AsyncGate()
+        client.parkTestConnections(on: identityGate)
+        guard let notification = provider.fireObserver() else {
+            return XCTFail("no observer was registered")
+        }
+        await waitFor("post-capture identity check") { identityGate.entryCount == 1 }
+
+        XCTAssertEqual(notification.releases.count, 1)
+        let queuedBeforeFailure = try await lastOutbox.nextBatch()
+        XCTAssertTrue(queuedBeforeFailure.events.contains(.upsert(capturedRecord)))
+        let durableCheckpoint = await SyncStateStore(directory: tempDirectory)
+            .loadCheckpoint(for: .steps)
+        XCTAssertEqual(durableCheckpoint?.anchorData, Data("durable-before-network".utf8))
+
+        identityGate.open()
+        await engine.waitUntilIdle()
+        XCTAssertNotNil(engine.nextRetryAt)
+        XCTAssertEqual(engine.pendingCount, 1)
+
+        client.parkTestConnections(on: nil)
+        client.resetDelivery()
+        clock.advance(by: 61)
+        engine.backgroundTaskFired()
+        await engine.waitUntilIdle()
+
+        XCTAssertTrue(client.sentChangeBatches.flatMap(\.changes).contains(.upsert(capturedRecord)))
+        XCTAssertEqual(engine.pendingCount, 0)
+        XCTAssertEqual(notification.releases.count, 1)
+    }
+
+    func testObserverArrivalDuringFailedIdentityGetsLocalCatchUpWithoutEarlyRetry() async throws {
+        let clock = ClockBox()
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        let connectionsBeforeWake = client.testConnectionCount
+        let queriesBeforeWake = provider.changeQueries.count
+
+        let networkGate = AsyncGate()
+        client.parkTestConnections(on: networkGate)
+        client.failNextConnection(with: .connectionFailed)
+        guard let first = provider.fireObserver() else {
+            return XCTFail("no observer was registered")
+        }
+        await waitFor("the identity request") { networkGate.entryCount == 1 }
+        XCTAssertEqual(first.releases.count, 1)
+
+        provider.script = [.steps: [page(additions: [record(41)], anchor: "late")]]
+        provider.resetConsumption()
+        guard let late = provider.fireObserver() else {
+            return XCTFail("observer registration was lost")
+        }
+        networkGate.open()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(late.releases.count, 1,
+                       "the later capture must release the late completion exactly once")
+        XCTAssertEqual(provider.changeQueries.count, queriesBeforeWake + 2,
+                       "the first wake and late wake each get a capture")
+        let durableLateCapture = try await lastOutbox.nextBatch()
+        XCTAssertTrue(durableLateCapture.events.contains(.upsert(record(41))))
+        XCTAssertEqual(client.testConnectionCount, connectionsBeforeWake + 1,
+                       "the absorbed wake must not make another network call inside backoff")
+        XCTAssertNotNil(engine.nextRetryAt)
+
+        client.parkTestConnections(on: nil)
+        clock.advance(by: 61)
+        engine.backgroundTaskFired()
+        await engine.waitUntilIdle()
+        XCTAssertGreaterThanOrEqual(client.testConnectionCount, 3)
+    }
+
+    func testEnableRechecksReceiverIdentityAfterWaitingForWorkGate() async throws {
+        let workGate = SyncWorkGate()
+        let hold = AsyncGate()
+        let blocker = Task {
+            try await workGate.run { await hold.enter() }
+        }
+        await waitFor("the work gate to be held") { hold.entryCount == 1 }
+
+        let provider = ScriptedHealthProvider()
+        provider.registrationGate = AsyncGate()
+        let client = ScriptedSyncClient()
+        client.healthResponse.storeGeneration = "00000000-0000-4000-8000-00000000000a"
+        let engine = makeEngine(provider: provider, client: client, gate: workGate)
+        let enabling = Task { await enable(engine) }
+
+        await waitFor("the pre-gate identity response") { client.testConnectionCount == 1 }
+        client.healthResponse.storeGeneration = "00000000-0000-4000-8000-00000000000b"
+        hold.open()
+        try await blocker.value
+
+        await waitFor("observer registration after reconciliation") {
+            provider.registrationGate?.entryCount == 1
+        }
+        let binding = await SyncStateStore(directory: tempDirectory)
+            .loadReceiverGeneration(destination: endpoint)
+        XCTAssertEqual(binding, UUID(uuidString: "00000000-0000-4000-8000-00000000000b"))
+        XCTAssertEqual(client.testConnectionCount, 2,
+                       "the identity must be checked again after the gate wait")
+
+        provider.registrationGate?.open()
+        let result = await enabling.value
+        XCTAssertEqual(result, .enabled)
+        await engine.waitUntilIdle()
+    }
+
+    func testPostCaptureGenerationMismatchPreservesUpsertsAndDeletionsAndRebootstraps() async throws {
+        let clock = ClockBox()
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(30)], anchor: "old")]]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        let oldGeneration = UUID(uuidString: ScriptedSyncClient.defaultStoreGeneration)
+        let rememberedOldGeneration = await SyncStateStore(directory: tempDirectory)
+            .loadReceiverGeneration(destination: endpoint)
+        XCTAssertEqual(rememberedOldGeneration, oldGeneration)
+
+        let addition = record(31)
+        let deletion = deletion(32)
+        provider.script = [.steps: [
+            page(additions: [addition], deletions: [deletion], anchor: "delta"),
+            page(additions: [record(30)], anchor: "rebuilt"),
+        ]]
+        provider.resetConsumption()
+        provider.changeQueries.removeAll()
+        client.healthResponse.storeGeneration = "00000000-0000-4000-8000-00000000000c"
+        client.setFailAllDeliveries(true)
+        let identityGate = AsyncGate()
+        client.parkTestConnections(on: identityGate)
+
+        guard let fired = provider.fireObserver() else {
+            return XCTFail("no observer was registered")
+        }
+        await waitFor("identity check after capture") { identityGate.entryCount == 1 }
+        XCTAssertEqual(fired.releases.count, 1,
+                       "the completion belongs to the durable capture before identity networking")
+        let captured = try await lastOutbox.nextBatch()
+        XCTAssertTrue(captured.events.contains(.upsert(addition)))
+        XCTAssertTrue(captured.events.contains(.delete(deletion)))
+        let capturedCheckpoint = await SyncStateStore(directory: tempDirectory)
+            .loadCheckpoint(for: .steps)
+        XCTAssertEqual(capturedCheckpoint?.anchorData, Data("delta".utf8))
+
+        identityGate.open()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.count, 2,
+                       "generation invalidation must schedule a follow-up bootstrap")
+        XCTAssertEqual(provider.changeQueries[0].anchorData, Data("old".utf8))
+        XCTAssertNil(provider.changeQueries[1].anchorData)
+        let rebuiltGeneration = await SyncStateStore(directory: tempDirectory)
+            .loadReceiverGeneration(destination: endpoint)
+        XCTAssertEqual(rebuiltGeneration, UUID(uuidString: "00000000-0000-4000-8000-00000000000c"))
+        let stillQueued = try await lastOutbox.nextBatch()
+        XCTAssertTrue(stillQueued.events.contains(.upsert(addition)))
+        XCTAssertTrue(stillQueued.events.contains(.delete(deletion)))
+        XCTAssertEqual(fired.releases.count, 1)
+
+        // A retry delivers the retained delta and the reconstructed history.
+        client.setFailAllDeliveries(false)
+        client.resetDelivery()
+        clock.advance(by: 61)
+        engine.backgroundTaskFired()
+        await engine.waitUntilIdle()
+        let retryEvents = client.sentChangeBatches.flatMap(\.changes)
+        XCTAssertTrue(retryEvents.contains(.upsert(record(30))))
+        XCTAssertTrue(retryEvents.contains(.upsert(addition)))
+        XCTAssertTrue(retryEvents.contains(.delete(deletion)))
+        XCTAssertEqual(engine.pendingCount, 0)
+    }
+
+    /// A receiver that answers without a usable datastore identity pauses
+    /// automatic sync with the update-the-receiver remedy, and nothing is
+    /// sent under ambiguous identity.
+    func testEnableFailsWhenReceiverReportsNoDatastoreIdentity() async {
+        let client = ScriptedSyncClient()
+        client.healthResponse.storeGeneration = nil
+        let provider = ScriptedHealthProvider()
+        let engine = makeEngine(provider: provider, client: client)
+
+        let result = await enable(engine)
+
+        guard case .failed(let message) = result else {
+            return XCTFail("expected failure for a receiver without a datastore identity")
+        }
+        XCTAssertTrue(message.contains("datastore identity"), message)
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(client.sentChangeBatches.count, 0)
+    }
+
     func testEnableRequiresDeletionCapableReceiver() async {
         let client = ScriptedSyncClient()
         client.healthResponse = ReceiverHealthResponse(
@@ -157,7 +563,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertTrue(message.contains("does not support deletions"))
         XCTAssertFalse(engine.isEnabled)
         XCTAssertEqual(provider.observedMetrics.count, 0)
-        // A v1 receiver must never receive a v2 change batch.
+        // An incompatible receiver must never receive a v3 change batch.
         XCTAssertEqual(client.sentChangeBatches.count, 0)
     }
 
@@ -181,7 +587,9 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertTrue(engine.isEnabled)
         XCTAssertEqual(provider.observedMetrics, [[.steps]])
         XCTAssertEqual(provider.authorizationRequests, 1)
-        XCTAssertEqual(client.testConnectionCount, 1)
+        // Capability check, fresh identity inside the work gate, and the
+        // enablement pass's post-capture identity check.
+        XCTAssertEqual(client.testConnectionCount, 3)
 
         // Bootstrap window is the fixed scope of the DEFAULT depth (7 days).
         XCTAssertEqual(provider.changeQueries.count, 1)
@@ -727,6 +1135,40 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertNil(engine.nextRetryAt, "an actionable pause schedules no retry")
     }
 
+    func testMalformedHealthIdentityAfterCapturePausesWithoutRetryOrLosingEvents() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        provider.script = [.steps: [page(additions: [record(92)], anchor: "health-checkpoint")]]
+        provider.resetConsumption()
+        let capturesBefore = provider.changePageAttempts
+        let healthChecksBefore = client.testConnectionCount
+        let scheduled = ReleaseCounter()
+        engine.scheduleBackgroundRetry = { _ in scheduled.increment(); return true }
+        client.failNextConnection(with: .malformedHealthResponse)
+
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(engine.mode, .paused(.protocolFailure("the destination returned a malformed health response.")))
+        XCTAssertNil(engine.nextRetryAt, "a malformed identity response is actionable and must not retry")
+        XCTAssertEqual(engine.pendingCount, 1, "the event captured before identity validation remains queued")
+        let retryState = await SyncStateStore(directory: tempDirectory).loadRetryState()
+        XCTAssertTrue(retryState.lastFailureIsActionable)
+        XCTAssertNil(retryState.nextAttemptAt)
+        XCTAssertEqual(scheduled.count, 0, "actionable health failures must not request a background retry")
+        let queued = try await lastOutbox.pendingCount()
+        XCTAssertEqual(queued, 1)
+        XCTAssertEqual(provider.changePageAttempts, capturesBefore + 1)
+        XCTAssertEqual(client.testConnectionCount, healthChecksBefore + 1)
+        XCTAssertEqual(client.sentChangeBatches.count, 0, "delivery cannot precede identity validation")
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.anchorData, Data("health-checkpoint".utf8))
+    }
+
     func testBackpressureStopsQueriesAndKeepsDraining() async throws {
         let provider = ScriptedHealthProvider()
         let client = ScriptedSyncClient()
@@ -1103,6 +1545,48 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let newScope = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)?.scope
         XCTAssertNotEqual(newScope?.generation, firstScope?.generation)
         XCTAssertEqual(client.sentChangeBatches.count, 1)
+    }
+
+    func testUnavailableSeriesClearsAnchorAndUsesBoundedRecoveryRetry() async throws {
+        let clock = ClockBox()
+        let provider = ScriptedHealthProvider()
+        provider.script = [.steps: [page(additions: [record(50)], anchor: "series-old")]]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client, clock: clock)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        let previousScope = await SyncStateStore(directory: tempDirectory)
+            .loadCheckpoint(for: .steps)?.scope
+
+        provider.changePageError = HealthKitServiceError.seriesSampleUnavailable(metric: "electrocardiogram")
+        let attemptsBeforeFailure = provider.changePageAttempts
+        // An absorbed non-observer trigger must not retry a doomed page
+        // immediately after this capture fails.
+        engine.foregroundCatchUp()
+        engine.foregroundCatchUp()
+        await waitFor("series query failure") {
+            engine.nextRetryAt != nil
+        }
+        await engine.waitUntilIdle()
+        let clearedCheckpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertNil(clearedCheckpoint, "a missing series invalidates the unusable anchor")
+        XCTAssertNotNil(engine.nextRetryAt)
+        XCTAssertEqual(provider.changePageAttempts, attemptsBeforeFailure + 1)
+        let queryCountAfterFailure = provider.changeQueries.count
+
+        provider.changePageError = nil
+        provider.resetConsumption()
+        provider.script = [.steps: [page(additions: [record(51)], anchor: "series-new")]]
+        clock.advance(by: 61)
+        engine.backgroundTaskFired()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(provider.changeQueries.count, queryCountAfterFailure + 1)
+        XCTAssertNil(provider.changeQueries.last?.anchorData,
+                     "recovery bootstraps without the cleared checkpoint")
+        let newScope = await SyncStateStore(directory: tempDirectory)
+            .loadCheckpoint(for: .steps)?.scope
+        XCTAssertNotEqual(newScope?.generation, previousScope?.generation)
     }
 
     func testDestinationChangeDuringParkedDeliveryNeverLeaksToNewDestination() async throws {
@@ -2439,6 +2923,7 @@ final class ScriptedHealthProvider: HealthDataProviding {
         consumed.removeAll()
     }
     var changeQueries: [RecordedQuery] = []
+    private(set) var changePageAttempts = 0
     private(set) var observedMetrics: [Set<HealthMetric>] = []
     private(set) var observationStopCount = 0
     private(set) var authorizationRequests = 0
@@ -2496,6 +2981,7 @@ final class ScriptedHealthProvider: HealthDataProviding {
         windowStart: Date,
         limit: Int
     ) async throws -> HealthChangePage {
+        changePageAttempts += 1
         if let captureGate {
             parkedCaptureCount += 1
             await captureGate.enter()
@@ -2586,6 +3072,8 @@ final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [SentBatch] = []
     private var connections = 0
+    private var queuedConnectionFailure: DestinationClientError?
+    private var connectionGate: AsyncGate?
 
     var testConnectionCount: Int {
         lock.lock()
@@ -2600,9 +3088,14 @@ final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         return storage
     }
 
+    /// A stable datastore identity, so the engine's per-pass generation
+    /// gate reads as "same receiver" unless a test scripts otherwise.
+    static let defaultStoreGeneration = "00000000-0000-4000-8000-000000000001"
+
     var healthResponse = ReceiverHealthResponse(
-        status: "ok", service: "vitalroute-receiver", apiVersion: 2,
-        capabilities: ["additions", "deletions"]
+        status: "ok", service: "vitalroute-receiver", apiVersion: 3,
+        capabilities: ["additions", "deletions"],
+        storeGeneration: ScriptedSyncClient.defaultStoreGeneration
     )
     var nextAcknowledgment: ChangeAcknowledgment?
     fileprivate var sendGate: AsyncGate?
@@ -2614,6 +3107,14 @@ final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
 
     func setFailAllDeliveries(_ value: Bool) {
         performLocked { failAllDeliveries = value }
+    }
+
+    func failNextConnection(with error: DestinationClientError) {
+        performLocked { queuedConnectionFailure = error }
+    }
+
+    fileprivate func parkTestConnections(on gate: AsyncGate?) {
+        performLocked { connectionGate = gate }
     }
 
     func failNextDelivery(with error: DestinationClientError) {
@@ -2632,20 +3133,19 @@ final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         return body()
     }
 
-    func send(
-        _ payload: SyncPayload,
-        to endpoint: URL,
-        authorization: DestinationAuthorization
-    ) async throws -> SyncAcknowledgment {
-        SyncAcknowledgment(accepted: payload.records.count, duplicates: 0)
-    }
-
     func testConnection(
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse {
-        performLocked { connections += 1 }
-        return healthResponse
+        let (gate, failure, response) = performLocked { () -> (AsyncGate?, DestinationClientError?, ReceiverHealthResponse) in
+            connections += 1
+            let failure = queuedConnectionFailure
+            queuedConnectionFailure = nil
+            return (connectionGate, failure, healthResponse)
+        }
+        if let gate { await gate.enter() }
+        if let failure { throw failure }
+        return response
     }
 
     func sendChanges(
@@ -2746,22 +3246,15 @@ private final class ManualStubHealthProvider: HealthDataProviding {
 private final class ManualStubClient: DestinationClient, @unchecked Sendable {
     var sendGate: AsyncGate?
 
-    func send(
-        _ payload: SyncPayload,
-        to endpoint: URL,
-        authorization: DestinationAuthorization
-    ) async throws -> SyncAcknowledgment {
-        if let sendGate {
-            await sendGate.enter()
-        }
-        return SyncAcknowledgment(accepted: 0, duplicates: 0)
-    }
-
     func testConnection(
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse {
-        ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 2, capabilities: ["additions", "deletions"])
+        ReceiverHealthResponse(
+            status: "ok", service: "vitalroute-receiver", apiVersion: 3,
+            capabilities: ["additions", "deletions"],
+            storeGeneration: "00000000-0000-4000-8000-000000000001"
+        )
     }
 
     func sendChanges(
@@ -2770,7 +3263,17 @@ private final class ManualStubClient: DestinationClient, @unchecked Sendable {
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ChangeAcknowledgment {
-        ChangeAcknowledgment(accepted: 0, duplicates: 0, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0)
+        if let sendGate {
+            await sendGate.enter()
+        }
+        let upserts = changes.filter { if case .upsert = $0 { return true } else { return false } }.count
+        return ChangeAcknowledgment(
+            accepted: upserts,
+            duplicates: changes.count - upserts,
+            superseded: 0,
+            appliedDeletions: 0,
+            duplicateDeletions: 0
+        )
     }
 }
 
@@ -2778,6 +3281,13 @@ private final class ManualStubClient: DestinationClient, @unchecked Sendable {
 private final class AsyncGate: @unchecked Sendable {
     private let lock = NSLock()
     private var opened = false
+    private var entries = 0
+
+    var entryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries
+    }
 
     private var isOpen: Bool {
         lock.lock()
@@ -2785,7 +3295,14 @@ private final class AsyncGate: @unchecked Sendable {
         return opened
     }
 
+    private func recordEntry() {
+        lock.lock()
+        entries += 1
+        lock.unlock()
+    }
+
     func enter() async {
+        recordEntry()
         while !isOpen && !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
@@ -2801,4 +3318,3 @@ private final class AsyncGate: @unchecked Sendable {
         open()
     }
 }
-

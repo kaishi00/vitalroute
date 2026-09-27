@@ -57,15 +57,31 @@ struct SyncSummary: Equatable {
     var batchesDelivered = 0
     var acceptedRecords = 0
     var duplicateRecords = 0
+    /// Records the receiver refused to store because a tombstone exists
+    /// (the sample was deleted through the automatic change stream before
+    /// this manual batch arrived). Accounted for, but not stored.
+    var supersededRecords = 0
+    /// Records read from HealthKit but not sent because they exceed the
+    /// receiver's structural limits (oversized metadata, non-finite
+    /// values, …). They can never be delivered, so retrying them would
+    /// poison their whole batch forever; they are skipped and surfaced
+    /// instead.
+    var skippedRecords = 0
+    /// True when this run reconciled against a changed (or newly learned)
+    /// receiver datastore and therefore cleared delivery progress: the
+    /// history is being re-sent, which the user should understand.
+    var rebuiltHistory = false
 
     var deliveredRecords: Int {
-        acceptedRecords + duplicateRecords
+        acceptedRecords + duplicateRecords + supersededRecords
     }
 
     /// Per-category counts for outcome copy, in catalog order.
     var breakdownText: String {
-        HealthMetric.allCases
-            .compactMap { metric in recordsByMetric[metric].map { "\(metric.displayName) \($0)" } }
+        MetricCatalog.selectableMetrics
+            .compactMap { descriptor in
+                recordsByMetric[descriptor.metric].map { "\(descriptor.displayName) \($0)" }
+            }
             .joined(separator: " · ")
     }
 }
@@ -104,6 +120,30 @@ struct LastSyncInfo: Equatable, Codable {
     let deliveredRecords: Int
     let acceptedRecords: Int
     let duplicateRecords: Int
+    var supersededRecords: Int = 0
+
+    private enum CodingKeys: String, CodingKey {
+        case finishedAt, deliveredRecords, acceptedRecords, duplicateRecords, supersededRecords
+    }
+
+    init(finishedAt: Date, deliveredRecords: Int, acceptedRecords: Int, duplicateRecords: Int, supersededRecords: Int = 0) {
+        self.finishedAt = finishedAt
+        self.deliveredRecords = deliveredRecords
+        self.acceptedRecords = acceptedRecords
+        self.duplicateRecords = duplicateRecords
+        self.supersededRecords = supersededRecords
+    }
+
+    /// `supersededRecords` was added after the first releases of this
+    /// struct; values persisted before it decode as zero.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        finishedAt = try container.decode(Date.self, forKey: .finishedAt)
+        deliveredRecords = try container.decode(Int.self, forKey: .deliveredRecords)
+        acceptedRecords = try container.decode(Int.self, forKey: .acceptedRecords)
+        duplicateRecords = try container.decode(Int.self, forKey: .duplicateRecords)
+        supersededRecords = try container.decodeIfPresent(Int.self, forKey: .supersededRecords) ?? 0
+    }
 }
 
 /// Drives foreground, user-initiated syncs: authorize for the selected
@@ -127,6 +167,7 @@ final class ManualSyncCoordinator {
     @ObservationIgnored private let client: any DestinationClient
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let stateStore: SyncStateStore
+    @ObservationIgnored private let deliveryByteLimit: Int
     @ObservationIgnored private static let lastSyncStorageKey = "sync.lastSuccessful"
 
     private(set) var phase: SyncPhase = .idle
@@ -145,13 +186,16 @@ final class ManualSyncCoordinator {
         client: any DestinationClient,
         stateStore: SyncStateStore,
         defaults: UserDefaults = .standard,
-        workGate: SyncWorkGate = SyncWorkGate()
+        workGate: SyncWorkGate = SyncWorkGate(),
+        deliveryByteLimit: Int = Outbox.deliveryBatchByteLimit
     ) {
         self.healthData = healthData
         self.client = client
         self.stateStore = stateStore
         self.defaults = defaults
         self.workGate = workGate
+        precondition(deliveryByteLimit > 0)
+        self.deliveryByteLimit = deliveryByteLimit
         lastSuccessfulSync = Self.loadLastSync(from: defaults)
     }
 
@@ -163,6 +207,44 @@ final class ManualSyncCoordinator {
     /// automatic pass: the wait is real, and the screen has to show it and
     /// offer the cancel.
     private(set) var isSyncing = false
+
+    /// The "Rebuild sync history" escape hatch: clears this destination's
+    /// delivery progress (manual cursors and windows, automatic checkpoints,
+    /// retry bookkeeping) and forgets the remembered receiver datastore
+    /// generation, so the next sync — manual or automatic — re-adopts the
+    /// receiver's datastore and re-sends the configured history. The
+    /// endpoint, API key, metric selection, backfill depth, HealthKit
+    /// authorization, and queued outbox events are untouched; the receiver's
+    /// per-record idempotency makes the re-send safe. This is the manual
+    /// counterpart of the automatic generation detection, for a receiver
+    /// whose datastore changed in a way the generation cannot describe
+    /// (it always can — this exists so a user is never waiting on one).
+    ///
+    /// Serialized through the shared work gate: an invalidation landing
+    /// between an in-flight pass's reads and its writes would otherwise be
+    /// self-healing but wasteful. Returns false when the endpoint is not
+    /// usable or a sync is in flight (nothing changed).
+    func rebuildDestinationHistory(endpoint rawEndpoint: String) async -> Bool {
+        guard !isSyncing else { return false }
+        guard let configuration = try? DestinationConfiguration(endpoint: rawEndpoint) else {
+            return false
+        }
+        let destination = configuration.endpoint.absoluteString
+        do {
+            try await workGate.run { @MainActor [weak self] () -> Void in
+                guard let self else { return }
+                try await self.stateStore.invalidateDeliveryProgress(destination: destination)
+                await self.stateStore.clearReceiverGeneration(destination: destination)
+            }
+        } catch {
+            return false
+        }
+        // The "last successful sync" marker describes data the rebuilt
+        // history will re-send; clearing it is part of the invalidation.
+        lastSuccessfulSync = nil
+        defaults.removeObject(forKey: Self.lastSyncStorageKey)
+        return true
+    }
 
     /// Starts a sync from the current configuration. All inputs are captured
     /// into the plan immediately; overlapping calls are ignored while a sync
@@ -188,7 +270,9 @@ final class ManualSyncCoordinator {
             plan = SyncPlan(
                 endpoint: configuration.endpoint,
                 bearerToken: trimmedToken,
-                metrics: HealthMetric.allCases.filter { metrics.contains($0) }
+                metrics: MetricCatalog.selectableMetrics
+                    .map(\.metric)
+                    .filter { metrics.contains($0) }
             )
             // Captured with the plan so the window start is one decision:
             // configuration captured at start time, not whenever the gate
@@ -262,6 +346,28 @@ final class ManualSyncCoordinator {
         phase = .authorizing
 
         do {
+            // Datastore-identity gate, before any cursor or window is
+            // consulted: confirm the receiver's datastore is still the one
+            // this progress was earned against. A reset/replaced receiver
+            // invalidates that progress here (and the frozen windows with
+            // it), so the reads below start from the configured history
+            // window instead of silently finding nothing new. Surfacing the
+            // last-sync marker is part of the invalidation: it must not
+            // claim data the current datastore never received.
+            let authorization = DestinationAuthorization(bearerToken: plan.bearerToken)
+            let check = try await SyncGenerationReconciler.reconcile(
+                endpoint: plan.endpoint,
+                client: client,
+                authorization: authorization,
+                stateStore: stateStore
+            )
+            if check.didRebuild {
+                summary.rebuiltHistory = true
+                currentSummary = summary
+                lastSuccessfulSync = nil
+                defaults.removeObject(forKey: Self.lastSyncStorageKey)
+            }
+
             try await healthData.requestReadAuthorization(for: Set(plan.metrics))
 
             // The depth decides the CANDIDATE window; the store freezes the
@@ -270,7 +376,6 @@ final class ManualSyncCoordinator {
             // wall clock — the same fixed-predicate rule as scopes.
             let depth = BackfillDepth.stored(in: defaults)
             let destination = plan.endpoint.absoluteString
-            let authorization = DestinationAuthorization(bearerToken: plan.bearerToken)
             // The budget starts when the gate hands over, not when the tap
             // happened: a long wait behind an automatic pass must not
             // consume the reading budget.
@@ -316,7 +421,8 @@ final class ManualSyncCoordinator {
                     finishedAt: outcome.finishedAt,
                     deliveredRecords: summary.deliveredRecords,
                     acceptedRecords: summary.acceptedRecords,
-                    duplicateRecords: summary.duplicateRecords
+                    duplicateRecords: summary.duplicateRecords,
+                    supersededRecords: summary.supersededRecords
                 )
                 lastSuccessfulSync = info
                 persistLastSync(info)
@@ -355,6 +461,7 @@ final class ManualSyncCoordinator {
             destination: destination, metric: metric, windowStart: windowStart
         )
         var anchorData = savedCursor?.anchorData
+        var retriedSeriesSampleUnavailable = false
 
         for pageRead in 0..<SyncLimits.manualPagesPerMetricRun {
             try Task.checkCancellation()
@@ -372,11 +479,20 @@ final class ManualSyncCoordinator {
                     windowStart: windowStart,
                     limit: SyncLimits.healthQueryPageSize
                 )
-            } catch let error as HealthKitServiceError where error == .corruptedAnchor && anchorData != nil {
-                // The saved cursor is unreadable: drop it and re-read the
-                // window from its start, exactly like the change stream
-                // rebuilds its checkpoint. The receiver dedupes everything
-                // that was already acknowledged.
+            } catch let error as HealthKitServiceError {
+                switch error {
+                case .corruptedAnchor where anchorData != nil:
+                    // Rebuild an unreadable stored cursor from the window start.
+                    break
+                case .seriesSampleUnavailable where !retriedSeriesSampleUnavailable:
+                    // A series parent can disappear on the first page too.
+                    // Retry from the window start once; if that read fails
+                    // again, propagate rather than looping on the same page.
+                    retriedSeriesSampleUnavailable = true
+                default:
+                    throw error
+                }
+
                 anchorData = nil
                 do {
                     try await stateStore.saveManualCursor(ManualExportCursor(
@@ -399,7 +515,23 @@ final class ManualSyncCoordinator {
             // Deliver this page before its cursor moves: an acknowledged
             // page can never be lost, and an undelivered one is re-read on
             // the next sync (the receiver keeps one copy of each record).
-            let batches = page.records.batched(into: SyncLimits.recordsPerUploadBatch)
+            // Manual sync shares the automatic path's single v3 operation:
+            // an additions-only change batch.
+            let sendableRecords = page.records.filter(RecordWireLimits.isTransmittable)
+            let skipped = page.records.count - sendableRecords.count
+            if skipped > 0 {
+                // A record the receiver would always reject must not poison
+                // its batch: skipping it (with the cursor advancing past it)
+                // is the only way this category keeps syncing.
+                summary.skippedRecords += skipped
+                currentSummary = summary
+            }
+            let batches = sendableRecords
+                .map(SyncChangeEvent.upsert)
+                .batchedForDelivery(
+                    maxCount: SyncLimits.recordsPerUploadBatch,
+                    byteLimit: deliveryByteLimit
+                )
             summary.batchesPlanned += batches.count
             for batch in batches {
                 try Task.checkCancellation()
@@ -407,15 +539,16 @@ final class ManualSyncCoordinator {
                     batch: summary.batchesDelivered + 1,
                     totalBatches: 0 // streaming: the total is not known yet
                 )
-                let payload = SyncPayload(records: batch)
-                let acknowledgment = try await client.send(
-                    payload,
+                let acknowledgment = try await client.sendChanges(
+                    batch,
+                    batchID: UUID(),
                     to: plan.endpoint,
                     authorization: authorization
                 )
                 summary.batchesDelivered += 1
                 summary.acceptedRecords += acknowledgment.accepted
                 summary.duplicateRecords += acknowledgment.duplicates
+                summary.supersededRecords += acknowledgment.superseded
                 currentSummary = summary
             }
 
@@ -474,6 +607,9 @@ final class ManualSyncCoordinator {
         if let configurationError = error as? DestinationConfigurationError {
             return configurationError.localizedDescription
         }
+        if let reconciliationError = error as? SyncGenerationReconciliationError {
+            return reconciliationError.errorDescription ?? "Sync stopped."
+        }
         return "Sync stopped: \(error.localizedDescription)"
     }
 
@@ -491,11 +627,36 @@ final class ManualSyncCoordinator {
     }
 }
 
-private extension Array {
-    func batched(into size: Int) -> [[Element]] {
-        precondition(size > 0)
-        return stride(from: 0, to: count, by: size).map {
-            Array(self[$0..<Swift.min($0 + size, count)])
+/// Delivery batches use the shared count and byte limits. The manual path
+/// adds each encoded event's size as a conservative batch estimate, matching
+/// the automatic outbox's additive file-size estimate. A single element
+/// larger than the whole budget still ships alone rather than being dropped
+/// while its page cursor advances.
+extension Array where Element == SyncChangeEvent {
+    func batchedForDelivery(
+        maxCount: Int,
+        byteLimit: Int = Outbox.deliveryBatchByteLimit
+    ) -> [[Element]] {
+        precondition(maxCount > 0)
+        precondition(byteLimit > 0)
+        let encoder = JSONEncoder()
+        var batches: [[Element]] = []
+        var current: [Element] = []
+        var bytes = 0
+
+        for element in self {
+            let size = (try? encoder.encode(element).count) ?? Outbox.unknownFileSizeEstimate
+            if current.count == maxCount || (!current.isEmpty && bytes + size > byteLimit) {
+                batches.append(current)
+                current = []
+                bytes = 0
+            }
+            current.append(element)
+            bytes += size
         }
+        if !current.isEmpty {
+            batches.append(current)
+        }
+        return batches
     }
 }

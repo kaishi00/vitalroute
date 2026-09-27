@@ -54,7 +54,8 @@ struct VitalRouteApp: App {
                 healthData: healthKitService,
                 client: destinationClient,
                 stateStore: stateStore,
-                workGate: sharedGate
+                workGate: sharedGate,
+                deliveryByteLimit: outbox.deliveryByteLimit
             )
         )
         _autoSyncEngine = State(initialValue: engine)

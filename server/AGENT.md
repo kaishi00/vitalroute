@@ -64,9 +64,9 @@ the operator, do not retry blindly.
 
 | Tool | What it returns | Notes |
 |---|---|---|
-| `list_metrics` | Every metric present, with record counts, earliest/latest coverage, and aggregation semantics | Call this first; it tells you which metrics exist and how to read them |
-| `daily_stats` | Per-UTC-day aggregates (`count`, `sum`, `avg`, `min`, `max`) per metric | Requires a window: `days` (recent days with data) or `from`/`to` (ISO dates). Range ≤ 366 days. Cumulative metrics (steps, activeEnergy, sleep) read as `sum`; instantaneous ones (heartRate etc.) as `avg`/`min`/`max` |
-| `recent_records` | Raw records, newest first, ≤ 200 per call | Use for detail on a specific day or sample; use `daily_stats` for anything aggregate. Paginate with `offset` (e.g. `{"metric":"steps","limit":200,"offset":200}` for the next page) |
+| `list_metrics` | Every metric present with its record kind, record counts, earliest/latest coverage, and the unit quantity rows were stored in | Call this first; it tells you which metrics exist and how to read them |
+| `daily_stats` | Per-UTC-day aggregates per metric AND kind (`count` always; `sum`/`avg`/`min`/`max` for quantity rows only) | Requires a window: `days` (recent days with data) or `from`/`to` (ISO dates). Range ≤ 366 days. Numeric aggregates are meaningful only for `quantity` rows (scalar samples); other kinds (workouts, sleep stages, ECGs, series, clinical documents) are counted, never averaged |
+| `recent_records` | Raw record envelopes with their typed `data` payload, newest first, ≤ 200 per call | Use for detail on a specific day or sample; use `daily_stats` for anything aggregate. Paginate with `offset` (e.g. `{"metric":"steps","limit":200,"offset":200}` for the next page) |
 
 Semantics worth knowing:
 
@@ -76,6 +76,10 @@ Semantics worth knowing:
   writes, deletes, or modifies anything, and no arbitrary-SQL tool exists.
 - Days group by **UTC date**; watch/app timezones can shift a day boundary
   for late-evening samples.
+- **There is no metric catalog here.** Metric identifiers are owned by the
+  phone's app; new ones can appear without a receiver update. Read a
+  metric's structure from its `kind` and `data` payload (`quantity` rows
+  carry `value` + `unit`; other kinds carry their own fields).
 
 Example calls:
 
@@ -101,8 +105,9 @@ Rules:
 - Start with list_metrics to see what data exists and its coverage before
   answering questions about specific metrics.
 - daily_stats needs a window: use "days" for recent history or explicit
-  "from"/"to" ISO dates. Sum cumulative metrics (steps, activeEnergy,
-  sleep); use avg/min/max for instantaneous ones (heartRate and friends).
+  "from"/"to" ISO dates. Numeric aggregates apply only to rows whose kind
+  is "quantity" (respect the reported unit); for other kinds use "count".
+  Prefer recent_records to inspect any non-quantity payload.
 - Days are UTC. Deleted samples are excluded everywhere — never present
   data that includes them as if it were complete for a period before you
   checked coverage (earliest/latest from list_metrics).

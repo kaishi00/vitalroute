@@ -18,12 +18,26 @@ final class ServerSetupTests: XCTestCase {
                         "receiver ref must be a full 40-char lowercase commit SHA")
     }
 
+    func testPinnedRevisionIsNotAnObsoleteBranchDraft() {
+        // 5f2b8a3 is the first contract-v3 draft of the record-architecture
+        // branch: it predates the fail-closed schema reset, the
+        // unversioned-table boot protection, orphan-chunk suppression, and
+        // the transport-limit hardening. A PR review caught the guide
+        // pinned to it; this assertion and CI's receiver-pin check (which
+        // verifies the pinned revision's server/ tree matches HEAD's) keep
+        // an early draft from ever shipping as the setup target again.
+        XCTAssertNotEqual(
+            ServerSetup.compatibleReceiverRef,
+            "5f2b8a3affad2c7e7ecce7a612af08489c2748fc"
+        )
+    }
+
     func testContractConstantMatchesTheAutomaticSyncGate() {
-        // The pin exists so automatic sync works: contract v2 with
-        // additions and deletions — the same predicate the engine checks
-        // when automatic sync is enabled. Exercised at the pinned version
-        // and one below, across both capability cells.
-        XCTAssertEqual(ServerSetup.compatibleContractVersion, 2)
+        // The pin exists so sync works: contract v3 with additions and
+        // deletions — the same predicate the engine checks, and the only
+        // contract both manual and automatic sync speak. Exercised at the
+        // pinned version and one below, across both capability cells.
+        XCTAssertEqual(ServerSetup.compatibleContractVersion, 3)
         let atPin = ReceiverHealthResponse(
             status: "ok", service: "x",
             apiVersion: ServerSetup.compatibleContractVersion,
@@ -34,16 +48,16 @@ final class ServerSetupTests: XCTestCase {
             apiVersion: ServerSetup.compatibleContractVersion - 1,
             capabilities: ["additions"])
         XCTAssertFalse(belowPin.supportsDeletions)
-        let v2WithoutDeletions = ReceiverHealthResponse(
+        let v3WithoutDeletions = ReceiverHealthResponse(
             status: "ok", service: "x",
             apiVersion: ServerSetup.compatibleContractVersion,
             capabilities: ["additions"])
-        XCTAssertFalse(v2WithoutDeletions.supportsDeletions)
-        let v1WithDeletions = ReceiverHealthResponse(
+        XCTAssertFalse(v3WithoutDeletions.supportsDeletions)
+        let olderWithDeletions = ReceiverHealthResponse(
             status: "ok", service: "x",
             apiVersion: ServerSetup.compatibleContractVersion - 1,
             capabilities: ["deletions"])
-        XCTAssertFalse(v1WithDeletions.supportsDeletions)
+        XCTAssertFalse(olderWithDeletions.supportsDeletions)
         // The prompt teaches the same contract version the constant pins.
         XCTAssertTrue(ServerSetup.agentSetupPrompt
             .contains("contract v\(ServerSetup.compatibleContractVersion)"))

@@ -36,7 +36,7 @@ import logging
 import os
 import sqlite3
 import sys
-import threading
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import queries
@@ -65,37 +65,26 @@ def _env_int(name, default):
     return value
 
 
-class QueryState:
-    """Per-process state: one read-only connection guarded by a lock.
-
-    The lock serializes queries across worker threads: a single Python
-    sqlite3 connection object must not be used concurrently, whatever the
-    underlying SQLite threading mode.
-    """
-
-    connection = None
-    lock = threading.Lock()
-
-
 TOOLS = [
     {
         "name": "list_metrics",
         "description": "List the health metrics available in this VitalRoute receiver, "
-        "with record counts, date coverage, and aggregation semantics. "
-        "Start here before asking for daily stats.",
+        "with record kind, record counts, date coverage, and the unit quantity "
+        "rows were stored in. Start here before asking for daily stats.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "daily_stats",
-        "description": "Per-day aggregates (count, sum, avg, min, max) per metric. "
-        "Cumulative metrics (steps, activeEnergy, sleep) are read via 'sum'; "
-        "instantaneous metrics (heartRate and friends) via 'avg'/'min'/'max'. "
+        "description": "Per-day aggregates per metric and record kind. Quantity rows "
+        "(scalar samples) get count/sum/avg/min/max over their stored value plus "
+        "the unit; every other kind (workouts, sleep stages, ECGs, clinical "
+        "documents, series chunks) is counted, never numerically aggregated. "
         "Dates group by UTC day. Deleted samples are excluded. "
         "Pass either 'days' (recent window with data) or 'from'/'to' (ISO dates).",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "metric": {"type": "string", "description": "Single metric (e.g. steps); omit for all"},
+                "metric": {"type": "string", "description": "Single metric; omit for all"},
                 "from": {"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
                 "to": {"type": "string", "description": "ISO date YYYY-MM-DD inclusive"},
                 "days": {"type": "integer", "description": "The last N days with data (1-366)"},
@@ -105,8 +94,12 @@ TOOLS = [
     },
     {
         "name": "recent_records",
-        "description": "Most recent raw records (newest first), optionally filtered by metric. "
-        "Bounded to 200 per call; use daily_stats for aggregates.",
+        "description": "Most recent raw record envelopes (newest first), optionally "
+        "filtered by metric. Each record carries its typed data payload (e.g. a "
+        "quantity value+unit, a workout summary, a clinical FHIR document). "
+        "Bounded to 200 per call and a 4 MiB response budget (truncated=true "
+        "means rows were left out; narrow the window or paginate). Use "
+        "daily_stats for aggregates.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -120,13 +113,19 @@ TOOLS = [
 ]
 
 
-def _tool_result(name, arguments):
-    with QueryState.lock:
+def _tool_result(db_path, name, arguments):
+    if name not in {tool["name"] for tool in TOOLS}:
+        return {"code": -32601, "message": f"Unknown tool: {name}"}, True
+    # Reopen the path on every call so a reset/restore is visible without
+    # restarting MCP. BEGIN holds one snapshot across multi-statement tools;
+    # closing (unlike Connection.__exit__) always releases the connection.
+    with closing(queries.connect(db_path)) as connection:
+        connection.execute("BEGIN")
         if name == "list_metrics":
-            payload = queries.list_metrics(QueryState.connection)
+            payload = queries.list_metrics(connection)
         elif name == "daily_stats":
             payload = queries.daily_stats(
-                QueryState.connection,
+                connection,
                 metric=arguments.get("metric"),
                 from_date=arguments.get("from"),
                 to_date=arguments.get("to"),
@@ -134,19 +133,17 @@ def _tool_result(name, arguments):
             )
         elif name == "recent_records":
             payload = queries.recent_records(
-                QueryState.connection,
+                connection,
                 metric=arguments.get("metric"),
                 limit=arguments.get("limit", 20),
                 offset=arguments.get("offset", 0),
             )
-        else:
-            return {"code": -32601, "message": f"Unknown tool: {name}"}, True
     return {
         "content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}],
     }, False
 
 
-def handle_jsonrpc(message):
+def handle_jsonrpc(message, db_path):
     """Returns the response dict, or None for a notification (202, no body).
 
     Never raises for malformed input; unexpected failures are converted
@@ -197,7 +194,7 @@ def handle_jsonrpc(message):
             return {"id": msg_id, "jsonrpc": "2.0",
                     "error": {"code": -32602, "message": "Invalid params for tools/call."}}
         try:
-            result, is_app_error = _tool_result(name, arguments)
+            result, is_app_error = _tool_result(db_path, name, arguments)
         except queries.QueryError as error:
             # Bad arguments: report inside the tool result so the agent can
             # correct the call, per MCP conventions.
@@ -206,7 +203,8 @@ def handle_jsonrpc(message):
                 "isError": True,
             }}
         except Exception:  # noqa: BLE001 - never leak internals or drop the connection
-            logger.exception("tools/call failed")
+            # Exception text/tracebacks can contain database paths or data.
+            logger.error("tools/call failed")
             return {"id": msg_id, "jsonrpc": "2.0", "result": {
                 "content": [{"type": "text", "text": "Query failed."}], "isError": True,
             }}
@@ -301,7 +299,9 @@ class QueryHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length > 0 else b""
         try:
             message = json.loads(body.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError: adversarially deep nesting during JSON parse
+            # must answer the parse error, not escape and drop the socket.
             self._send_json(400, {"jsonrpc": "2.0", "id": None,
                                   "error": {"code": -32700, "message": "Parse error."}})
             return
@@ -310,7 +310,14 @@ class QueryHandler(BaseHTTPRequestHandler):
                                   "error": {"code": -32600,
                                             "message": "Batch requests are not supported."}})
             return
-        response = handle_jsonrpc(message)
+        try:
+            response = handle_jsonrpc(message, self.server.db_path)
+        except Exception:  # noqa: BLE001 - answer, never drop the socket
+            logger.error("JSON-RPC dispatch failed")
+            request_id = message.get("id") if isinstance(message, dict) else None
+            self._send_json(200, {"jsonrpc": "2.0", "id": request_id,
+                                  "error": {"code": -32603, "message": "Internal error."}})
+            return
         if response is None:
             # Notification: accepted, no body.
             self.send_response(202)
@@ -354,8 +361,8 @@ def make_server(host, port, db_path, token):
             f"must hold a random token of at least {_MIN_TOKEN_LENGTH} characters."
         )
     try:
-        QueryState.connection = queries.connect(db_path)
-        QueryState.connection.execute("SELECT COUNT(*) FROM records").fetchone()
+        with closing(queries.connect(db_path)) as connection:
+            connection.execute("SELECT COUNT(*) FROM records").fetchone()
     except sqlite3.Error as error:
         raise ValueError(
             "The receiver database at %s is not readable yet (%s). "
@@ -363,6 +370,7 @@ def make_server(host, port, db_path, token):
         )
     server = QueryServer((host, port), QueryHandler)
     server.query_token = token
+    server.db_path = db_path
     return server
 
 

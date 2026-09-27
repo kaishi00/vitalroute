@@ -25,14 +25,14 @@ final class OutboxAndStateStoreTests: XCTestCase {
         SyncStateStore(directory: tempDirectory)
     }
 
-    private func record(_ id: Int, metric: HealthMetric = .steps) -> HealthRecord {
+    private func record(_ id: Int, metric: HealthMetric = .steps, blob: String? = nil) -> HealthRecord {
         HealthRecord(
             id: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", id))!,
             metric: metric,
-            value: Double(id),
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600),
-            endDate: Date(timeIntervalSince1970: 1_735_689_660)
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            metadata: blob.map { ["blob": $0] } ?? [:],
+            data: .quantity(QuantityData(value: Double(id), unit: "count"))
         )
     }
 
@@ -76,6 +76,80 @@ final class OutboxAndStateStoreTests: XCTestCase {
         let second = try await outbox.nextBatch()
         XCTAssertEqual(second.totalPending, 50)
         XCTAssertEqual(second.events.count, 50)
+    }
+
+    func testNextBatchRespectsTheDeliveryByteBudget() async throws {
+        // A small budget: an ordinary event is a few hundred bytes, so the
+        // batch must stop before exceeding it even though the count limit
+        // (200) is far away.
+        let outbox = Outbox(directory: tempDirectory, deliveryByteLimit: 1_000)
+        try await outbox.prepare()
+        let events = (1...50).map { SyncChangeEvent.upsert(record($0)) }
+        _ = try await outbox.append(events, lane: .backfill)
+
+        let first = try await outbox.nextBatch()
+        XCTAssertLessThan(first.events.count, 50, "the byte budget must end the batch early")
+        XCTAssertFalse(first.events.isEmpty)
+        let encodedSize = first.events.reduce(0) { total, event in
+            total + ((try? JSONEncoder().encode(event))?.count ?? 0)
+        }
+        XCTAssertLessThanOrEqual(encodedSize, 1_000)
+        // The rest of the queue remains pending and is delivered across
+        // later budget-bounded batches.
+        await outbox.remove(eventIDs: first.events.map(\.eventID))
+        var delivered = first.events.count
+        var rounds = 0
+        while delivered < 50, rounds < 100 {
+            rounds += 1
+            let next = try await outbox.nextBatch()
+            if next.events.isEmpty { break }
+            await outbox.remove(eventIDs: next.events.map(\.eventID))
+            delivered += next.events.count
+        }
+        XCTAssertEqual(delivered, 50, "every event drains across budgeted batches")
+    }
+
+    func testSingleOversizedEventStillShipsAlone() async throws {
+        // A series chunk larger than the whole budget must not be stuck
+        // forever: an empty batch takes it as a legal batch of one.
+        let outbox = Outbox(directory: tempDirectory, deliveryByteLimit: 500)
+        try await outbox.prepare()
+        let hugeRecord = HealthRecord(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000009999")!,
+            metric: .heartRate,
+            startDate: Date(timeIntervalSince1970: 1_735_689_600),
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            metadata: ["blob": String(repeating: "x", count: 2_000)],
+            data: .quantity(QuantityData(value: 60, unit: "count/min"))
+        )
+        _ = try await outbox.append([.upsert(hugeRecord)], lane: .backfill)
+
+        let snapshot = try await outbox.nextBatch()
+        XCTAssertEqual(snapshot.events.count, 1)
+        XCTAssertEqual(snapshot.totalPending, 1)
+    }
+
+    func testByteBudgetMissSkipsOversizedEntryAndKeepsScanning() async throws {
+        // An entry that does not fit the budget is skipped, not fatal:
+        // smaller events behind it still make this batch, and the
+        // oversized one ships alone later. The oversized fixture uses a
+        // metadata blob for size; a real capture cannot produce one (the
+        // transport-limit filter drops it), but the file-size budgeting
+        // under test is identical.
+        let outbox = Outbox(directory: tempDirectory, deliveryByteLimit: 1_000)
+        try await outbox.prepare()
+        let big = SyncChangeEvent.upsert(record(1, blob: String(repeating: "x", count: 4_000)))
+        let small = SyncChangeEvent.upsert(record(2))
+        _ = try await outbox.append([small, big], lane: .backfill)
+
+        let first = try await outbox.nextBatch()
+        XCTAssertEqual(first.events.map(\.eventID), [small.eventID])
+        XCTAssertEqual(first.skippedOversizedCount, 1)
+
+        await outbox.remove(eventIDs: first.events.map(\.eventID))
+        let second = try await outbox.nextBatch()
+        XCTAssertEqual(second.events.map(\.eventID), [big.eventID])
+        XCTAssertEqual(second.skippedOversizedCount, 0)
     }
 
     func testRemoveOnlyAfterAcknowledgedKeepsOthers() async throws {
@@ -421,18 +495,176 @@ final class OutboxAndStateStoreTests: XCTestCase {
     }
 }
 
+/// The per-destination receiver datastore generation binding and the
+/// delivery-progress invalidation behind it.
+final class ReceiverGenerationStoreTests: XCTestCase {
+    private let destinationA = "https://a.example.org/v1/records"
+    private let destinationB = "https://b.example.org/v1/records"
+    private var tempDirectory: URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen-store-tests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    @MainActor
+    private func seedProgress(_ store: SyncStateStore, destination: String) async throws {
+        let window = Date(timeIntervalSince1970: 1_700_000_000)
+        try await store.saveManualCursor(ManualExportCursor(
+            destination: destination,
+            metric: .steps,
+            windowStart: window,
+            anchorData: Data("anchor".utf8),
+            updatedAt: Date()
+        ))
+        _ = try await store.manualWindowStart(
+            destination: destination, metric: .steps,
+            depth: .allRecords, candidate: window
+        )
+        let scope = CategoryScope(
+            destination: destination, metric: .steps,
+            generation: UUID(), windowStart: window
+        )
+        try await store.save(CategoryCheckpoint(
+            scope: scope, anchorData: Data("anchor".utf8), updatedAt: Date(), isCaughtUp: true
+        ))
+        await store.saveRetryState(DeliveryRetryState(
+            consecutiveFailures: 4, nextAttemptAt: Date(),
+            lastFailureIsActionable: false, lastFailureMessage: nil, lastSuccessAt: Date()
+        ))
+    }
+
+    @MainActor
+    func testBindingRoundTripsAndIsDestinationScoped() async throws {
+        let store = SyncStateStore(directory: tempDirectory)
+        let generationA = UUID()
+        let generationB = UUID()
+        try await store.saveReceiverGeneration(destination: destinationA, storeGeneration: generationA)
+        let loaded = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertEqual(loaded, generationA)
+        // A different destination reads as "no remembered generation".
+        let other = await store.loadReceiverGeneration(destination: destinationB)
+        XCTAssertNil(other)
+        // Syncing destination B must not erase A's binding: switching
+        // destinations and back must not read as "the datastore was reset".
+        try await store.saveReceiverGeneration(destination: destinationB, storeGeneration: generationB)
+        let aAfterB = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertEqual(aAfterB, generationA)
+        await store.clearReceiverGeneration(destination: destinationA)
+        let cleared = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertNil(cleared)
+        // Clearing one destination must preserve the other's binding.
+        let bSurvives = await store.loadReceiverGeneration(destination: destinationB)
+        XCTAssertEqual(bSurvives, generationB)
+    }
+
+    @MainActor
+    func testReconcileGenerationImplementsTheStateMachineAtomically() async throws {
+        let store = SyncStateStore(directory: tempDirectory)
+        let first = UUID()
+        let second = UUID()
+
+        // Fresh: no remembered generation, no progress.
+        let adopted = try await store.reconcileGeneration(destination: destinationA, generation: first)
+        XCTAssertEqual(adopted, .adopted)
+
+        // Same generation: no rebuild.
+        let same = try await store.reconcileGeneration(destination: destinationA, generation: first)
+        XCTAssertEqual(same, .same)
+
+        // Legacy: progress exists, the remembered generation is gone.
+        await store.clearReceiverGeneration(destination: destinationA)
+        try await seedProgress(store, destination: destinationA)
+        let legacy = try await store.reconcileGeneration(destination: destinationA, generation: second)
+        XCTAssertEqual(legacy, .rebuiltFromLegacyState)
+
+        // Reset: a remembered generation differs.
+        let window = Date(timeIntervalSince1970: 1_700_000_000)
+        try await store.saveManualCursor(ManualExportCursor(
+            destination: destinationA, metric: .steps, windowStart: window,
+            anchorData: Data("anchor".utf8), updatedAt: Date()
+        ))
+        let third = UUID()
+        let reset = try await store.reconcileGeneration(destination: destinationA, generation: third)
+        XCTAssertEqual(reset, .rebuiltAfterReset)
+        let cursors = await store.loadManualCursors()
+        XCTAssertTrue(cursors.values.allSatisfy { $0.destination != destinationA })
+    }
+
+    @MainActor
+    func testCorruptGenerationBindingDecodesAsEmptyAndSelfHeals() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen-store-tests-corrupt-\(UUID().uuidString)", isDirectory: true)
+        let store = SyncStateStore(directory: root)
+        let url = root
+            .appendingPathComponent("state", isDirectory: true)
+            .appendingPathComponent("receiver-generation.json")
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        // Undecodable content...
+        try Data("{ not json".utf8).write(to: url)
+        let corrupt = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertNil(corrupt, "an undecodable binding must read as none, so the legacy path self-heals")
+        // ...and the actual pre-map file shape (ReceiverGenerationBinding:
+        // {"destination","storeGeneration"}) must decode as empty rather
+        // than crash or false-match: its values are not a [String: UUID].
+        try Data("\"destination\":\"https://a.example.org/v1/records\",\"storeGeneration\":\"00000000-0000-4000-8000-000000000001\"".utf8).write(to: url)
+        let legacy = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertNil(legacy)
+    }
+
+    @MainActor
+    func testInvalidationClearsOnlyTheNamedDestinationProgress() async throws {
+        let store = SyncStateStore(directory: tempDirectory)
+        let windowA = Date(timeIntervalSince1970: 1_700_000_000)
+        try await seedProgress(store, destination: destinationA)
+        try await store.saveManualCursor(ManualExportCursor(
+            destination: destinationB,
+            metric: .steps,
+            windowStart: windowA,
+            anchorData: Data("b".utf8),
+            updatedAt: Date()
+        ))
+
+        try await store.invalidateDeliveryProgress(destination: destinationA)
+
+        // Destination A's progress is gone...
+        let aCursors = await store.loadManualCursors()
+        XCTAssertTrue(aCursors.values.allSatisfy { $0.destination != destinationA })
+        let stepsCheckpoint = await store.loadCheckpoint(for: .steps)
+        XCTAssertNil(stepsCheckpoint)
+        let retry = await store.loadRetryState()
+        XCTAssertEqual(retry.consecutiveFailures, 0)
+        // ...destination B's cursor survives.
+        let bCursors = await store.loadManualCursors()
+        XCTAssertEqual(bCursors.values.map(\.destination), [destinationB])
+    }
+
+    @MainActor
+    func testHasDeliveryProgressDetectsLegacyState() async throws {
+        let store = SyncStateStore(directory: tempDirectory)
+        let before = await store.hasDeliveryProgress(destination: destinationA)
+        XCTAssertFalse(before)
+        try await seedProgress(store, destination: destinationA)
+        let after = await store.hasDeliveryProgress(destination: destinationA)
+        XCTAssertTrue(after)
+        let other = await store.hasDeliveryProgress(destination: destinationB)
+        XCTAssertFalse(other)
+    }
+}
+
 final class SyncChangeEventTests: XCTestCase {
     private func record() -> HealthRecord {
         HealthRecord(
             metric: .steps,
-            value: 42,
-            unit: "count",
             startDate: Date(timeIntervalSince1970: 1_735_689_600),
-            endDate: Date(timeIntervalSince1970: 1_735_689_660)
+            endDate: Date(timeIntervalSince1970: 1_735_689_660),
+            data: .quantity(QuantityData(value: 42, unit: "count"))
         )
     }
 
-    func testWireEncodingMatchesContractV2Shape() throws {
+    func testWireEncodingMatchesContractV3Shape() throws {
         let deleted = DeletedRecord(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000009")!,
             metric: .sleep,
@@ -446,7 +678,7 @@ final class SyncChangeEventTests: XCTestCase {
         )
 
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(json["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(json["schemaVersion"] as? Int, 3)
         XCTAssertNotNil(json["batchId"])
         XCTAssertNotNil(json["createdAt"])
         let changes = try XCTUnwrap(json["changes"] as? [[String: Any]])
@@ -479,10 +711,10 @@ final class SyncChangeEventTests: XCTestCase {
     }
 
     func testAcknowledgmentReconciliation() {
-        let full = ChangeAcknowledgment(accepted: 1, duplicates: 1, superseded: 1, appliedDeletions: 1, duplicateDeletions: 1)
+        let full = ChangeAcknowledgment(accepted: 1, duplicates: 1, superseded: 1, appliedDeletions: 1, duplicateDeletions: 1, cascadedDeletions: 0)
         XCTAssertTrue(full.reconciles(upsertsSent: 3, deletesSent: 2))
 
-        let short = ChangeAcknowledgment(accepted: 0, duplicates: 0, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0)
+        let short = ChangeAcknowledgment(accepted: 0, duplicates: 0, superseded: 0, appliedDeletions: 0, duplicateDeletions: 0, cascadedDeletions: 0)
         XCTAssertFalse(short.reconciles(upsertsSent: 1, deletesSent: 0))
         XCTAssertFalse(short.reconciles(upsertsSent: 0, deletesSent: 1))
         XCTAssertTrue(short.reconciles(upsertsSent: 0, deletesSent: 0))

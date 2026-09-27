@@ -83,6 +83,10 @@ enum AutomaticSyncEngineError: LocalizedError, Equatable {
     }
 }
 
+private enum AutomaticSyncEnableError: Error {
+    case deletionsUnsupported
+}
+
 /// Bounds for one background execution opportunity.
 enum BackgroundSyncLimits {
     static let changePageSize = 500
@@ -200,6 +204,10 @@ final class AutomaticSyncEngine {
     /// notice before it was ever read. It is cleared when the user acts —
     /// enabling or disabling automatic sync.
     @ObservationIgnored private var discardedWorkNotice: String?
+    /// Set during enablement when the generation gate rebuilt this
+    /// destination's progress; surfaced at the end of enable, where the
+    /// generic status reset would otherwise swallow it.
+    @ObservationIgnored private var didRebuildAtEnablement = false
     /// Configuration snapshot; never carried across a destination change.
     @ObservationIgnored private var destination = ""
     @ObservationIgnored private var token: String?
@@ -290,7 +298,7 @@ final class AutomaticSyncEngine {
 
     /// Enables automatic sync. Foreground user action: requests HealthKit
     /// authorization for the selection and verifies the receiver supports
-    /// contract v2 (deletions) before any background work is armed.
+    /// contract v3 (deletions) before any background work is armed.
     func enable(
         destination endpoint: String,
         token bearerToken: String?,
@@ -343,18 +351,78 @@ final class AutomaticSyncEngine {
         // work for an obsolete configuration, so it must not run.
         guard isCurrent(generation) else { return superseded("authorization") }
 
-        // Capability check: automatic sync requires deletion support.
+        // Capability check: automatic sync requires deletion support — and
+        // the same response carries the datastore identity, which all sync
+        // progress (manual and automatic) is bound to. Reconciling here
+        // means a receiver reset/replacement detected at enablement wipes
+        // this destination's progress before any new work is armed, instead
+        // of old checkpoints silently suppressing a backfill.
+        didRebuildAtEnablement = false
+        let authorization = DestinationAuthorization(bearerToken: trimmedToken)
+        let health: ReceiverHealthResponse
         do {
-            let health = try await client.testConnection(
+            health = try await client.testConnection(
                 to: configuration.endpoint,
-                authorization: DestinationAuthorization(bearerToken: trimmedToken)
+                authorization: authorization
             )
+        } catch {
+            guard isCurrent(generation) else { return superseded("the capability check") }
+            let message = "Could not verify the destination: \(error.localizedDescription)"
+            lastStatusMessage = message
+            return .failed(message: message)
+        }
+        do {
+            guard isCurrent(generation) else { return superseded("the capability check") }
             guard health.supportsDeletions else {
-                guard isCurrent(generation) else { return superseded("the capability check") }
-                let message = "The destination receiver does not support deletions (contract v2). Update it to a v2 receiver, then try again. Manual sync keeps working."
+                let message = "The destination receiver does not support deletions (contract v3). Update it to a v3 receiver, then try again. Manual sync keeps working."
                 lastStatusMessage = message
                 return .failed(message: message)
             }
+            // Serialized with any in-flight sync work: the reconciliation's
+            // invalidate-and-commit must never interleave with active
+            // cursor/checkpoint writes, or a committed new generation could
+            // coexist with progress the new datastore never received. The
+            // gate can be held for a bounded manual run; the isCurrent check
+            // after it re-validates the decision that waited.
+            let check: SyncGenerationCheck = try await workGate.run { @MainActor [weak self] () throws -> SyncGenerationCheck in
+                guard let self else { throw CancellationError() }
+                guard self.isCurrent(generation) else {
+                    throw AutomaticSyncEngineError.configurationSuperseded
+                }
+                let freshHealth = try await self.client.testConnection(
+                    to: configuration.endpoint,
+                    authorization: authorization
+                )
+                guard self.isCurrent(generation) else {
+                    throw AutomaticSyncEngineError.configurationSuperseded
+                }
+                guard freshHealth.supportsDeletions else {
+                    throw AutomaticSyncEnableError.deletionsUnsupported
+                }
+                return try await SyncGenerationReconciler.reconcile(
+                    endpoint: configuration.endpoint,
+                    client: self.client,
+                    authorization: authorization,
+                    stateStore: self.stateStore,
+                    knownHealth: freshHealth
+                )
+            }
+            didRebuildAtEnablement = check.didRebuild
+        } catch is CancellationError {
+            // Cancelled while queued behind a bounded run (the enabling
+            // task itself was cancelled, or the engine was deallocated):
+            // the newer decision owns the state, so unwind without a
+            // misleading "could not verify" failure.
+            return superseded("the capability check")
+        } catch let error as SyncGenerationReconciliationError {
+            guard isCurrent(generation) else { return superseded("the capability check") }
+            lastStatusMessage = error.localizedDescription
+            return .failed(message: error.localizedDescription)
+        } catch AutomaticSyncEnableError.deletionsUnsupported {
+            guard isCurrent(generation) else { return superseded("the capability check") }
+            let message = "The destination receiver does not support deletions (contract v3). Update it to a v3 receiver, then try again. Manual sync keeps working."
+            lastStatusMessage = message
+            return .failed(message: message)
         } catch {
             guard isCurrent(generation) else { return superseded("the capability check") }
             let message = "Could not verify the destination: \(error.localizedDescription)"
@@ -380,11 +448,16 @@ final class AutomaticSyncEngine {
         }
 
         // Registration is the last thing that can fail, so the engine only
-        // reports itself on once the observers are actually armed.
+        // reports itself on once the observers are actually armed. The
+        // enablement pass that follows reconciles as "same" (the binding is
+        // already committed), so this is the only place an enable-time
+        // rebuild notice can reach the user.
         defaults.set(true, forKey: Self.enabledFlagKey)
         mode = .active
         discardedWorkNotice = nil
-        lastStatusMessage = nil
+        lastStatusMessage = didRebuildAtEnablement
+            ? SyncGenerationReconciler.rebuiltHistoryNotice
+            : nil
 
         startPass(trigger: .enablement)
         return .enabled
@@ -771,10 +844,18 @@ final class AutomaticSyncEngine {
     /// Releases every held completion exactly once. Called wherever the
     /// capture they were waiting on has settled one way or the other.
     private func releaseObserverCompletions() {
-        guard !pendingObserverCompletions.isEmpty else { return }
+        releaseObserverCompletions(takeObserverCompletions())
+    }
+
+    private func takeObserverCompletions() -> [ObserverCompletion] {
         let pending = pendingObserverCompletions
         pendingObserverCompletions.removeAll()
-        for completion in pending {
+        return pending
+    }
+
+    private func releaseObserverCompletions(_ completions: [ObserverCompletion]) {
+        guard !completions.isEmpty else { return }
+        for completion in completions {
             completion.complete()
         }
     }
@@ -865,23 +946,23 @@ final class AutomaticSyncEngine {
     }
 
     private func performPass(trigger: AutomaticSyncTrigger, generation: Int) async {
-        // Belt and braces: the capture phase releases these on every path it
-        // can reach, and this covers the paths it cannot (a run cancelled
-        // while still waiting for the gate).
-        defer { releaseObserverCompletions() }
         do {
             try await workGate.run { @MainActor [weak self] () throws -> Void in
                 try await self?.performPassBody(trigger: trigger, generation: generation)
             }
         } catch is CancellationError {
+            // A cancelled capture may not have started yet, so settle any
+            // notifications that are still waiting on it. Completions already
+            // claimed by a capture were released by that capture's defer.
+            releaseObserverCompletions()
             if isCurrent(generation) {
                 lastStatusMessage = "Automatic sync stopped early this run; pending work is kept and will resume."
             }
         } catch {
-            // A failed pass must not chain into a hot retry loop: the
-            // scheduled retry (with backoff) owns resumption. Clearing the
-            // absorbed trigger ends the chain here.
-            needsCatchUp = false
+            // A wake that arrived after this pass claimed its completions
+            // belongs to the successor capture. Preserve it for one local
+            // catch-up, while identity and delivery honor persisted backoff.
+            needsCatchUp = !pendingObserverCompletions.isEmpty
             await handlePassFailure(error, generation: generation)
         }
         await refreshPendingCount()
@@ -889,13 +970,77 @@ final class AutomaticSyncEngine {
     }
 
     private func performPassBody(trigger: AutomaticSyncTrigger, generation: Int) async throws {
-        // Capture first. The completions HealthKit is waiting on are released
-        // as soon as the captured changes are durable; delivery follows and
-        // never holds them.
+        guard isCurrent(generation) else { return }
+        // Distinguish pre-generation progress from checkpoints this capture
+        // is about to create. The shared gate excludes other progress writers.
+        let progressExisted = await stateStore.hasDeliveryProgress(destination: destination)
+        guard isCurrent(generation) else { return }
+        // Capture first. The capture phase releases only completions it
+        // claimed; notifications arriving during the later network phases
+        // remain owned by the successor capture.
         guard try await capturePhase(trigger: trigger, generation: generation) else { return }
+        guard try await reconcileCapturedGeneration(
+            generation: generation, progressExistedBeforeCapture: progressExisted
+        ) else { return }
         try await deliverPending(generation: generation)
         if isCurrent(generation) {
             lastCheckAt = now()
+        }
+    }
+
+    /// Receiver health and generation are network dependencies, so they run
+    /// only after this pass has made its HealthKit changes durable and
+    /// released the completions it claimed. Local capture still runs during
+    /// the retry window; only the network-dependent reconciliation waits.
+    private func reconcileCapturedGeneration(
+        generation: Int, progressExistedBeforeCapture: Bool
+    ) async throws -> Bool {
+        guard isCurrent(generation) else { return false }
+        guard let endpoint = URL(string: destination), let token else {
+            mode = .paused(.receiverIncompatible("its destination is not a valid URL"))
+            lastStatusMessage = AutomaticSyncPauseReason.receiverIncompatible(
+                "its destination is not a valid URL"
+            ).userMessage
+            return false
+        }
+
+        let retryState = await stateStore.loadRetryState()
+        guard isCurrent(generation) else { return false }
+        if let nextAttempt = retryState.nextAttemptAt, nextAttempt > now() {
+            nextRetryAt = nextAttempt
+            return false
+        }
+
+        do {
+            let check = try await SyncGenerationReconciler.reconcile(
+                endpoint: endpoint,
+                client: client,
+                authorization: DestinationAuthorization(bearerToken: token),
+                stateStore: stateStore,
+                progressExistedBeforeCapture: progressExistedBeforeCapture
+            )
+            guard isCurrent(generation) else { return false }
+            if check.didRebuild {
+                // Checkpoints and cursors were invalidated by reconciliation;
+                // keep every durable outbox event and immediately capture the
+                // receiver's full history under fresh checkpoint scopes.
+                backfillingMetrics.removeAll()
+                lastStatusMessage = SyncGenerationReconciler.rebuiltHistoryNotice
+                needsCatchUp = true
+            }
+            return true
+        } catch let error as SyncGenerationReconciliationError {
+            guard isCurrent(generation) else { return false }
+            var retryState = await stateStore.loadRetryState()
+            guard isCurrent(generation) else { return false }
+            retryState.lastFailureIsActionable = true
+            retryState.lastFailureMessage = error.localizedDescription
+            retryState.nextAttemptAt = nil
+            await stateStore.saveRetryState(retryState)
+            mode = .paused(.receiverIncompatible("it does not report a datastore identity"))
+            nextRetryAt = nil
+            lastStatusMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -903,11 +1048,12 @@ final class AutomaticSyncEngine {
     /// observer re-arming, backpressure, and the bounded incremental query.
     ///
     /// Returns false when the pass must stop (a pause that still applies).
-    /// Releases every held observer completion on the way out — durable
-    /// capture, early return, failure, or cancellation — because the work
-    /// they were waiting on is settled by then.
+    /// Releases only the observer completions claimed at capture start on the
+    /// way out — durable capture, early return, failure, or cancellation.
+    /// Notifications arriving after that claim remain for a successor pass.
     private func capturePhase(trigger: AutomaticSyncTrigger, generation: Int) async throws -> Bool {
-        defer { releaseObserverCompletions() }
+        let claimedCompletions = takeObserverCompletions()
+        defer { releaseObserverCompletions(claimedCompletions) }
         guard mode != .disabled else { return false }
 
         // Pause re-evaluation: auto-recoverable reasons clear when their
@@ -947,6 +1093,20 @@ final class AutomaticSyncEngine {
         // an endpoint the user did not configure for it.
         if await discardMismatchedQueue(generation: generation) {
             guard isCurrent(generation) else { return false }
+        }
+
+        // A malformed persisted destination still fails before HealthKit is
+        // queried. Receiver identity itself is checked after capture so a
+        // transport outage never delays durable local progress.
+        guard URL(string: destination) != nil, token != nil else {
+            // Fail closed: this gate exists so identity is never ambiguous.
+            // A superseded pass owns no state — the newer decision does.
+            guard isCurrent(generation) else { return false }
+            mode = .paused(.receiverIncompatible("its destination is not a valid URL"))
+            lastStatusMessage = AutomaticSyncPauseReason.receiverIncompatible(
+                "its destination is not a valid URL"
+            ).userMessage
+            return false
         }
 
         // Observers lost to a deferred pause (or a fresh enable whose pass
@@ -1027,7 +1187,7 @@ final class AutomaticSyncEngine {
         let desiredWindowStart = BackfillDepth.stored(in: defaults)
             .windowStart(from: now())
         var backfillPending = ((try? await outbox.laneCounts())?.backfill) ?? 0
-        for metric in HealthMetric.allCases where selectedMetrics.contains(metric) {
+        for metric in MetricCatalog.metrics.map(\.metric) where selectedMetrics.contains(metric) {
             try Task.checkCancellation()
 
             let checkpoint = await stateStore.loadCheckpoint(for: metric)
@@ -1083,7 +1243,15 @@ final class AutomaticSyncEngine {
                         // the outbox dedupes by event identity and the
                         // receiver answers idempotently. Deletions for these
                         // samples are captured by that same later read.
-                        _ = try await outbox.append(fresh.map { SyncChangeEvent.upsert($0) }, lane: .live)
+                        // No skip count surfaced here: the unthrottled
+                        // anchored read re-reports these same samples and
+                        // its path surfaces the skip; this head read is
+                        // only an optimization over it.
+                        _ = try await outbox.append(
+                            fresh.map { SyncChangeEvent.upsert($0) }
+                                .filter(RecordWireLimits.isTransmittableChangeEvent),
+                            lane: .live
+                        )
                     }
                 } catch let cancellation as CancellationError {
                     throw cancellation
@@ -1111,10 +1279,16 @@ final class AutomaticSyncEngine {
                         windowStart: scope.windowStart,
                         limit: BackgroundSyncLimits.changePageSize
                     )
-                } catch let error as HealthKitServiceError where error == .corruptedAnchor {
-                    // Drop only the unreadable cursor; the next pass
-                    // bootstraps a fresh scope (replay dedupes safely).
-                    await stateStore.clearCheckpoint(for: metric)
+                } catch let error as HealthKitServiceError {
+                    switch error {
+                    case .corruptedAnchor, .seriesSampleUnavailable:
+                        // Drop an unreadable cursor or a page whose series
+                        // parent disappeared. The scheduled retry bootstraps
+                        // a fresh scope, with replay protected by dedupe.
+                        await stateStore.clearCheckpoint(for: metric)
+                    default:
+                        break
+                    }
                     throw error
                 }
                 // A page captured while a destination change or category
@@ -1123,7 +1297,16 @@ final class AutomaticSyncEngine {
                 // A full page belongs to the historical catch-up; the page
                 // that drains the stream to its head is live data.
                 let lane: Outbox.Lane = isCaughtUp || !page.isFull ? .live : .backfill
-                var events: [SyncChangeEvent] = page.additions.map { .upsert($0) }
+                // Records exceeding the receiver's structural limits can
+                // never be delivered and would poison their whole batch
+                // (the receiver rejects batches atomically). Skip them and
+                // surface the count instead of queueing doomed data.
+                let deliverableAdditions = page.additions.filter(RecordWireLimits.isTransmittable)
+                let undeliverable = page.additions.count - deliverableAdditions.count
+                if undeliverable > 0 {
+                    lastStatusMessage = "\(undeliverable) captured record(s) from \(metric.displayName) exceed the destination's size limits and were not queued."
+                }
+                var events: [SyncChangeEvent] = deliverableAdditions.map { .upsert($0) }
                 events.append(contentsOf: page.deletions.map { .delete($0) })
                 if !events.isEmpty {
                     let written = try await outbox.append(events, lane: lane)
@@ -1197,15 +1380,33 @@ final class AutomaticSyncEngine {
         }
 
         var quarantinedDuringRun = 0
+        var skippedDuringRun = 0
         for _ in 0..<BackgroundSyncLimits.maxDeliveryBatchesPerRun {
             try Task.checkCancellation()
             let snapshot = try await outbox.nextBatch()
             pendingCount = snapshot.totalPending
             quarantinedDuringRun += snapshot.quarantinedCount
+            skippedDuringRun += snapshot.skippedOversizedCount
             if quarantinedDuringRun > 0 {
                 lastStatusMessage = "Some captured changes were unreadable and were set aside (\(quarantinedDuringRun)). Delivery of the remaining changes continues."
+            } else if snapshot.skippedOversizedCount > 0 {
+                lastStatusMessage = "\(snapshot.skippedOversizedCount) queued change(s) waited on this batch's size budget and are delivered separately."
             }
             if snapshot.events.isEmpty {
+                // A successful receiver identity check followed by an empty
+                // queue settles any earlier transient health-check failure.
+                // Clear its deadline so it cannot keep scheduling retries
+                // forever after the network has recovered.
+                if retryState.consecutiveFailures > 0 || retryState.nextAttemptAt != nil
+                    || retryState.lastFailureMessage != nil {
+                    retryState.consecutiveFailures = 0
+                    retryState.nextAttemptAt = nil
+                    retryState.lastFailureIsActionable = false
+                    retryState.lastFailureMessage = nil
+                    retryState.lastSuccessAt = now()
+                    await stateStore.saveRetryState(retryState)
+                    nextRetryAt = nil
+                }
                 break
             }
 
@@ -1228,7 +1429,11 @@ final class AutomaticSyncEngine {
                 retryState.lastSuccessAt = now()
                 await stateStore.saveRetryState(retryState)
                 nextRetryAt = nil
-                if quarantinedDuringRun == 0 {
+                if quarantinedDuringRun == 0 && skippedDuringRun == 0,
+                   // A rebuild notice set earlier in this pass explains the
+                   // re-send the user is watching; delivery success must not
+                   // erase it with the (stale) discarded-work bookkeeping.
+                   lastStatusMessage != SyncGenerationReconciler.rebuiltHistoryNotice {
                     lastStatusMessage = discardedWorkNotice
                 }
             } catch let cancellation as CancellationError {
@@ -1319,7 +1524,7 @@ final class AutomaticSyncEngine {
 
     private func scheduleRetryIfNeeded(generation: Int) async {
         guard isCurrent(generation) else { return }
-        guard mode != .disabled, pendingCount > 0 else { return }
+        guard mode != .disabled else { return }
         if case .paused(let reason) = mode, !reason.isAutoRecoverable {
             // Actionable pauses need the user; a wakeup would burn budget
             // and accomplish nothing.
@@ -1329,6 +1534,8 @@ final class AutomaticSyncEngine {
         guard let scheduleRetry = scheduleBackgroundRetry else { return }
         let retryState = await stateStore.loadRetryState()
         guard isCurrent(generation) else { return }
+        guard !retryState.lastFailureIsActionable,
+              pendingCount > 0 || retryState.nextAttemptAt != nil else { return }
         let delay: TimeInterval
         if let next = retryState.nextAttemptAt {
             delay = max(0, next.timeIntervalSince(now()))
@@ -1507,6 +1714,8 @@ final class AutomaticSyncEngine {
                 return .actionable(.protocolFailure("the destination is not a valid HTTPS endpoint."))
             case .malformedAcknowledgment:
                 return .actionable(.protocolFailure("the destination acknowledged batches in an unexpected format."))
+            case .malformedHealthResponse:
+                return .actionable(.protocolFailure("the destination returned a malformed health response."))
             case .payloadTooLarge:
                 return .actionable(.protocolFailure("the destination rejected the batch size."))
             case .tlsValidationFailed:
@@ -1536,6 +1745,14 @@ final class AutomaticSyncEngine {
                 return .deferred("background observation was replaced.")
             case .authorizationFailed, .noMetricsRequested:
                 return .deferred(healthError.localizedDescription)
+            case .seriesFetcherUnavailable(let metric):
+                return .actionable(.protocolFailure("the \(metric) series loader is not configured."))
+            case .seriesQueryTimedOut:
+                return .transient
+            case .seriesSampleUnavailable:
+                // The sample vanished between the page read and the series
+                // fetch; the next anchored read reconciles.
+                return .transient
             }
         }
         if error is CocoaError {

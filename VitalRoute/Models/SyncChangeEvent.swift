@@ -82,8 +82,8 @@ extension SyncChangeEvent: Codable {
     }
 }
 
-/// Encodes contract-v2 change batches (`server/API.md`). Dates use the same
-/// ISO 8601 millisecond spelling as v1 payloads.
+/// Encodes contract-v3 change batches (`server/API.md`). Dates use the same
+/// ISO 8601 millisecond spelling as earlier contracts.
 enum ChangeBatchEncoder {
     static func encode(batchID: UUID, createdAt: Date, changes: [SyncChangeEvent]) throws -> Data {
         let formatter = ISO8601DateFormatter()
@@ -99,7 +99,7 @@ enum ChangeBatchEncoder {
         }
 
         struct WireBatch: Encodable {
-            let schemaVersion = 2
+            let schemaVersion = 3
             let createdAt: String
             let batchId: String
             let changes: [WireChange]
@@ -128,7 +128,7 @@ enum ChangeBatchEncoder {
     }
 }
 
-/// Receiver acknowledgment for a v2 change batch. An HTTP 2xx alone is not
+/// Receiver acknowledgment for a v3 change batch. An HTTP 2xx alone is not
 /// evidence: the counts must reconcile against what was sent.
 struct ChangeAcknowledgment: Equatable {
     let accepted: Int
@@ -136,6 +136,26 @@ struct ChangeAcknowledgment: Equatable {
     let superseded: Int
     let appliedDeletions: Int
     let duplicateDeletions: Int
+    /// Child rows (series chunks) the receiver removed as a consequence of
+    /// a deleted parent. Informational only: never part of reconciliation,
+    /// because the client did not send them as changes.
+    let cascadedDeletions: Int
+
+    init(
+        accepted: Int,
+        duplicates: Int,
+        superseded: Int,
+        appliedDeletions: Int,
+        duplicateDeletions: Int,
+        cascadedDeletions: Int = 0
+    ) {
+        self.accepted = accepted
+        self.duplicates = duplicates
+        self.superseded = superseded
+        self.appliedDeletions = appliedDeletions
+        self.duplicateDeletions = duplicateDeletions
+        self.cascadedDeletions = cascadedDeletions
+    }
 
     /// The contract guarantees the receiver took responsibility for every
     /// change in the batch.
@@ -176,6 +196,8 @@ enum ChangeAcknowledgmentDecoder {
             let superseded: Int
             let appliedDeletions: Int
             let duplicateDeletions: Int
+            // Receivers that never cascade may omit this; absence is 0.
+            let cascadedDeletions: Int?
         }
         let shape: Shape
         do {
@@ -186,8 +208,11 @@ enum ChangeAcknowledgmentDecoder {
         guard shape.status == "accepted" else {
             throw DestinationClientError.malformedAcknowledgment
         }
-        let counts = [shape.accepted, shape.duplicates, shape.superseded, shape.appliedDeletions, shape.duplicateDeletions]
-        guard counts.allSatisfy({ $0 >= 0 }) else {
+        let counts = [
+            shape.accepted, shape.duplicates, shape.superseded,
+            shape.appliedDeletions, shape.duplicateDeletions,
+        ]
+        guard counts.allSatisfy({ $0 >= 0 }), (shape.cascadedDeletions ?? 0) >= 0 else {
             throw DestinationClientError.malformedAcknowledgment
         }
         return ChangeAcknowledgment(
@@ -195,7 +220,8 @@ enum ChangeAcknowledgmentDecoder {
             duplicates: shape.duplicates,
             superseded: shape.superseded,
             appliedDeletions: shape.appliedDeletions,
-            duplicateDeletions: shape.duplicateDeletions
+            duplicateDeletions: shape.duplicateDeletions,
+            cascadedDeletions: shape.cascadedDeletions ?? 0
         )
     }
 }

@@ -19,21 +19,33 @@ enum ServerSetup {
         return url
     }()
 
-    /// Contract this app's automatic sync requires: `apiVersion >= 2` with
+    /// Contract this app requires: `apiVersion >= 3` with
     /// `["additions", "deletions"]` capabilities — keep in sync with
-    /// `ReceiverHealthResponse.supportsDeletions`.
+    /// `ReceiverHealthResponse.supportsDeletions`. Both manual and
+    /// automatic sync deliver contract-v3 change batches, so there is no
+    /// older fallback.
     ///
-    /// Last verified 2026-09-25 against `server/API.md` at the revision
+    /// Last verified 2026-09-26 against `server/API.md` at the revision
     /// below. Maintainers: when the receiver contract changes, update the
     /// SHA to a revision implementing the new contract, re-read every
     /// document linked here at that revision, and re-verify the links
     /// resolve (HTTP 200).
-    static let compatibleContractVersion = 2
+    static let compatibleContractVersion = 3
 
     /// Receiver revision this app's documentation and setup prompt are
     /// written for. A full commit SHA is used on purpose — branch names
     /// move and `main` may not be compatible; deploy exactly this revision.
-    static let compatibleReceiverRef = "959ee7833e906281716b480a805d96b0e1736998"
+    ///
+    /// Maintainers: this must always reference a revision whose `server/`
+    /// tree is identical to the current tree's. CI enforces that (the
+    /// receiver-pin check fails when `server/` moves past the pin), so
+    /// changing anything under `server/` requires bumping this SHA in the
+    /// same change. Pinning an early revision of a branch is exactly the
+    /// failure the check exists to prevent: revision 5f2b8a3 (the first
+    /// contract-v3 draft) predates the fail-closed schema reset, the
+    /// unversioned-table boot protection, orphan-chunk suppression, and
+    /// the transport-limit hardening, and must never be referenced again.
+    static let compatibleReceiverRef = "4fdacd375a99811d0793cb75fae8e97675efade6"
 
     /// The URL shape the app expects. The configured endpoint is the exact
     /// ingestion URL; the connection test is `GET` on the same URL.
@@ -71,19 +83,20 @@ enum ServerSetup {
     needs to enter in the app.
 
     Repository: https://github.com/kaishi00/vitalroute
-    Required receiver revision (full commit SHA): 959ee7833e906281716b480a805d96b0e1736998
-    The app's automatic sync requires contract v\#(compatibleContractVersion):
+    Required receiver revision (full commit SHA): \#(compatibleReceiverRef)
+    The app requires contract v\#(compatibleContractVersion) for everything it does:
     connection test plus change-batch ingestion of additions and deletions
     (`apiVersion >= \#(compatibleContractVersion)`,
-    capabilities `["additions", "deletions"]`). Manual-only sync would work
-    with a v1 receiver, but deploy exactly the revision above so automatic
-    sync works — do not use `main` or a branch name; they may not be
+    capabilities `["additions", "deletions"]`). Both manual sync and
+    automatic sync deliver contract-v3 change batches, so there is no older
+    receiver a pre-release app could fall back to — deploy exactly the
+    revision above, do not use `main` or a branch name; they may not be
     compatible.
 
     Before acting, read these files at that revision:
     - server/README.md      (what the receiver is; configuration; HTTPS)
     - server/API.md          (the HTTP contract: connection test, ingestion,
-                              contract v2 semantics, limits)
+                              contract v3 semantics, limits)
     - server/DEPLOYMENT.md   (supported installation, HTTPS, day-2 operations)
 
     Ask the owner before choosing anything:
@@ -106,7 +119,7 @@ enum ServerSetup {
       in a URL.
     - Verify access through the exact phone-facing endpoint URL: GET the
       full https://<your-server>/v1/records value the owner will enter (not
-      just the host). It must return 200 with apiVersion >= 2 and
+      just the host). It must return 200 with apiVersion >= \#(compatibleContractVersion) and
       capabilities ["additions", "deletions"], and 401 without the token.
       (/v1/health is an alias for the same check, but the exact URL is what
       the phone will use and what any proxy in front must route.)
