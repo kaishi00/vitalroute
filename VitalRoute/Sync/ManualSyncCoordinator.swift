@@ -67,6 +67,10 @@ struct SyncSummary: Equatable {
     /// poison their whole batch forever; they are skipped and surfaced
     /// instead.
     var skippedRecords = 0
+    /// True when this run reconciled against a changed (or newly learned)
+    /// receiver datastore and therefore cleared delivery progress: the
+    /// history is being re-sent, which the user should understand.
+    var rebuiltHistory = false
 
     var deliveredRecords: Int {
         acceptedRecords + duplicateRecords + supersededRecords
@@ -200,6 +204,36 @@ final class ManualSyncCoordinator {
     /// offer the cancel.
     private(set) var isSyncing = false
 
+    /// The "Rebuild sync history" escape hatch: clears this destination's
+    /// delivery progress (manual cursors and windows, automatic checkpoints,
+    /// retry bookkeeping) and forgets the remembered receiver datastore
+    /// generation, so the next sync — manual or automatic — re-adopts the
+    /// receiver's datastore and re-sends the configured history. The
+    /// endpoint, API key, metric selection, backfill depth, HealthKit
+    /// authorization, and queued outbox events are untouched; the receiver's
+    /// per-record idempotency makes the re-send safe. This is the manual
+    /// counterpart of the automatic generation detection, for a receiver
+    /// whose datastore changed in a way the generation cannot describe
+    /// (it always can — this exists so a user is never waiting on one).
+    /// Returns false when the endpoint is not usable (nothing changed).
+    func rebuildDestinationHistory(endpoint rawEndpoint: String) async -> Bool {
+        guard let endpoint = URL(string: rawEndpoint), endpoint.scheme == "https" else {
+            return false
+        }
+        let destination = endpoint.absoluteString
+        do {
+            try await stateStore.invalidateDeliveryProgress(destination: destination)
+            await stateStore.clearReceiverGeneration()
+        } catch {
+            return false
+        }
+        // The "last successful sync" marker describes data the rebuilt
+        // history will re-send; clearing it is part of the invalidation.
+        lastSuccessfulSync = nil
+        defaults.removeObject(forKey: Self.lastSyncStorageKey)
+        return true
+    }
+
     /// Starts a sync from the current configuration. All inputs are captured
     /// into the plan immediately; overlapping calls are ignored while a sync
     /// is in flight.
@@ -300,6 +334,28 @@ final class ManualSyncCoordinator {
         phase = .authorizing
 
         do {
+            // Datastore-identity gate, before any cursor or window is
+            // consulted: confirm the receiver's datastore is still the one
+            // this progress was earned against. A reset/replaced receiver
+            // invalidates that progress here (and the frozen windows with
+            // it), so the reads below start from the configured history
+            // window instead of silently finding nothing new. Surfacing the
+            // last-sync marker is part of the invalidation: it must not
+            // claim data the current datastore never received.
+            let authorization = DestinationAuthorization(bearerToken: plan.bearerToken)
+            let check = try await SyncGenerationReconciler.reconcile(
+                endpoint: plan.endpoint,
+                client: client,
+                authorization: authorization,
+                stateStore: stateStore
+            )
+            if check.didRebuild {
+                summary.rebuiltHistory = true
+                currentSummary = summary
+                lastSuccessfulSync = nil
+                defaults.removeObject(forKey: Self.lastSyncStorageKey)
+            }
+
             try await healthData.requestReadAuthorization(for: Set(plan.metrics))
 
             // The depth decides the CANDIDATE window; the store freezes the
@@ -308,7 +364,6 @@ final class ManualSyncCoordinator {
             // wall clock — the same fixed-predicate rule as scopes.
             let depth = BackfillDepth.stored(in: defaults)
             let destination = plan.endpoint.absoluteString
-            let authorization = DestinationAuthorization(bearerToken: plan.bearerToken)
             // The budget starts when the gate hands over, not when the tap
             // happened: a long wait behind an automatic pass must not
             // consume the reading budget.

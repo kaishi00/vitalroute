@@ -375,16 +375,22 @@ struct OverviewView: View {
         }
         switch outcome.result {
         case .completed:
+            let rebuild = outcome.summary.rebuiltHistory
+                ? "Destination was reset — rebuilding sync history. "
+                : ""
             if outcome.summary.recordsFound == 0 {
-                return "Sync finished: no records were found in the window for the selected categories. Nothing was sent."
+                return rebuild + "Sync finished: no records were found in the window for the selected categories. Nothing was sent."
             }
             let skipped = outcome.summary.skippedRecords > 0
                 ? " \(outcome.summary.skippedRecords) record(s) were skipped because they exceed the destination's size limits."
                 : ""
-            return "Sync finished: \(outcome.summary.deliveredRecords) records acknowledged (\(outcome.summary.acceptedRecords) new, \(outcome.summary.duplicateRecords) already present) — \(outcome.summary.breakdownText).\(skipped)"
+            return rebuild + "Sync finished: \(outcome.summary.deliveredRecords) records acknowledged (\(outcome.summary.acceptedRecords) new, \(outcome.summary.duplicateRecords) already present) — \(outcome.summary.breakdownText).\(skipped)"
         case .backfilling(let metrics):
             let names = metrics.map(\.displayName).sorted().joined(separator: ", ")
-            return "History backfill in progress for \(names): \(outcome.summary.deliveredRecords) records acknowledged in this run and progress saved. Tap Sync Now to continue where it left off."
+            let rebuild = outcome.summary.rebuiltHistory
+                ? "Destination was reset — rebuilding sync history. "
+                : ""
+            return rebuild + "History backfill in progress for \(names): \(outcome.summary.deliveredRecords) records acknowledged in this run and progress saved. Tap Sync Now to continue where it left off."
         case .failed(let message):
             let partial = outcome.summary.batchesDelivered > 0
                 ? " \(outcome.summary.batchesDelivered) of \(outcome.summary.batchesPlanned) batches (\(outcome.summary.deliveredRecords) records) were acknowledged before the failure."

@@ -140,6 +140,93 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertFalse(engine.isEnabled)
     }
 
+    /// The automatic path of the Build 9 regression: a receiver reset left
+    /// a caught-up checkpoint describing a datastore that no longer exists.
+    /// The generation gate must invalidate it and re-bootstrap, so the new
+    /// receiver is repopulated instead of silently assumed caught-up.
+    func testReceiverResetInvalidatesCaughtUpCheckpointAndRebootstraps() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)], deletions: [],
+                anchorData: Data("a1".utf8), isFull: false
+            )],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        XCTAssertEqual(client.sentChangeBatches.count, 1)
+        XCTAssertEqual(provider.changeQueries[0].anchorData, nil)
+
+        // The receiver's datastore is replaced: same URL, new identity.
+        client.healthResponse.storeGeneration = "00000000-0000-4000-8000-000000000002"
+        client.resetDelivery()
+        provider.changeQueries.removeAll()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)], deletions: [],
+                anchorData: Data("a1".utf8), isFull: false
+            )],
+        ]
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        // The caught-up checkpoint was invalidated: the re-bootstrap offered
+        // a nil anchor (the full window), and the record was re-sent (the
+        // receiver dedupes it). The user-visible status explains the rebuild.
+        XCTAssertEqual(provider.changeQueries[0].anchorData, nil)
+        XCTAssertEqual(client.sentChangeBatches.count, 1)
+        XCTAssertTrue(engine.lastStatusMessage?.contains("rebuilding sync history") == true)
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.scope.destination, endpoint)
+    }
+
+    /// A receiver restart (same datastore identity) must NOT cause a
+    /// needless rebuild: the checkpoint is reused as-is.
+    func testSameGenerationRestartDoesNotRebootstrap() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)], deletions: [],
+                anchorData: Data("a1".utf8), isFull: false
+            )],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+        let queriesAfterFirstPass = provider.changeQueries.count
+
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        // The continuation query resumes from the saved anchor; no rebuild.
+        XCTAssertEqual(provider.changeQueries.count, queriesAfterFirstPass + 1)
+        XCTAssertEqual(provider.changeQueries.last?.anchorData, Data("a1".utf8))
+        XCTAssertTrue(engine.lastStatusMessage?.contains("rebuilding") != true)
+        XCTAssertEqual(client.sentChangeBatches.count, 1)
+    }
+
+    /// A receiver that answers without a usable datastore identity pauses
+    /// automatic sync with the update-the-receiver remedy, and nothing is
+    /// sent under ambiguous identity.
+    func testEnableFailsWhenReceiverReportsNoDatastoreIdentity() async {
+        let client = ScriptedSyncClient()
+        client.healthResponse.storeGeneration = nil
+        let provider = ScriptedHealthProvider()
+        let engine = makeEngine(provider: provider, client: client)
+
+        let result = await enable(engine)
+
+        guard case .failed(let message) = result else {
+            return XCTFail("expected failure for a receiver without a datastore identity")
+        }
+        XCTAssertTrue(message.contains("datastore identity"), message)
+        XCTAssertFalse(engine.isEnabled)
+        XCTAssertEqual(client.sentChangeBatches.count, 0)
+    }
+
     func testEnableRequiresDeletionCapableReceiver() async {
         let client = ScriptedSyncClient()
         client.healthResponse = ReceiverHealthResponse(
@@ -180,7 +267,9 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertTrue(engine.isEnabled)
         XCTAssertEqual(provider.observedMetrics, [[.steps]])
         XCTAssertEqual(provider.authorizationRequests, 1)
-        XCTAssertEqual(client.testConnectionCount, 1)
+        // One connection test in enable, plus the datastore-generation
+        // gate at the start of the enablement pass.
+        XCTAssertEqual(client.testConnectionCount, 2)
 
         // Bootstrap window is the fixed scope of the DEFAULT depth (7 days).
         XCTAssertEqual(provider.changeQueries.count, 1)
@@ -2599,9 +2688,14 @@ final class ScriptedSyncClient: DestinationClient, @unchecked Sendable {
         return storage
     }
 
+    /// A stable datastore identity, so the engine's per-pass generation
+    /// gate reads as "same receiver" unless a test scripts otherwise.
+    static let defaultStoreGeneration = "00000000-0000-4000-8000-000000000001"
+
     var healthResponse = ReceiverHealthResponse(
         status: "ok", service: "vitalroute-receiver", apiVersion: 3,
-        capabilities: ["additions", "deletions"]
+        capabilities: ["additions", "deletions"],
+        storeGeneration: ScriptedSyncClient.defaultStoreGeneration
     )
     var nextAcknowledgment: ChangeAcknowledgment?
     fileprivate var sendGate: AsyncGate?
@@ -2741,7 +2835,11 @@ private final class ManualStubClient: DestinationClient, @unchecked Sendable {
         to endpoint: URL,
         authorization: DestinationAuthorization
     ) async throws -> ReceiverHealthResponse {
-        ReceiverHealthResponse(status: "ok", service: "vitalroute-receiver", apiVersion: 3, capabilities: ["additions", "deletions"])
+        ReceiverHealthResponse(
+            status: "ok", service: "vitalroute-receiver", apiVersion: 3,
+            capabilities: ["additions", "deletions"],
+            storeGeneration: "00000000-0000-4000-8000-000000000001"
+        )
     }
 
     func sendChanges(

@@ -108,6 +108,46 @@ final class HTTPDestinationClientTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token-0123456789")
     }
 
+    func testTestConnectionDecodesStoreGeneration() async throws {
+        let client = HTTPDestinationClient { request in
+            (
+                self.httpData(#"{"status":"ok","service":"vitalroute-receiver","apiVersion":3,"capabilities":["additions","deletions"],"storeGeneration":"0e2c5a41-9b3d-4c8e-a6f2-1d7b8e5a4c90"}"#),
+                self.httpResponse(status: 200, url: request.url!)
+            )
+        }
+
+        let response = try await client.testConnection(to: endpoint, authorization: authorization)
+
+        XCTAssertEqual(
+            response.canonicalStoreGeneration,
+            UUID(uuidString: "0E2C5A41-9B3D-4C8E-A6F2-1D7B8E5A4C90")
+        )
+    }
+
+    func testCanonicalStoreGenerationRejectsMissingAndUnparseableValues() {
+        // Absent (receiver predating datastore identity).
+        XCTAssertNil(
+            ReceiverHealthResponse(
+                status: "ok", service: "x", apiVersion: 3, capabilities: []
+            ).canonicalStoreGeneration
+        )
+        // Unparseable.
+        XCTAssertNil(
+            ReceiverHealthResponse(
+                status: "ok", service: "x", apiVersion: 3, capabilities: [],
+                storeGeneration: "not-a-uuid"
+            ).canonicalStoreGeneration
+        )
+        // Case is presentation: either spelling parses to the same identity.
+        XCTAssertEqual(
+            ReceiverHealthResponse(
+                status: "ok", service: "x", apiVersion: 3, capabilities: [],
+                storeGeneration: "0E2C5A41-9B3D-4C8E-A6F2-1D7B8E5A4C90"
+            ).canonicalStoreGeneration,
+            UUID(uuidString: "0e2c5a41-9b3d-4c8e-a6f2-1d7b8e5a4c90")
+        )
+    }
+
     // MARK: Acknowledgment validation
 
     func testValidAcknowledgmentDecodes() async throws {

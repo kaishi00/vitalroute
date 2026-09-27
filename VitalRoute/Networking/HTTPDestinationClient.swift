@@ -202,6 +202,7 @@ final class HTTPDestinationClient: DestinationClient {
             let service: String
             let apiVersion: Int
             let capabilities: [String]?
+            let storeGeneration: String?
         }
         let shape: Shape
         do {
@@ -216,7 +217,8 @@ final class HTTPDestinationClient: DestinationClient {
             status: shape.status,
             service: shape.service,
             apiVersion: shape.apiVersion,
-            capabilities: Set(shape.capabilities ?? [])
+            capabilities: Set(shape.capabilities ?? []),
+            storeGeneration: shape.storeGeneration
         )
     }
 }

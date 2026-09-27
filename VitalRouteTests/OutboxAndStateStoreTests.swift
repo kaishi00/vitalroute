@@ -495,6 +495,101 @@ final class OutboxAndStateStoreTests: XCTestCase {
     }
 }
 
+/// The per-destination receiver datastore generation binding and the
+/// delivery-progress invalidation behind it.
+final class ReceiverGenerationStoreTests: XCTestCase {
+    private let destinationA = "https://a.example.org/v1/records"
+    private let destinationB = "https://b.example.org/v1/records"
+    private var tempDirectory: URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen-store-tests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    @MainActor
+    private func seedProgress(_ store: SyncStateStore, destination: String) async throws {
+        let window = Date(timeIntervalSince1970: 1_700_000_000)
+        try await store.saveManualCursor(ManualExportCursor(
+            destination: destination,
+            metric: .steps,
+            windowStart: window,
+            anchorData: Data("anchor".utf8),
+            updatedAt: Date()
+        ))
+        _ = try await store.manualWindowStart(
+            destination: destination, metric: .steps,
+            depth: .allRecords, candidate: window
+        )
+        let scope = CategoryScope(
+            destination: destination, metric: .steps,
+            generation: UUID(), windowStart: window
+        )
+        try await store.save(CategoryCheckpoint(
+            scope: scope, anchorData: Data("anchor".utf8), updatedAt: Date(), isCaughtUp: true
+        ))
+        await store.saveRetryState(DeliveryRetryState(
+            consecutiveFailures: 4, nextAttemptAt: Date(),
+            lastFailureIsActionable: false, lastFailureMessage: nil, lastSuccessAt: Date()
+        ))
+    }
+
+    @MainActor
+    func testBindingRoundTripsAndIsDestinationScoped() async throws {
+        let store = SyncStateStore(directory: tempDirectory)
+        let generation = UUID()
+        try await store.saveReceiverGeneration(
+            ReceiverGenerationBinding(destination: destinationA, storeGeneration: generation)
+        )
+        let loaded = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertEqual(loaded, generation)
+        // A different destination reads as "no remembered generation".
+        let other = await store.loadReceiverGeneration(destination: destinationB)
+        XCTAssertNil(other)
+        await store.clearReceiverGeneration()
+        let cleared = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertNil(cleared)
+    }
+
+    @MainActor
+    func testInvalidationClearsOnlyTheNamedDestinationProgress() async throws {
+        let store = SyncStateStore(directory: tempDirectory)
+        let windowA = Date(timeIntervalSince1970: 1_700_000_000)
+        try await seedProgress(store, destination: destinationA)
+        try await store.saveManualCursor(ManualExportCursor(
+            destination: destinationB,
+            metric: .steps,
+            windowStart: windowA,
+            anchorData: Data("b".utf8),
+            updatedAt: Date()
+        ))
+
+        try await store.invalidateDeliveryProgress(destination: destinationA)
+
+        // Destination A's progress is gone...
+        let aCursors = await store.loadManualCursors()
+        XCTAssertTrue(aCursors.values.allSatisfy { $0.destination != destinationA })
+        XCTAssertNil(await store.loadCheckpoint(for: .steps))
+        let retry = await store.loadRetryState()
+        XCTAssertEqual(retry.consecutiveFailures, 0)
+        // ...destination B's cursor survives.
+        let bCursors = await store.loadManualCursors()
+        XCTAssertEqual(bCursors.values.map(\.destination), [destinationB])
+    }
+
+    @MainActor
+    func testHasDeliveryProgressDetectsLegacyState() async throws {
+        let store = SyncStateStore(directory: tempDirectory)
+        let before = await store.hasDeliveryProgress(destination: destinationA)
+        XCTAssertFalse(before)
+        try await seedProgress(store, destination: destinationA)
+        let after = await store.hasDeliveryProgress(destination: destinationA)
+        XCTAssertTrue(after)
+        let other = await store.hasDeliveryProgress(destination: destinationB)
+        XCTAssertFalse(other)
+    }
+}
+
 final class SyncChangeEventTests: XCTestCase {
     private func record() -> HealthRecord {
         HealthRecord(

@@ -343,18 +343,46 @@ final class AutomaticSyncEngine {
         // work for an obsolete configuration, so it must not run.
         guard isCurrent(generation) else { return superseded("authorization") }
 
-        // Capability check: automatic sync requires deletion support.
+        // Capability check: automatic sync requires deletion support — and
+        // the same response carries the datastore identity, which all sync
+        // progress (manual and automatic) is bound to. Reconciling here
+        // means a receiver reset/replacement detected at enablement wipes
+        // this destination's progress before any new work is armed, instead
+        // of old checkpoints silently suppressing a backfill.
+        let authorization = DestinationAuthorization(bearerToken: trimmedToken)
+        let health: ReceiverHealthResponse
         do {
-            let health = try await client.testConnection(
+            health = try await client.testConnection(
                 to: configuration.endpoint,
-                authorization: DestinationAuthorization(bearerToken: trimmedToken)
+                authorization: authorization
             )
+        } catch {
+            guard isCurrent(generation) else { return superseded("the capability check") }
+            let message = "Could not verify the destination: \(error.localizedDescription)"
+            lastStatusMessage = message
+            return .failed(message: message)
+        }
+        do {
+            guard isCurrent(generation) else { return superseded("the capability check") }
             guard health.supportsDeletions else {
-                guard isCurrent(generation) else { return superseded("the capability check") }
                 let message = "The destination receiver does not support deletions (contract v3). Update it to a v3 receiver, then try again. Manual sync keeps working."
                 lastStatusMessage = message
                 return .failed(message: message)
             }
+            let check = try await SyncGenerationReconciler.reconcile(
+                endpoint: configuration.endpoint,
+                client: client,
+                authorization: authorization,
+                stateStore: stateStore,
+                knownHealth: health
+            )
+            if check.didRebuild {
+                lastStatusMessage = Self.rebuiltHistoryMessage
+            }
+        } catch let error as SyncGenerationReconciliationError {
+            guard isCurrent(generation) else { return superseded("the capability check") }
+            lastStatusMessage = error.localizedDescription
+            return .failed(message: error.localizedDescription)
         } catch {
             guard isCurrent(generation) else { return superseded("the capability check") }
             let message = "Could not verify the destination: \(error.localizedDescription)"
@@ -947,6 +975,37 @@ final class AutomaticSyncEngine {
         // an endpoint the user did not configure for it.
         if await discardMismatchedQueue(generation: generation) {
             guard isCurrent(generation) else { return false }
+        }
+
+        // Datastore-identity gate for every pass, before any checkpoint is
+        // read: a receiver reset or replacement must invalidate destination-
+        // bound progress here, or a caught-up checkpoint earned against the
+        // old datastore would silently suppress the new receiver's backfill.
+        // Transient transport failures propagate (the pass fails into the
+        // normal retry path); only a receiver that ANSWERS without a usable
+        // identity pauses, with the update-the-receiver remedy.
+        if let endpoint = URL(string: destination) {
+            do {
+                let check = try await SyncGenerationReconciler.reconcile(
+                    endpoint: endpoint,
+                    client: client,
+                    authorization: DestinationAuthorization(bearerToken: token),
+                    stateStore: stateStore
+                )
+                if check.didRebuild {
+                    guard isCurrent(generation) else { return false }
+                    // Cleared checkpoints make the next reads bootstrap fresh
+                    // scopes; drop the in-memory backfill view so the status
+                    // reflects the restart honestly.
+                    backfillingMetrics.removeAll()
+                    lastStatusMessage = SyncGenerationReconciler.rebuiltHistoryNotice
+                }
+            } catch let error as SyncGenerationReconciliationError {
+                guard isCurrent(generation) else { return false }
+                mode = .paused(.receiverIncompatible("it does not report a datastore identity"))
+                lastStatusMessage = error.localizedDescription
+                return false
+            }
         }
 
         // Observers lost to a deferred pause (or a fresh enable whose pass
