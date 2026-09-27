@@ -83,7 +83,7 @@ enum ServerSetup {
     needs to enter in the app.
 
     Repository: https://github.com/kaishi00/vitalroute
-    Required receiver revision (full commit SHA): d165b5b1247d6c418ef97f24adea439b2ea14132
+    Required receiver revision (full commit SHA): \#(compatibleReceiverRef)
     The app requires contract v\#(compatibleContractVersion) for everything it does:
     connection test plus change-batch ingestion of additions and deletions
     (`apiVersion >= \#(compatibleContractVersion)`,
