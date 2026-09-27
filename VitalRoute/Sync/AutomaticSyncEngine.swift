@@ -380,7 +380,7 @@ final class AutomaticSyncEngine {
             // coexist with progress the new datastore never received. The
             // gate can be held for a bounded manual run; the isCurrent check
             // after it re-validates the decision that waited.
-            let check: SyncGenerationCheck = try await workGate.run { [weak self] () throws -> SyncGenerationCheck in
+            let check: SyncGenerationCheck = try await workGate.run { @MainActor [weak self] () throws -> SyncGenerationCheck in
                 guard let self else { throw CancellationError() }
                 return try await SyncGenerationReconciler.reconcile(
                     endpoint: configuration.endpoint,
@@ -392,10 +392,10 @@ final class AutomaticSyncEngine {
             }
             didRebuildAtEnablement = check.didRebuild
         } catch is CancellationError {
-            // Cancelled while queued behind a bounded run (the user turned
-            // automatic sync off, or the configuration moved on): the newer
-            // decision owns the state, so unwind without a misleading
-            // "could not verify" failure.
+            // Cancelled while queued behind a bounded run (the enabling
+            // task itself was cancelled, or the engine was deallocated):
+            // the newer decision owns the state, so unwind without a
+            // misleading "could not verify" failure.
             return superseded("the capability check")
         } catch let error as SyncGenerationReconciliationError {
             guard isCurrent(generation) else { return superseded("the capability check") }

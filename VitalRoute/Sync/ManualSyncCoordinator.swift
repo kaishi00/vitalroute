@@ -227,7 +227,7 @@ final class ManualSyncCoordinator {
         }
         let destination = configuration.endpoint.absoluteString
         do {
-            try await workGate.run { [weak self] () -> Void in
+            try await workGate.run { @MainActor [weak self] () -> Void in
                 guard let self else { return }
                 try await self.stateStore.invalidateDeliveryProgress(destination: destination)
                 await self.stateStore.clearReceiverGeneration(destination: destination)

@@ -163,7 +163,7 @@ final class AutomaticSyncEngineTests: XCTestCase {
         let store = SyncStateStore(directory: tempDirectory)
         await store.clearReceiverGeneration(destination: endpoint)
         client.healthResponse.storeGeneration = "00000000-0000-4000-8000-000000000009"
-        engine.disable()
+        await engine.disable()
 
         let result = await enable(engine)
         XCTAssertEqual(result, .enabled)

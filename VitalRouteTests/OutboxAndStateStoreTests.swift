@@ -550,11 +550,12 @@ final class ReceiverGenerationStoreTests: XCTestCase {
         try await store.saveReceiverGeneration(destination: destinationB, storeGeneration: generationB)
         let aAfterB = await store.loadReceiverGeneration(destination: destinationA)
         XCTAssertEqual(aAfterB, generationA)
-        await store.clearReceiverGeneration()
+        await store.clearReceiverGeneration(destination: destinationA)
         let cleared = await store.loadReceiverGeneration(destination: destinationA)
         XCTAssertNil(cleared)
-        let bCleared = await store.loadReceiverGeneration(destination: destinationB)
-        XCTAssertNil(bCleared)
+        // Clearing one destination must preserve the other's binding.
+        let bSurvives = await store.loadReceiverGeneration(destination: destinationB)
+        XCTAssertEqual(bSurvives, generationB)
     }
 
     @MainActor
@@ -572,7 +573,7 @@ final class ReceiverGenerationStoreTests: XCTestCase {
         XCTAssertEqual(same, .same)
 
         // Legacy: progress exists, the remembered generation is gone.
-        await store.clearReceiverGeneration()
+        await store.clearReceiverGeneration(destination: destinationA)
         try await seedProgress(store, destination: destinationA)
         let legacy = try await store.reconcileGeneration(destination: destinationA, generation: second)
         XCTAssertEqual(legacy, .rebuiltFromLegacyState)
@@ -605,9 +606,10 @@ final class ReceiverGenerationStoreTests: XCTestCase {
         try Data("{ not json".utf8).write(to: url)
         let corrupt = await store.loadReceiverGeneration(destination: destinationA)
         XCTAssertNil(corrupt, "an undecodable binding must read as none, so the legacy path self-heals")
-        // ...and the pre-generation single-object spelling must also decode
-        // as empty rather than crash or false-match.
-        try Data("\"https://a.example.org/v1/records\":\"00000000-0000-4000-8000-000000000001\"".utf8).write(to: url)
+        // ...and the actual pre-map file shape (ReceiverGenerationBinding:
+        // {"destination","storeGeneration"}) must decode as empty rather
+        // than crash or false-match: its values are not a [String: UUID].
+        try Data("\"destination\":\"https://a.example.org/v1/records\",\"storeGeneration\":\"00000000-0000-4000-8000-000000000001\"".utf8).write(to: url)
         let legacy = await store.loadReceiverGeneration(destination: destinationA)
         XCTAssertNil(legacy)
     }
