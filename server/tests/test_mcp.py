@@ -17,6 +17,8 @@ import threading
 import time
 import unittest
 import uuid
+from contextlib import closing
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -62,6 +64,7 @@ class QueryServerTestCase(unittest.TestCase):
 
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
         self.db_path = os.path.join(self.tempdir.name, "records.sqlite3")
         self.store = storage.RecordStore(self.db_path)
 
@@ -83,9 +86,6 @@ class QueryServerTestCase(unittest.TestCase):
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        # addCleanup runs LIFO: stop serving first, then close the shared
-        # connection, so a stray in-flight request cannot hit a closed DB.
-        self.addCleanup(mcp_server.QueryState.connection.close)
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
 
@@ -110,6 +110,158 @@ class QueryServerTestCase(unittest.TestCase):
         if params is not None:
             message["params"] = params
         return self.request("POST", "/", message, token=token)
+
+
+class DatabaseLifetimeTests(QueryServerTestCase):
+    """A running HTTP service must follow replacements at its DB path."""
+
+    def call(self, name, arguments=None):
+        status, body = self.rpc("tools/call", {
+            "name": name, "arguments": arguments or {},
+        })
+        self.assertEqual(status, 200)
+        return body["result"]
+
+    def assert_inventory(self, metrics, ids):
+        result = self.call("list_metrics")
+        self.assertNotIn("isError", result)
+        payload = json.loads(result["content"][0]["text"])
+        self.assertEqual({row["metric"] for row in payload["metrics"]}, metrics)
+        result = self.call("recent_records")
+        payload = json.loads(result["content"][0]["text"])
+        self.assertEqual({row["id"] for row in payload["records"]}, ids)
+        result = self.call("daily_stats", {"days": 7})
+        payload = json.loads(result["content"][0]["text"])
+        self.assertEqual({row["metric"] for row in payload["days"]}, metrics)
+
+    def tracked_connections(self):
+        opened = []
+        real_connect = queries.connect
+
+        class TrackedConnection:
+            def __init__(self, connection):
+                self.connection = connection
+                self.closed = False
+
+            def execute(self, *args, **kwargs):
+                return self.connection.execute(*args, **kwargs)
+
+            def close(self):
+                self.closed = True
+                self.connection.close()
+
+        def connect(path):
+            connection = TrackedConnection(real_connect(path))
+            opened.append(connection)
+            return connection
+
+        return opened, connect
+
+    def test_startup_validation_closes_connection_on_success_and_failure(self):
+        opened, connect = self.tracked_connections()
+        with patch.object(queries, "connect", side_effect=connect):
+            server = mcp_server.make_server(HOST, 0, self.db_path, TOKEN)
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].closed)
+        server.server_close()
+
+        invalid_path = os.path.join(self.tempdir.name, "invalid.sqlite3")
+        pathlib.Path(invalid_path).write_bytes(b"not sqlite")
+        opened, connect = self.tracked_connections()
+        with patch.object(queries, "connect", side_effect=connect):
+            with self.assertRaises(ValueError):
+                mcp_server.make_server(HOST, 0, invalid_path, TOKEN)
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].closed)
+
+    def test_failed_tool_query_closes_connection(self):
+        opened, connect = self.tracked_connections()
+        with patch.object(queries, "connect", side_effect=connect), \
+                patch.object(queries, "list_metrics", side_effect=RuntimeError("query failure")):
+            result = self.call("list_metrics")
+        self.assertTrue(result["isError"])
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].closed)
+
+    def test_atomic_replace_and_restore_without_restart(self):
+        original_ids = {self.r1["id"], self.r2["id"], self.h1["id"]}
+        self.assert_inventory({"steps", "heartRate"}, original_ids)
+        backup = os.path.join(self.tempdir.name, "original.sqlite3")
+        with closing(sqlite3.connect(self.db_path)) as source:
+            with closing(sqlite3.connect(backup)) as target:
+                source.backup(target)
+        replacement = os.path.join(self.tempdir.name, "replacement.sqlite3")
+        store_b = storage.RecordStore(replacement)
+        record_b = make_record(metric="distanceWalkingRunning",
+                               data={"type": "quantity", "value": 42, "unit": "m"})
+        batch_created_at, changes = prepared(record_b)
+        store_b.apply(changes, batch_created_at)
+        os.replace(replacement, self.db_path)
+        self.assert_inventory({"distanceWalkingRunning"}, {record_b["id"]})
+        os.replace(backup, self.db_path)
+        self.assert_inventory({"steps", "heartRate"}, original_ids)
+
+    def assert_safe_failure(self):
+        with self.assertLogs("vitalroute.query", level="ERROR") as logs:
+            result = self.call("list_metrics")
+        self.assertEqual(result, {
+            "content": [{"type": "text", "text": "Query failed."}], "isError": True,
+        })
+        self.assertNotIn(self.db_path, "\n".join(logs.output))
+        self.assertNotIn("Traceback", "\n".join(logs.output))
+        self.assertNotIn("private-health-payload-not-a-database", "\n".join(logs.output))
+        for record in (self.r1, self.r2, self.h1):
+            self.assertNotIn(record["id"], "\n".join(logs.output))
+        self.assertEqual(self.request("GET", "/healthz", token=None), (200, {"status": "ok"}))
+
+    def test_missing_database_recovers_on_next_request(self):
+        held = self.db_path + ".held"
+        os.replace(self.db_path, held)
+        try:
+            self.assert_safe_failure()
+            self.assertFalse(os.path.exists(self.db_path))
+        finally:
+            os.replace(held, self.db_path)
+        self.assert_inventory({"steps", "heartRate"},
+                              {self.r1["id"], self.r2["id"], self.h1["id"]})
+
+    def test_incompatible_and_corrupt_database_recovers_on_next_request(self):
+        held = self.db_path + ".held"
+        os.replace(self.db_path, held)
+        try:
+            with closing(sqlite3.connect(self.db_path)) as incompatible:
+                incompatible.execute("CREATE TABLE unrelated (value TEXT)")
+                incompatible.commit()
+            self.assert_safe_failure()
+            os.remove(self.db_path)
+            pathlib.Path(self.db_path).write_bytes(b"private-health-payload-not-a-database")
+            self.assert_safe_failure()
+        finally:
+            os.replace(held, self.db_path)
+        self.assert_inventory({"steps", "heartRate"},
+                              {self.r1["id"], self.r2["id"], self.h1["id"]})
+
+    def test_one_request_keeps_a_read_only_snapshot_and_closes_connection(self):
+        connections = []
+
+        def query_with_concurrent_write(connection):
+            connections.append(connection)
+            self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
+            before = connection.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+            with closing(sqlite3.connect(self.db_path)) as writer:
+                writer.execute("DELETE FROM records WHERE id = ?", (self.r1["id"],))
+                writer.commit()
+            after = connection.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+            self.assertEqual((before, after), (3, 3))
+            with self.assertRaises(sqlite3.OperationalError):
+                connection.execute("DELETE FROM records")
+            return {"metrics": []}
+
+        with patch.object(queries, "list_metrics", query_with_concurrent_write):
+            self.assertNotIn("isError", self.call("list_metrics"))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connections[0].execute("SELECT 1")
+        self.assert_inventory({"steps", "heartRate"}, {self.r2["id"], self.h1["id"]})
 
 
 class ToolTests(QueryServerTestCase):
@@ -314,7 +466,7 @@ class ToolTests(QueryServerTestCase):
         status, _ = self.request("POST", "/healthz", {"jsonrpc": "2.0", "id": 1, "method": "ping"})
         self.assertEqual(status, 404)
 
-    def test_concurrent_tool_calls_on_the_shared_connection(self):
+    def test_concurrent_tool_calls_with_independent_connections(self):
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             futures = [pool.submit(self._call, "list_metrics", {}, msg_id=100 + i)
@@ -361,6 +513,7 @@ class QueryLayerTests(unittest.TestCase):
 
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
         self.db_path = os.path.join(self.tempdir.name, "records.sqlite3")
         self.store = storage.RecordStore(self.db_path)
         self.connection = queries.connect(self.db_path)

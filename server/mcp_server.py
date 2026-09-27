@@ -36,7 +36,7 @@ import logging
 import os
 import sqlite3
 import sys
-import threading
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import queries
@@ -63,18 +63,6 @@ def _env_int(name, default):
     if value <= 0:
         raise SystemExit("%s must be positive." % name)
     return value
-
-
-class QueryState:
-    """Per-process state: one read-only connection guarded by a lock.
-
-    The lock serializes queries across worker threads: a single Python
-    sqlite3 connection object must not be used concurrently, whatever the
-    underlying SQLite threading mode.
-    """
-
-    connection = None
-    lock = threading.Lock()
 
 
 TOOLS = [
@@ -125,13 +113,19 @@ TOOLS = [
 ]
 
 
-def _tool_result(name, arguments):
-    with QueryState.lock:
+def _tool_result(db_path, name, arguments):
+    if name not in {tool["name"] for tool in TOOLS}:
+        return {"code": -32601, "message": f"Unknown tool: {name}"}, True
+    # Reopen the path on every call so a reset/restore is visible without
+    # restarting MCP. BEGIN holds one snapshot across multi-statement tools;
+    # closing (unlike Connection.__exit__) always releases the connection.
+    with closing(queries.connect(db_path)) as connection:
+        connection.execute("BEGIN")
         if name == "list_metrics":
-            payload = queries.list_metrics(QueryState.connection)
+            payload = queries.list_metrics(connection)
         elif name == "daily_stats":
             payload = queries.daily_stats(
-                QueryState.connection,
+                connection,
                 metric=arguments.get("metric"),
                 from_date=arguments.get("from"),
                 to_date=arguments.get("to"),
@@ -139,19 +133,17 @@ def _tool_result(name, arguments):
             )
         elif name == "recent_records":
             payload = queries.recent_records(
-                QueryState.connection,
+                connection,
                 metric=arguments.get("metric"),
                 limit=arguments.get("limit", 20),
                 offset=arguments.get("offset", 0),
             )
-        else:
-            return {"code": -32601, "message": f"Unknown tool: {name}"}, True
     return {
         "content": [{"type": "text", "text": json.dumps(payload, separators=(",", ":"))}],
     }, False
 
 
-def handle_jsonrpc(message):
+def handle_jsonrpc(message, db_path):
     """Returns the response dict, or None for a notification (202, no body).
 
     Never raises for malformed input; unexpected failures are converted
@@ -202,7 +194,7 @@ def handle_jsonrpc(message):
             return {"id": msg_id, "jsonrpc": "2.0",
                     "error": {"code": -32602, "message": "Invalid params for tools/call."}}
         try:
-            result, is_app_error = _tool_result(name, arguments)
+            result, is_app_error = _tool_result(db_path, name, arguments)
         except queries.QueryError as error:
             # Bad arguments: report inside the tool result so the agent can
             # correct the call, per MCP conventions.
@@ -211,7 +203,8 @@ def handle_jsonrpc(message):
                 "isError": True,
             }}
         except Exception:  # noqa: BLE001 - never leak internals or drop the connection
-            logger.exception("tools/call failed")
+            # Exception text/tracebacks can contain database paths or data.
+            logger.error("tools/call failed")
             return {"id": msg_id, "jsonrpc": "2.0", "result": {
                 "content": [{"type": "text", "text": "Query failed."}], "isError": True,
             }}
@@ -318,9 +311,9 @@ class QueryHandler(BaseHTTPRequestHandler):
                                             "message": "Batch requests are not supported."}})
             return
         try:
-            response = handle_jsonrpc(message)
+            response = handle_jsonrpc(message, self.server.db_path)
         except Exception:  # noqa: BLE001 - answer, never drop the socket
-            logger.exception("JSON-RPC dispatch failed")
+            logger.error("JSON-RPC dispatch failed")
             request_id = message.get("id") if isinstance(message, dict) else None
             self._send_json(200, {"jsonrpc": "2.0", "id": request_id,
                                   "error": {"code": -32603, "message": "Internal error."}})
@@ -368,8 +361,8 @@ def make_server(host, port, db_path, token):
             f"must hold a random token of at least {_MIN_TOKEN_LENGTH} characters."
         )
     try:
-        QueryState.connection = queries.connect(db_path)
-        QueryState.connection.execute("SELECT COUNT(*) FROM records").fetchone()
+        with closing(queries.connect(db_path)) as connection:
+            connection.execute("SELECT COUNT(*) FROM records").fetchone()
     except sqlite3.Error as error:
         raise ValueError(
             "The receiver database at %s is not readable yet (%s). "
@@ -377,6 +370,7 @@ def make_server(host, port, db_path, token):
         )
     server = QueryServer((host, port), QueryHandler)
     server.query_token = token
+    server.db_path = db_path
     return server
 
 

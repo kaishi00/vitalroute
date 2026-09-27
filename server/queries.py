@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read-only query layer over the VitalRoute receiver database.
 
-Every entry point opens the database with SQLite's read-only URI semantics:
-this module can never write and never mutate health data. All queries
+Consumers open the database with SQLite's read-only URI semantics through
+``connect`` and own the connection's lifetime. All queries
 exclude tombstoned ids, so a sample deleted on the phone never resurfaces
 in an answer.
 
@@ -70,17 +70,20 @@ def connect(db_path):
     recreate them. Writes to health data are blocked HERE, at the SQLite
     layer (mode=ro plus PRAGMA query_only), never by the mount.
 
-    check_same_thread=False: one connection is shared by the MCP server's
-    worker threads; concurrent use is serialized by
-    mcp_server.QueryState.lock.
+    Each MCP tool call opens and closes its own connection in the calling
+    worker thread. No connection is shared or cached across requests.
     """
     connection = sqlite3.connect(
-        f"file:{db_path}?mode=ro", uri=True, check_same_thread=False
+        f"file:{db_path}?mode=ro", uri=True
     )
     connection.row_factory = sqlite3.Row
     # Belt-and-braces with mode=ro: even if the URI were ever loosened,
     # query_only rejects every write on this connection.
-    connection.execute("PRAGMA query_only = 1")
+    try:
+        connection.execute("PRAGMA query_only = 1")
+    except sqlite3.Error:
+        connection.close()
+        raise
     return connection
 
 
