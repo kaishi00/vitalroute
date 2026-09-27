@@ -86,7 +86,7 @@ struct ManualExportCursor: Codable, Equatable {
 /// What a receiver-datastore reconciliation decided. Computed and committed
 /// as ONE actor-isolated step, so concurrent sync paths can never interleave
 /// an invalidation between another reconciliation's decision and its commit.
-enum GenerationReconciliation: Equatable {
+enum GenerationReconciliation: Equatable, Sendable {
     /// Same datastore as last time: progress stays exactly as it is.
     case same
     /// No remembered generation and no legacy progress: a fresh setup
@@ -358,11 +358,33 @@ actor SyncStateStore {
         loadReceiverGenerationBindings()[destination]
     }
 
-    /// Forgets every binding (the "Rebuild sync history" action): the next
-    /// reconciliation adopts whatever the receiver reports and, with
-    /// progress cleared, re-bootstraps from the configured window.
-    func clearReceiverGeneration() {
-        try? FileManager.default.removeItem(at: receiverGenerationURL)
+    /// Commits one destination's binding, preserving every other
+    /// destination's. The production commit path is
+    /// `reconcileGeneration(destination:generation:)`, which calls this as
+    /// its final step; it is also the seeding primitive for tests.
+    func saveReceiverGeneration(destination: String, storeGeneration: UUID) throws {
+        try ensurePrepared()
+        var bindings = loadReceiverGenerationBindings()
+        bindings[destination] = storeGeneration
+        try atomicWrite(try encoder.encode(bindings), to: receiverGenerationURL)
+    }
+
+    /// Forgets ONE destination's binding (the "Rebuild sync history"
+    /// action): the next reconciliation for that destination adopts whatever
+    /// the receiver reports and, with progress cleared, re-bootstraps from
+    /// the configured window. Other destinations' bindings survive, so
+    /// switching destinations and back still does not read as a reset.
+    func clearReceiverGeneration(destination: String) {
+        var bindings = loadReceiverGenerationBindings()
+        guard bindings.removeValue(forKey: destination) != nil else { return }
+        do {
+            try ensurePrepared()
+            try atomicWrite(try encoder.encode(bindings), to: receiverGenerationURL)
+        } catch {
+            // Advisory: failing to forget a binding is self-healing — the
+            // next reconciliation still compares against the receiver and
+            // rebuilds on any mismatch.
+        }
     }
 
     /// True when any destination-bound delivery progress exists. The legacy
@@ -407,8 +429,8 @@ actor SyncStateStore {
     /// from HealthKit, and re-read additions dedupe at the receiver), the
     /// endpoint, credential, metric selection, backfill depth, and HealthKit
     /// authorization. Retry bookkeeping is a single destination-agnostic
-    /// file; clearing it here resets the backoff for the failing side, which
-    /// only happens when progress actually existed and is being rebuilt.
+    /// file; clearing it here resets the backoff whenever a rebuild happens
+    /// (a reset or legacy state), not on the no-op same-generation path.
     func reconcileGeneration(destination: String, generation: UUID) throws -> GenerationReconciliation {
         let remembered = loadReceiverGeneration(destination: destination)
         if remembered == generation {
@@ -418,10 +440,9 @@ actor SyncStateStore {
         if remembered != nil || hadLegacyProgress {
             try invalidateDeliveryProgress(destination: destination)
         }
-        try ensurePrepared()
-        var bindings = loadReceiverGenerationBindings()
-        bindings[destination] = generation
-        try atomicWrite(try encoder.encode(bindings), to: receiverGenerationURL)
+        // The commit, through the same write primitive the map's other
+        // writers use.
+        try saveReceiverGeneration(destination: destination, storeGeneration: generation)
         if let remembered {
             return .rebuiltAfterReset
         }
@@ -496,7 +517,7 @@ actor SyncStateStore {
 /// A receiver-datastore reconciliation: the outcome of comparing the
 /// receiver's current identity with the generation this device last
 /// synchronized against, performed before any destination-bound sync work.
-struct SyncGenerationCheck: Equatable {
+struct SyncGenerationCheck: Equatable, Sendable {
     let outcome: GenerationReconciliation
     let storeGeneration: UUID
 

@@ -380,16 +380,23 @@ final class AutomaticSyncEngine {
             // coexist with progress the new datastore never received. The
             // gate can be held for a bounded manual run; the isCurrent check
             // after it re-validates the decision that waited.
-            let check: SyncGenerationCheck = try await workGate.run { @MainActor in
-                try await SyncGenerationReconciler.reconcile(
+            let check: SyncGenerationCheck = try await workGate.run { [weak self] () throws -> SyncGenerationCheck in
+                guard let self else { throw CancellationError() }
+                return try await SyncGenerationReconciler.reconcile(
                     endpoint: configuration.endpoint,
-                    client: client,
+                    client: self.client,
                     authorization: authorization,
-                    stateStore: stateStore,
+                    stateStore: self.stateStore,
                     knownHealth: health
                 )
             }
             didRebuildAtEnablement = check.didRebuild
+        } catch is CancellationError {
+            // Cancelled while queued behind a bounded run (the user turned
+            // automatic sync off, or the configuration moved on): the newer
+            // decision owns the state, so unwind without a misleading
+            // "could not verify" failure.
+            return superseded("the capability check")
         } catch let error as SyncGenerationReconciliationError {
             guard isCurrent(generation) else { return superseded("the capability check") }
             lastStatusMessage = error.localizedDescription
@@ -1002,7 +1009,12 @@ final class AutomaticSyncEngine {
         // identity pauses, with the update-the-receiver remedy.
         guard let endpoint = URL(string: destination) else {
             // Fail closed: this gate exists so identity is never ambiguous.
+            // A superseded pass owns no state — the newer decision does.
+            guard isCurrent(generation) else { return false }
             mode = .paused(.receiverIncompatible("its destination is not a valid URL"))
+            lastStatusMessage = AutomaticSyncPauseReason.receiverIncompatible(
+                "its destination is not a valid URL"
+            ).userMessage
             return false
         }
         do {

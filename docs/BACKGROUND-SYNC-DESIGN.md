@@ -247,7 +247,8 @@ directions.
   legacy progress with no remembered generation) invalidates that
   destination's progress and re-sends the configured history — the
   receiver dedupes by record id; a receiver that answers without a usable
-  identity pauses with an update-the-receiver remedy. Invalidation is
+  identity pauses automatic sync (and fails a manual run) with an
+  update-the-receiver remedy. Invalidation is
   atomic-first, binding-commit-last, so a crash can only re-trigger the
   reconciliation, never leave new-generation-trusted old progress.
 - **`schemaVersion: 3` body**: `{"schemaVersion": 3, "createdAt", "batchId",

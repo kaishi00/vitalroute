@@ -146,7 +146,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
 
         // The pre-generation world: progress exists, no receiver generation
         // was ever recorded. The receiver now reports an identity.
-        await store.clearReceiverGeneration()
+        await store.clearReceiverGeneration(destination: endpoint)
         client.storeGeneration = "00000000-0000-4000-8000-000000000003"
         provider.exportQueries.removeAll()
         provider.script[.steps] = [page([1], anchor: "a1", full: false), page([2], anchor: "a2", full: false)]

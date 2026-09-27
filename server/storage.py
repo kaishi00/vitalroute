@@ -410,19 +410,25 @@ class RecordStore:
     def store_generation(self):
         """The persisted datastore identity, or None when unavailable.
 
-        OperationalError is reported as None rather than raised: a database
-        hot-swapped for an empty/foreign file while the server runs must
-        answer the health response with a null identity (which generation-
-        aware clients treat as "never synchronized") instead of crashing.
+        OperationalError (no such table) for an empty database and
+        DatabaseError (file is not a database) for a foreign file both mean
+        "no usable identity": the read answers None — which generation-aware
+        clients treat as "never synchronized" — instead of crashing. A
+        minimal connection is used because the PRAGMAs _connect applies can
+        themselves fail on a foreign file, and this read must never raise
+        (nor leak the connection).
         """
-        connection = self._connect()
+        try:
+            connection = sqlite3.connect(self.db_path, timeout=10.0)
+        except sqlite3.Error:
+            return None
         try:
             try:
                 row = connection.execute(
                     "SELECT value FROM schema_info WHERE key = ?",
                     (_STORE_GENERATION_KEY,),
                 ).fetchone()
-            except sqlite3.OperationalError:
+            except sqlite3.DatabaseError:
                 return None
             return row[0] if row else None
         finally:

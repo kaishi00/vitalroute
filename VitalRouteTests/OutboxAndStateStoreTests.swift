@@ -592,17 +592,24 @@ final class ReceiverGenerationStoreTests: XCTestCase {
 
     @MainActor
     func testCorruptGenerationBindingDecodesAsEmptyAndSelfHeals() async throws {
-        let store = SyncStateStore(directory: tempDirectory)
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("gen-store-tests-corrupt")
-            .appendingPathComponent("state")
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen-store-tests-corrupt-\(UUID().uuidString)", isDirectory: true)
+        let store = SyncStateStore(directory: root)
+        let url = root
+            .appendingPathComponent("state", isDirectory: true)
             .appendingPathComponent("receiver-generation.json")
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
+        // Undecodable content...
         try Data("{ not json".utf8).write(to: url)
-        let loaded = await store.loadReceiverGeneration(destination: destinationA)
-        XCTAssertNil(loaded, "an undecodable binding must read as none, so the legacy path self-heals")
+        let corrupt = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertNil(corrupt, "an undecodable binding must read as none, so the legacy path self-heals")
+        // ...and the pre-generation single-object spelling must also decode
+        // as empty rather than crash or false-match.
+        try Data("\"https://a.example.org/v1/records\":\"00000000-0000-4000-8000-000000000001\"".utf8).write(to: url)
+        let legacy = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertNil(legacy)
     }
 
     @MainActor

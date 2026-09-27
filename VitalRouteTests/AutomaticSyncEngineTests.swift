@@ -140,6 +140,45 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertFalse(engine.isEnabled)
     }
 
+    /// An enablement that detects a receiver reset must surface the rebuild
+    /// notice: the enablement pass reconciles as "same" (the binding was
+    /// committed during enable), so this is the only place the user can see
+    /// why history is being re-sent.
+    func testEnableAfterReceiverResetSurfacesRebuildNotice() async throws {
+        let provider = ScriptedHealthProvider()
+        provider.script = [
+            .steps: [HealthChangePage(
+                additions: [record(1)], deletions: [],
+                anchorData: Data("a1".utf8), isFull: false
+            )],
+        ]
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        // Simulate the pre-generation world after a receiver reset: the
+        // binding is gone while progress (a caught-up checkpoint) remains,
+        // and the receiver now reports a new identity.
+        let store = SyncStateStore(directory: tempDirectory)
+        await store.clearReceiverGeneration(destination: endpoint)
+        client.healthResponse.storeGeneration = "00000000-0000-4000-8000-000000000009"
+        engine.disable()
+
+        let result = await enable(engine)
+        XCTAssertEqual(result, .enabled)
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(
+            engine.lastStatusMessage,
+            SyncGenerationReconciler.rebuiltHistoryNotice
+        )
+        // The stale checkpoint was invalidated: the re-bootstrap offered a
+        // nil anchor and re-sent the record (deduped by the receiver).
+        XCTAssertEqual(provider.changeQueries.last?.anchorData, nil)
+        XCTAssertEqual(client.sentChangeBatches.count, 2)
+    }
+
     /// The automatic path of the Build 9 regression: a receiver reset left
     /// a caught-up checkpoint describing a datastore that no longer exists.
     /// The generation gate must invalidate it and re-bootstrap, so the new

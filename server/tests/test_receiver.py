@@ -1333,6 +1333,11 @@ class StoreGenerationTests(ReceiverServerTestCase):
         open(self.db_path, "wb").close()
         self.assertIsNone(store.store_generation())
 
+    def test_store_generation_reports_none_for_foreign_file(self):
+        store = storage.RecordStore(self.db_path)
+        open(self.db_path, "wb").write(b"this is not a sqlite database at all")
+        self.assertIsNone(store.store_generation())
+
 
 class RoutingAndFramingTests(ReceiverServerTestCase):
     def test_unknown_path_is_404(self):
