@@ -3,9 +3,9 @@ import HealthKit
 
 /// Lets exactly one thread claim a HealthKit callback; later invocations of
 /// a long-running query handler are dropped instead of double-resuming a
-/// continuation. Shared with the series fetchers, whose
-/// HKElectrocardiogramQuery reports terminal events from HealthKit's queue
-/// with no ordering guarantee.
+/// continuation. This is defensive for one-shot sample callbacks and for
+/// long-running queries that can report their terminal callback concurrently
+/// with cancellation or cleanup.
 final class ContinuationGuard: @unchecked Sendable {
     private let lock = NSLock()
     private var claimed = false
@@ -217,6 +217,7 @@ final class HealthKitService: HealthDataProviding {
             return []
         }
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[MappedSample], Error>) in
+            let once = ContinuationGuard()
             let query = HKSampleQuery(
                 sampleType: sampleType,
                 predicate: predicate,
@@ -225,6 +226,7 @@ final class HealthKitService: HealthDataProviding {
                     NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: false)
                 ]
             ) { _, samples, error in
+                guard once.claim() else { return }
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
@@ -523,6 +525,8 @@ enum HealthKitServiceError: LocalizedError, Equatable {
     /// A series continuation referenced a sample HealthKit no longer
     /// returns (deleted between the page read and the series fetch).
     case seriesSampleUnavailable(metric: String)
+    /// A long-running ECG series query did not reach a terminal callback.
+    case seriesQueryTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -540,6 +544,8 @@ enum HealthKitServiceError: LocalizedError, Equatable {
             "The \(metric) series could not be read because its loader is not configured."
         case .seriesSampleUnavailable(let metric):
             "A sample of \(metric) disappeared before its series data could be read."
+        case .seriesQueryTimedOut:
+            "Apple Health did not finish reading the ECG series in time."
         }
     }
 

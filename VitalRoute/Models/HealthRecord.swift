@@ -94,7 +94,7 @@ extension HealthRecord {
         switch data {
         case .quantity(let payload):
             if payload.unit == "s" {
-                return "\(Self.minutesLabel(payload.value)) min"
+                return Self.durationLabel(payload.value)
             }
             return "\(payload.value.formatted(.number.precision(.fractionLength(0...1)))) \(payload.unit)"
         case .category(let payload):
@@ -104,7 +104,7 @@ extension HealthRecord {
                 .map { "\($0.value.formatted(.number.precision(.fractionLength(0...1)))) \($0.unit)" }
                 .joined(separator: " / ")
         case .workout(let payload):
-            return "\(Self.humanizedCategoryName(payload.activityType)) · \(Self.minutesLabel(payload.duration)) min"
+            return "\(Self.humanizedCategoryName(payload.activityType)) · \(Self.durationLabel(payload.duration))"
         case .activitySummary(let payload):
             if let minutes = payload.exerciseTimeMinutes {
                 return "\(max(0, Self.clampedInt(minutes))) min exercise"
@@ -126,6 +126,20 @@ extension HealthRecord {
     /// display as zero.
     static func minutesLabel(_ seconds: Double) -> Int {
         max(0, clampedInt(seconds / 60))
+    }
+
+    /// Keep short intervals legible, while representing longer durations in
+    /// minutes. The input is intentionally sanitized here because display
+    /// paths can see unvalidated records (including NaN and infinities).
+    static func durationLabel(_ seconds: Double) -> String {
+        guard !seconds.isNaN, seconds > 0 else { return "0 sec" }
+        if seconds < 60 {
+            return "\(clampedInt(seconds)) sec"
+        }
+        let wholeMinutes = clampedInt(seconds / 60)
+        guard wholeMinutes < Int.max else { return "\(Int.max) min" }
+        let minutes = (seconds / 60).formatted(.number.precision(.fractionLength(0...1)))
+        return "\(minutes) min"
     }
 
     /// The Int init without the trap: values beyond Int's range (including

@@ -504,36 +504,65 @@ final class DisplayValueFormattingTests: XCTestCase {
         )
     }
 
-    func testExtremeFiniteSecondsDoNotTrapAndClamp() {
-        let huge = quantityRecord(value: .greatestFiniteMagnitude, unit: "s")
-        XCTAssertEqual(huge.displayValue, "\(Int.max) min")
-
-        let large = quantityRecord(value: 1e300, unit: "s")
-        XCTAssertEqual(large.displayValue, "\(Int.max) min")
-
-        let negative = quantityRecord(value: -1e300, unit: "s")
-        XCTAssertEqual(negative.displayValue, "0 min")
+    func testQuantitySecondsUseSecondsBelowOneMinuteAndMinutesAfterward() {
+        for (seconds, expected) in [(0.0, "0 sec"), (30, "30 sec"), (59, "59 sec"),
+                                    (60, "1 min"), (90, "1.5 min")] {
+            XCTAssertEqual(quantityRecord(value: seconds, unit: "s").displayValue, expected)
+        }
     }
 
-    func testOrdinarySecondsStillRenderAsMinutes() {
-        let record = quantityRecord(value: 3600, unit: "s")
-        XCTAssertEqual(record.displayValue, "60 min")
+    func testExtremeAndNonFiniteQuantitySecondsDoNotTrap() {
+        for (seconds, expected) in [
+            (Double.greatestFiniteMagnitude, "\(Int.max) min"),
+            (1e300, "\(Int.max) min"),
+            (-1e300, "0 sec"),
+            (Double.nan, "0 sec"),
+            (Double.infinity, "\(Int.max) min"),
+            (-Double.infinity, "0 sec")
+        ] {
+            XCTAssertEqual(quantityRecord(value: seconds, unit: "s").displayValue, expected)
+        }
     }
 
-    func testExtremeFiniteWorkoutDurationDoesNotTrap() {
-        let record = HealthRecord(
-            metric: .steps,
-            startDate: date,
-            endDate: date,
-            data: .workout(WorkoutData(
-                activityType: "running",
-                activityTypeRawValue: 52,
-                duration: 1e300,
-                totalEnergyKilocalories: nil,
-                totalDistanceMeters: nil
-            ))
-        )
-        XCTAssertEqual(record.displayValue, "Running · \(Int.max) min")
+    func testWorkoutDurationsUseSecondsBelowOneMinuteAndMinutesAfterward() {
+        for (seconds, expected) in [(0.0, "Running · 0 sec"), (30, "Running · 30 sec"),
+                                    (59, "Running · 59 sec"), (60, "Running · 1 min"),
+                                    (90, "Running · 1.5 min")] {
+            let record = HealthRecord(
+                metric: .steps,
+                startDate: date,
+                endDate: date,
+                data: .workout(WorkoutData(
+                    activityType: "running", activityTypeRawValue: 52,
+                    duration: seconds, totalEnergyKilocalories: nil, totalDistanceMeters: nil
+                ))
+            )
+            XCTAssertEqual(record.displayValue, expected)
+        }
+    }
+
+    func testExtremeAndNonFiniteWorkoutDurationsDoNotTrap() {
+        for (seconds, expected) in [
+            (1e300, "Running · \(Int.max) min"),
+            (-1e300, "Running · 0 sec"),
+            (Double.nan, "Running · 0 sec"),
+            (Double.infinity, "Running · \(Int.max) min"),
+            (-Double.infinity, "Running · 0 sec")
+        ] {
+            let record = HealthRecord(
+                metric: .steps,
+                startDate: date,
+                endDate: date,
+                data: .workout(WorkoutData(
+                    activityType: "running",
+                    activityTypeRawValue: 52,
+                    duration: seconds,
+                    totalEnergyKilocalories: nil,
+                    totalDistanceMeters: nil
+                ))
+            )
+            XCTAssertEqual(record.displayValue, expected)
+        }
     }
 
     func testExtremeFiniteExerciseMinutesDoNotTrap() {

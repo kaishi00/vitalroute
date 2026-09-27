@@ -167,6 +167,7 @@ final class ManualSyncCoordinator {
     @ObservationIgnored private let client: any DestinationClient
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let stateStore: SyncStateStore
+    @ObservationIgnored private let deliveryByteLimit: Int
     @ObservationIgnored private static let lastSyncStorageKey = "sync.lastSuccessful"
 
     private(set) var phase: SyncPhase = .idle
@@ -185,13 +186,16 @@ final class ManualSyncCoordinator {
         client: any DestinationClient,
         stateStore: SyncStateStore,
         defaults: UserDefaults = .standard,
-        workGate: SyncWorkGate = SyncWorkGate()
+        workGate: SyncWorkGate = SyncWorkGate(),
+        deliveryByteLimit: Int = Outbox.deliveryBatchByteLimit
     ) {
         self.healthData = healthData
         self.client = client
         self.stateStore = stateStore
         self.defaults = defaults
         self.workGate = workGate
+        precondition(deliveryByteLimit > 0)
+        self.deliveryByteLimit = deliveryByteLimit
         lastSuccessfulSync = Self.loadLastSync(from: defaults)
     }
 
@@ -521,7 +525,10 @@ final class ManualSyncCoordinator {
             }
             let batches = sendableRecords
                 .map(SyncChangeEvent.upsert)
-                .batchedForDelivery(maxCount: SyncLimits.recordsPerUploadBatch)
+                .batchedForDelivery(
+                    maxCount: SyncLimits.recordsPerUploadBatch,
+                    byteLimit: deliveryByteLimit
+                )
             summary.batchesPlanned += batches.count
             for batch in batches {
                 try Task.checkCancellation()
@@ -617,14 +624,11 @@ final class ManualSyncCoordinator {
     }
 }
 
-/// Delivery batches bounded by both count and the byte budget, so a
-/// series-chunk-heavy page cannot exceed the receiver's body limit (which
-/// the receiver rejects atomically, and a resumable cursor would then
-/// retry forever). The budget defaults to the single shared
-/// `Outbox.deliveryBatchByteLimit` — the same value the automatic outbox
-/// path batches by — so the two delivery paths cannot drift and tests can
-/// inject a small limit into either. A single element larger than the
-/// whole budget still ships alone — a legal batch of one.
+/// Delivery batches use the shared count and byte limits. The manual path
+/// adds each encoded event's size as a conservative batch estimate, matching
+/// the automatic outbox's additive file-size estimate. A single element
+/// larger than the whole budget still ships alone rather than being dropped
+/// while its page cursor advances.
 extension Array where Element == SyncChangeEvent {
     func batchedForDelivery(
         maxCount: Int,
@@ -636,10 +640,10 @@ extension Array where Element == SyncChangeEvent {
         var batches: [[Element]] = []
         var current: [Element] = []
         var bytes = 0
+
         for element in self {
-            let size = (try? encoder.encode(element))?.count ?? Outbox.unknownFileSizeEstimate
-            if current.count == maxCount
-                || (!current.isEmpty && bytes + size > byteLimit) {
+            let size = (try? encoder.encode(element).count) ?? Outbox.unknownFileSizeEstimate
+            if current.count == maxCount || (!current.isEmpty && bytes + size > byteLimit) {
                 batches.append(current)
                 current = []
                 bytes = 0

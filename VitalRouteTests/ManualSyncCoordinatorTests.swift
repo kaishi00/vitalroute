@@ -46,14 +46,16 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         client: StubDestinationClient,
         defaults: UserDefaults? = nil,
         store: SyncStateStore? = nil,
-        workGate: SyncWorkGate = SyncWorkGate()
+        workGate: SyncWorkGate = SyncWorkGate(),
+        deliveryByteLimit: Int = Outbox.deliveryBatchByteLimit
     ) -> ManualSyncCoordinator {
         ManualSyncCoordinator(
             healthData: provider,
             client: client,
             stateStore: store ?? makeStore(),
             defaults: defaults ?? makeDefaults(),
-            workGate: workGate
+            workGate: workGate,
+            deliveryByteLimit: deliveryByteLimit
         )
     }
 
@@ -304,6 +306,63 @@ final class ManualSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(client.sentBatches[0].first?.sampleID, ids.first.map { record($0).id })
         XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
         XCTAssertEqual(coordinator.lastOutcome?.summary.acceptedRecords, ids.count)
+    }
+
+    @MainActor
+    func testManualBatchesHonorTheConfiguredOutboxByteBudget() async throws {
+        let records = [1, 2, 3].map { index -> HealthRecord in
+            let base = record(index)
+            return HealthRecord(
+                id: base.id,
+                metric: base.metric,
+                startDate: base.startDate,
+                endDate: base.endDate,
+                sourceName: String(repeating: "s", count: RecordWireLimits.maxNameLength),
+                metadata: ["note": String(repeating: "x", count: RecordWireLimits.Metadata.maxValueLength)],
+                data: base.data
+            )
+        }
+        let events = records.map(SyncChangeEvent.upsert)
+        let encoder = JSONEncoder()
+        let batchID = UUID(uuidString: "00000000-0000-4000-8000-000000000000")!
+        let requestDate = Date(timeIntervalSince1970: 0)
+        let byteLimit = try XCTUnwrap(events.map {
+            try ChangeBatchEncoder.encode(
+                batchID: batchID,
+                createdAt: requestDate,
+                changes: [$0]
+            ).count
+        }.max())
+        let eventSizes = try events.map { try encoder.encode($0).count }
+        XCTAssertGreaterThan(eventSizes.sorted().prefix(2).reduce(0, +), byteLimit)
+
+        let provider = StubHealthDataProvider()
+        provider.script[.steps] = [HealthExportPage(
+            records: records, anchorData: Data("budget".utf8), isFull: false
+        )]
+        let client = StubDestinationClient()
+        // The automatic outbox exposes the same immutable setting for its
+        // delivery path; custom configurations can pass this exact value to
+        // both coordinators.
+        let outbox = Outbox(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("manual-budget-\(UUID().uuidString)"),
+            deliveryByteLimit: byteLimit)
+        XCTAssertEqual(outbox.deliveryByteLimit, byteLimit)
+        let coordinator = makeCoordinator(provider: provider, client: client,
+                                          deliveryByteLimit: outbox.deliveryByteLimit)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(client.sentBatches.count, records.count)
+        for batch in client.sentBatches {
+            XCTAssertLessThanOrEqual(try ChangeBatchEncoder.encode(
+                batchID: batchID,
+                createdAt: requestDate,
+                changes: batch
+            ).count, byteLimit)
+        }
     }
 
     @MainActor

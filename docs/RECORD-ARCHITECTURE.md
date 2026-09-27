@@ -110,8 +110,8 @@ database redesign.
 ## Large series
 
 Series data is chunked at the source (`SeriesLimits.pointsPerChunk = 2048`,
-≤ 16 channels). Chunk identity is deterministic — SHA-256 of
-`series:<seriesID>:<chunkIndex>` formatted as a UUID — so retries re-derive
+≤ 16 channels). Chunk identity is deterministic — SHA-256 of the exact seed
+`series:<lowercased uuid>:<index>`, formatted as a UUID — so retries re-derive
 the same records and idempotency holds. Chunk records reference their
 parent via `parentID`; deleting a parent cascades server-side to child
 rows (which are tombstoned too), so orphan cleanup never depends on the

@@ -163,18 +163,17 @@ time as their interval; the receiver's tombstone stores it for audit.
   authorization prompt or capability check can never activate an endpoint or
   selection the user has already replaced.
 - **Observer callback**: the callback returns immediately, but HealthKit's
-  completion handler is held until the triggered work is *durable* — the
-  capture pass has appended its events and advanced its checkpoints — and is
-  released exactly once. Delivery is never allowed to hold it: a parked
-  upload must not delay the answer, and a stalled receiver must not look like
-  a stalled app. If a capture cannot finish inside the coordinator's deadline
-  (25 s) the completion is released anyway, and the next pass resumes from
-  the persisted checkpoint — only the notification is lost, never the data.
-  Overlapping notifications that arrive during capture share the capture
-  that answers them; one that arrives while the pass is delivering is
-  answered when the pass settles, and the changes it signalled are captured
-  by the next pass from the persisted checkpoint. A notification that
-  arrives after teardown is still answered.
+  completion handler is held until the relevant local capture is *durable* —
+  its events have been appended and its checkpoints advanced — and is then
+  released exactly once. Automatic passes capture local changes before
+  receiver identity checks or delivery, so an offline receiver cannot block
+  capture or hold an observer completion after capture settles. If capture
+  cannot finish inside the coordinator's deadline (25 s), the completion is
+  released and the next pass resumes from persisted progress; only the wake
+  is lost, never already-durable data. Notifications already claimed by a
+  capture share that capture; later notifications keep their completions
+  pending until a follow-up capture settles. A notification
+  arriving after teardown is still answered.
 - **Transactional observer lifecycle**: registration is all-or-nothing (a
   partial `enableBackgroundDelivery` failure unwinds what it armed), and
   registration and teardown are serialized and generation-fenced, so a
@@ -183,16 +182,21 @@ time as their interval; the receiver's tombstone stores it for audit.
 - **HealthKit continuations are cancellation-safe** before registration and
   against late callbacks (claim-once guard, as in the existing pager).
 - **Background budget**: `BGTaskScheduler` app-refresh task
-  (`com.milim.vitalroute.sync`) drives retries when events are pending. Its
+  (`com.milim.vitalroute.sync`) drives retries when events are pending or a
+  transient retry deadline is recorded. Its
   expiration handler cancels the in-flight operation; queries and network
   work check cancellation between pages/batches. Registered in the app
   process before finish-launching (project.yml adds `UIBackgroundModes`
   fetch/processing and `BGTaskSchedulerPermittedIdentifiers`).
 - **Retry policy**: persisted consecutive-failure count and next-attempt
   time; exponential backoff 1 min → 2× … capped at 1 day; no busy loops, no
-  unlimited timers. Transient failures (timeouts, unreachable, 5xx) retry.
-  Actionable failures (401/403, unsupported schema/protocol, malformed
-  acknowledgment) pause with a user-visible reason and do not retry.
+  unlimited timers. A recorded transient `nextAttemptAt` schedules a retry
+  even when the outbox is empty: capture can return no new records, but the
+  subsequent receiver identity check can still fail. Transient failures
+  (timeouts, unreachable, 5xx) retry; the persisted deadline and backoff
+  prevent a hot loop. Disabled sync does not retry. Actionable failures
+  (401/403, unsupported schema/protocol, malformed acknowledgment) pause
+  with a user-visible reason and do not retry.
   Locked-device / protected-data-unavailable states defer (no error storm).
 - **Recovery triggers** (documented in-app): HealthKit background delivery
   wake, BGTask retry, app foreground catch-up, manual sync completion.
@@ -242,11 +246,14 @@ directions.
   generation on every pass (see "Datastore identity" below).
 - **Datastore identity**: every delivery-progress file (manual cursors,
   frozen windows, automatic checkpoints) is bound to the receiver's
-  `storeGeneration` as well as the destination URL. The gate runs before
-  any sync work: same generation continues; a different generation (or
-  legacy progress with no remembered generation) invalidates that
-  destination's progress and re-sends the configured history — the
-  receiver dedupes by record id; a receiver that answers without a usable
+  `storeGeneration` as well as the destination URL. Manual sync checks the
+  identity before exporting history; automatic sync captures and durably
+  queues local HealthKit changes before checking identity. Same generation
+  continues; a different generation (or legacy progress with no remembered
+  generation) invalidates destination-bound progress while preserving
+  already-captured v3 outbox events, then arms a catch-up/rebootstrap pass
+  that re-sends the configured history — the receiver dedupes by record id;
+  a receiver that answers without a usable
   identity pauses automatic sync (and fails a manual run) with an
   update-the-receiver remedy. Invalidation is
   atomic-first, binding-commit-last, so a crash can only re-trigger the

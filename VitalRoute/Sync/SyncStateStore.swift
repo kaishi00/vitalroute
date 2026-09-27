@@ -431,12 +431,20 @@ actor SyncStateStore {
     /// authorization. Retry bookkeeping is a single destination-agnostic
     /// file; clearing it here resets the backoff whenever a rebuild happens
     /// (a reset or legacy state), not on the no-op same-generation path.
-    func reconcileGeneration(destination: String, generation: UUID) throws -> GenerationReconciliation {
+    func reconcileGeneration(
+        destination: String, generation: UUID,
+        progressExistedBeforeCapture: Bool? = nil
+    ) throws -> GenerationReconciliation {
         let remembered = loadReceiverGeneration(destination: destination)
         if remembered == generation {
             return .same
         }
-        let hadLegacyProgress = hasDeliveryProgress(destination: destination)
+        // An automatic pass holds the work gate across its local snapshot,
+        // capture, and reconciliation. New checkpoints from that first
+        // capture are not legacy progress and need no redundant bootstrap.
+        // Other callers use the current on-disk progress as before.
+        let hadLegacyProgress = progressExistedBeforeCapture
+            ?? hasDeliveryProgress(destination: destination)
         if remembered != nil || hadLegacyProgress {
             try invalidateDeliveryProgress(destination: destination)
         }
@@ -516,7 +524,8 @@ actor SyncStateStore {
 
 /// A receiver-datastore reconciliation: the outcome of comparing the
 /// receiver's current identity with the generation this device last
-/// synchronized against, performed before any destination-bound sync work.
+/// synchronized against, performed before delivery. Automatic sync first
+/// captures durable local events; manual sync reconciles before exporting.
 struct SyncGenerationCheck: Equatable, Sendable {
     let outcome: GenerationReconciliation
     let storeGeneration: UUID
@@ -541,8 +550,10 @@ enum SyncGenerationReconciliationError: LocalizedError, Equatable {
     }
 }
 
-/// The datastore-generation gate both sync paths run before touching
-/// destination-bound progress. Case semantics live in
+/// The datastore-generation gate both sync paths run before delivery.
+/// Automatic capture can advance local checkpoints first: a changed receiver
+/// invalidates them and arms rebootstrap without discarding queued events.
+/// Case semantics live in
 /// `GenerationReconciliation`; the decision+commit is one actor-isolated
 /// step, and the network call stays outside the store.
 enum SyncGenerationReconciler {
@@ -551,7 +562,8 @@ enum SyncGenerationReconciler {
     static let rebuiltHistoryNotice = "Destination was reset — rebuilding sync history."
 
     /// Checks and reconciles. `knownHealth` lets a caller that just fetched
-    /// the health response (the enable flow's capability check) reuse it.
+    /// the health response inside the work gate reuse it. Never reuse a
+    /// response obtained before waiting for that gate.
     /// Transport failures propagate untouched — a receiver that cannot be
     /// reached is a delivery failure with the usual retry handling, not an
     /// identity problem.
@@ -560,7 +572,8 @@ enum SyncGenerationReconciler {
         client: DestinationClient,
         authorization: DestinationAuthorization,
         stateStore: SyncStateStore,
-        knownHealth: ReceiverHealthResponse? = nil
+        knownHealth: ReceiverHealthResponse? = nil,
+        progressExistedBeforeCapture: Bool? = nil
     ) async throws -> SyncGenerationCheck {
         let health: ReceiverHealthResponse
         if let knownHealth {
@@ -575,7 +588,8 @@ enum SyncGenerationReconciler {
         // reconcileGeneration for the crash-safety ordering contract.
         let outcome = try await stateStore.reconcileGeneration(
             destination: endpoint.absoluteString,
-            generation: generation
+            generation: generation,
+            progressExistedBeforeCapture: progressExistedBeforeCapture
         )
         return SyncGenerationCheck(outcome: outcome, storeGeneration: generation)
     }

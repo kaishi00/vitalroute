@@ -83,7 +83,9 @@ actor Outbox {
     private let directory: URL
     private let protection: FileProtectionType
     private let capacityLimit: Int
-    private let deliveryByteLimit: Int
+    /// Immutable configuration shared with the manual delivery coordinator.
+    /// Actor-independent because the value cannot change after construction.
+    nonisolated let deliveryByteLimit: Int
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var nextSequence: UInt64 = 0
