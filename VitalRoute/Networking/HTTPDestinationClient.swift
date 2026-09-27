@@ -8,6 +8,7 @@ enum DestinationClientError: Error, Equatable, LocalizedError {
     case redirected
     case serverRejected(status: Int)
     case malformedAcknowledgment
+    case malformedHealthResponse
     case requestTimedOut
     case tlsValidationFailed
     case connectionFailed
@@ -29,6 +30,8 @@ enum DestinationClientError: Error, Equatable, LocalizedError {
             "The destination returned an error (HTTP \(status)). No data from this batch was confirmed delivered."
         case .malformedAcknowledgment:
             "The destination acknowledged the batch in an unexpected format, so delivery could not be confirmed."
+        case .malformedHealthResponse:
+            "The destination returned a malformed health response. Check that this URL points to a compatible VitalRoute receiver."
         case .requestTimedOut:
             "The destination did not respond in time."
         case .tlsValidationFailed:
@@ -208,10 +211,10 @@ final class HTTPDestinationClient: DestinationClient {
         do {
             shape = try JSONDecoder().decode(Shape.self, from: data)
         } catch {
-            throw DestinationClientError.invalidResponse
+            throw DestinationClientError.malformedHealthResponse
         }
         guard shape.status == "ok", !shape.service.isEmpty, shape.apiVersion >= 1 else {
-            throw DestinationClientError.invalidResponse
+            throw DestinationClientError.malformedHealthResponse
         }
         return ReceiverHealthResponse(
             status: shape.status,

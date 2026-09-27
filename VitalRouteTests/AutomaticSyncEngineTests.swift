@@ -1135,6 +1135,40 @@ final class AutomaticSyncEngineTests: XCTestCase {
         XCTAssertNil(engine.nextRetryAt, "an actionable pause schedules no retry")
     }
 
+    func testMalformedHealthIdentityAfterCapturePausesWithoutRetryOrLosingEvents() async throws {
+        let provider = ScriptedHealthProvider()
+        let client = ScriptedSyncClient()
+        let engine = makeEngine(provider: provider, client: client)
+        _ = await enable(engine)
+        await engine.waitUntilIdle()
+
+        provider.script = [.steps: [page(additions: [record(92)], anchor: "health-checkpoint")]]
+        provider.resetConsumption()
+        let capturesBefore = provider.changePageAttempts
+        let healthChecksBefore = client.testConnectionCount
+        let scheduled = ReleaseCounter()
+        engine.scheduleBackgroundRetry = { _ in scheduled.increment(); return true }
+        client.failNextConnection(with: .malformedHealthResponse)
+
+        engine.foregroundCatchUp()
+        await engine.waitUntilIdle()
+
+        XCTAssertEqual(engine.mode, .paused(.protocolFailure("the destination returned a malformed health response.")))
+        XCTAssertNil(engine.nextRetryAt, "a malformed identity response is actionable and must not retry")
+        XCTAssertEqual(engine.pendingCount, 1, "the event captured before identity validation remains queued")
+        let retryState = await SyncStateStore(directory: tempDirectory).loadRetryState()
+        XCTAssertTrue(retryState.lastFailureIsActionable)
+        XCTAssertNil(retryState.nextAttemptAt)
+        XCTAssertEqual(scheduled.count, 0, "actionable health failures must not request a background retry")
+        let queued = try await lastOutbox.pendingCount()
+        XCTAssertEqual(queued, 1)
+        XCTAssertEqual(provider.changePageAttempts, capturesBefore + 1)
+        XCTAssertEqual(client.testConnectionCount, healthChecksBefore + 1)
+        XCTAssertEqual(client.sentChangeBatches.count, 0, "delivery cannot precede identity validation")
+        let checkpoint = await SyncStateStore(directory: tempDirectory).loadCheckpoint(for: .steps)
+        XCTAssertEqual(checkpoint?.anchorData, Data("health-checkpoint".utf8))
+    }
+
     func testBackpressureStopsQueriesAndKeepsDraining() async throws {
         let provider = ScriptedHealthProvider()
         let client = ScriptedSyncClient()

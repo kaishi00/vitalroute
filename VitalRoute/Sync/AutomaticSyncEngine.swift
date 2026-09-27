@@ -1714,6 +1714,8 @@ final class AutomaticSyncEngine {
                 return .actionable(.protocolFailure("the destination is not a valid HTTPS endpoint."))
             case .malformedAcknowledgment:
                 return .actionable(.protocolFailure("the destination acknowledged batches in an unexpected format."))
+            case .malformedHealthResponse:
+                return .actionable(.protocolFailure("the destination returned a malformed health response."))
             case .payloadTooLarge:
                 return .actionable(.protocolFailure("the destination rejected the batch size."))
             case .tlsValidationFailed:

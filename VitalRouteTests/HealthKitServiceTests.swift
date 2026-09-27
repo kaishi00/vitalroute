@@ -84,21 +84,18 @@ final class HealthKitServiceTests: XCTestCase {
 
     func testSeriesQueryCoordinatorCancellationBeforeQueryInstallDoesNotStartQuery() async {
         let coordinator = SeriesQueryCoordinator<String, FakeSeriesQuery>()
-        let beforeRun = DispatchSemaphore(value: 0)
-        let continueRun = DispatchSemaphore(value: 0)
+        let gate = AsyncTestGate()
         let query = FakeSeriesQuery()
         let task = Task.detached(priority: .userInitiated) {
-            beforeRun.signal()
-            _ = waitForSignal(continueRun)
+            await gate.wait()
             return try await coordinator.run { operation in
                 XCTAssertFalse(operation.installQuery(query, stop: { $0.record("stop") }))
                 XCTAssertFalse(operation.executeIfActive { $0.record("execute") })
             }
         }
 
-        XCTAssertTrue(waitForSignal(beforeRun))
         task.cancel()
-        continueRun.signal()
+        await gate.open()
         do {
             _ = try await task.value
             XCTFail("Cancellation before query setup should fail the operation")
@@ -112,21 +109,24 @@ final class HealthKitServiceTests: XCTestCase {
 
     func testSeriesQueryCoordinatorCancellationAfterInstallPreventsExecute() async {
         let coordinator = SeriesQueryCoordinator<String, FakeSeriesQuery>()
-        let queryInstalled = DispatchSemaphore(value: 0)
-        let continueStart = DispatchSemaphore(value: 0)
+        let queryInstalled = expectation(description: "query installed")
+        let operationBox = LockedValue<SeriesQueryCoordinator<String, FakeSeriesQuery>>()
         let query = FakeSeriesQuery()
         let task = Task.detached(priority: .userInitiated) {
             try await coordinator.run { operation in
                 XCTAssertTrue(operation.installQuery(query, stop: { $0.record("stop") }))
-                queryInstalled.signal()
-                _ = waitForSignal(continueStart)
-                XCTAssertFalse(operation.executeIfActive { $0.record("execute") })
+                operationBox.set(operation)
+                queryInstalled.fulfill()
             }
         }
 
-        XCTAssertTrue(waitForSignal(queryInstalled))
+        await fulfillment(of: [queryInstalled], timeout: 2)
         task.cancel()
-        continueStart.signal()
+        guard let operation = operationBox.value else {
+            XCTFail("The query operation should be published after installation")
+            return
+        }
+        XCTAssertFalse(operation.executeIfActive { $0.record("execute") })
         do {
             _ = try await task.value
             XCTFail("Cancellation must prevent starting an unsubmitted query")
@@ -140,25 +140,40 @@ final class HealthKitServiceTests: XCTestCase {
 
     func testSeriesQueryCoordinatorDefersStopUntilExecuteReturns() async {
         let coordinator = SeriesQueryCoordinator<String, FakeSeriesQuery>()
-        let executing = DispatchSemaphore(value: 0)
+        let queryInstalled = expectation(description: "query installed")
+        let executing = expectation(description: "execute entered")
+        let executeReturned = expectation(description: "execute returned")
         let returnFromExecute = DispatchSemaphore(value: 0)
         let query = FakeSeriesQuery()
+        let operationBox = LockedValue<SeriesQueryCoordinator<String, FakeSeriesQuery>>()
         let task = Task.detached(priority: .userInitiated) {
             try await coordinator.run { operation in
                 XCTAssertTrue(operation.installQuery(query, stop: { $0.record("stop") }))
-                XCTAssertTrue(operation.executeIfActive { activeQuery in
-                    activeQuery.record("execute-start")
-                    executing.signal()
-                    _ = waitForSignal(returnFromExecute)
-                    activeQuery.record("execute-return")
-                })
+                operationBox.set(operation)
+                queryInstalled.fulfill()
             }
         }
 
-        XCTAssertTrue(waitForSignal(executing))
+        await fulfillment(of: [queryInstalled], timeout: 2)
+        guard let operation = operationBox.value else {
+            XCTFail("The query operation should be published after installation")
+            task.cancel()
+            return
+        }
+        DispatchQueue(label: "SeriesQueryCoordinatorTests.execute").async {
+            _ = operation.executeIfActive { activeQuery in
+                activeQuery.record("execute-start")
+                executing.fulfill()
+                _ = waitForSignal(returnFromExecute)
+                activeQuery.record("execute-return")
+            }
+            executeReturned.fulfill()
+        }
+        await fulfillment(of: [executing], timeout: 2)
         task.cancel()
         XCTAssertEqual(query.events, ["execute-start"], "stop must wait while execute is on the stack")
         returnFromExecute.signal()
+        await fulfillment(of: [executeReturned], timeout: 2)
         do {
             _ = try await task.value
             XCTFail("Cancellation during execute should fail the operation")
@@ -172,41 +187,52 @@ final class HealthKitServiceTests: XCTestCase {
 
     func testSeriesQueryCoordinatorSerializesMeasurementWithTerminalCallback() async throws {
         let coordinator = SeriesQueryCoordinator<Int, FakeSeriesQuery>()
+        let queryReady = expectation(description: "query installed and executed")
         let resultTask = Task.detached(priority: .userInitiated) {
             try await coordinator.run { operation in
+                operation.scheduleTimeout(after: 10_000_000_000)
                 XCTAssertTrue(operation.installQuery(FakeSeriesQuery(), stop: { $0.record("stop") }))
                 XCTAssertTrue(operation.executeIfActive { $0.record("execute") })
+                queryReady.fulfill()
             }
         }
-        let callbackEntered = DispatchSemaphore(value: 0)
+        let callbackEntered = expectation(description: "measurement entered")
         let releaseCallback = DispatchSemaphore(value: 0)
-        let finishEntered = DispatchSemaphore(value: 0)
+        let measurementFinished = expectation(description: "measurement finished")
+        let finishFinished = expectation(description: "terminal callback finished")
+        let finishStarted = expectation(description: "terminal callback started")
         let callbackValues = FakeSeriesQuery()
-        let measurementTask = Task.detached(priority: .userInitiated) {
-            coordinator.performIfActive {
-                callbackEntered.signal()
+        let measurementResult = LockedValue<Bool>()
+        await fulfillment(of: [queryReady], timeout: 2)
+        DispatchQueue(label: "SeriesQueryCoordinatorTests.measurement").async {
+            let accepted = coordinator.performIfActive {
+                callbackEntered.fulfill()
                 _ = waitForSignal(releaseCallback)
                 callbackValues.record("measurement")
             }
+            measurementResult.set(accepted)
+            measurementFinished.fulfill()
         }
 
-        XCTAssertTrue(waitForSignal(callbackEntered))
-        let finishTask = Task.detached(priority: .userInitiated) {
-            finishEntered.signal()
-            return coordinator.finish(result: {
+        await fulfillment(of: [callbackEntered], timeout: 2)
+        let finishResult = LockedValue<Bool>()
+        DispatchQueue(label: "SeriesQueryCoordinatorTests.terminal").async {
+            finishStarted.fulfill()
+            let completed = coordinator.finish(result: {
                 callbackValues.record("done")
                 return .success(callbackValues.events.count)
             })
+            finishResult.set(completed)
+            finishFinished.fulfill()
         }
-        XCTAssertTrue(waitForSignal(finishEntered))
+        await fulfillment(of: [finishStarted], timeout: 2)
         try await Task.sleep(nanoseconds: 10_000_000)
         XCTAssertTrue(callbackValues.events.isEmpty, "Terminal state must wait for an in-flight measurement callback")
 
         releaseCallback.signal()
-        let measurementWasAccepted = await measurementTask.value
-        XCTAssertTrue(measurementWasAccepted)
-        let didFinish = await finishTask.value
-        XCTAssertTrue(didFinish)
+        await fulfillment(of: [measurementFinished, finishFinished], timeout: 2)
+        XCTAssertEqual(measurementResult.value, true)
+        XCTAssertEqual(finishResult.value, true)
         let finalResult = try await resultTask.value
         XCTAssertEqual(finalResult, 2)
         XCTAssertEqual(callbackValues.events, ["measurement", "done"])
@@ -217,6 +243,40 @@ final class HealthKitServiceTests: XCTestCase {
 
 private func waitForSignal(_ semaphore: DispatchSemaphore) -> Bool {
     semaphore.wait(timeout: .now() + 2) == .success
+}
+
+private actor AsyncTestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        let waiting = waiters
+        waiters.removeAll()
+        waiting.forEach { $0.resume() }
+    }
+}
+
+private final class LockedValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Value?
+
+    var value: Value? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+
+    func set(_ value: Value) {
+        lock.lock()
+        defer { lock.unlock() }
+        storedValue = value
+    }
 }
 
 private final class FakeSeriesQuery: @unchecked Sendable {

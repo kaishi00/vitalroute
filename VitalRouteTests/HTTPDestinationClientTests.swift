@@ -460,12 +460,16 @@ final class HTTPDestinationClientTests: XCTestCase {
             )
         }
 
-        await assertThrows(.invalidResponse) {
+        await assertThrows(.malformedHealthResponse) {
             _ = try await client.testConnection(to: self.endpoint, authorization: self.authorization)
         }
     }
 
-    func testMalformedHealthResponseUsesSafeInvalidResponseError() async {
+    func testMalformedHealthResponseUsesDedicatedSafeError() async {
+        XCTAssertEqual(
+            DestinationClientError.malformedHealthResponse.localizedDescription,
+            "The destination returned a malformed health response. Check that this URL points to a compatible VitalRoute receiver."
+        )
         let client = HTTPDestinationClient { request in
             (
                 self.httpData("not-json"),
@@ -473,7 +477,7 @@ final class HTTPDestinationClientTests: XCTestCase {
             )
         }
 
-        await assertThrows(.invalidResponse) {
+        await assertThrows(.malformedHealthResponse) {
             _ = try await client.testConnection(to: self.endpoint, authorization: self.authorization)
         }
     }
