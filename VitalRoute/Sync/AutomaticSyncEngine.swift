@@ -1007,7 +1007,7 @@ final class AutomaticSyncEngine {
         // Transient transport failures propagate (the pass fails into the
         // normal retry path); only a receiver that ANSWERS without a usable
         // identity pauses, with the update-the-receiver remedy.
-        guard let endpoint = URL(string: destination) else {
+        guard let endpoint = URL(string: destination), let token else {
             // Fail closed: this gate exists so identity is never ambiguous.
             // A superseded pass owns no state — the newer decision does.
             guard isCurrent(generation) else { return false }
