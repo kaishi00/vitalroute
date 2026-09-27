@@ -208,10 +208,10 @@ final class HTTPDestinationClient: DestinationClient {
         do {
             shape = try JSONDecoder().decode(Shape.self, from: data)
         } catch {
-            throw DestinationClientError.malformedAcknowledgment
+            throw DestinationClientError.invalidResponse
         }
         guard shape.status == "ok", !shape.service.isEmpty, shape.apiVersion >= 1 else {
-            throw DestinationClientError.malformedAcknowledgment
+            throw DestinationClientError.invalidResponse
         }
         return ReceiverHealthResponse(
             status: shape.status,

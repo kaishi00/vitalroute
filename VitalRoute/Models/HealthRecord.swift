@@ -119,15 +119,6 @@ extension HealthRecord {
         }
     }
 
-    /// Whole minutes for dashboard copy. `Int(Double.self)` traps outside
-    /// Int's range, and display formats are reachable for records that were
-    /// never wire-validated, so an extreme finite value must render clamped
-    /// instead of crashing the view. Negative values are invalid data and
-    /// display as zero.
-    static func minutesLabel(_ seconds: Double) -> Int {
-        max(0, clampedInt(seconds / 60))
-    }
-
     /// Keep short intervals legible, while representing longer durations in
     /// minutes. The input is intentionally sanitized here because display
     /// paths can see unvalidated records (including NaN and infinities).

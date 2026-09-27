@@ -207,26 +207,25 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
     private func loadElectrocardiogram(id: UUID) async throws -> HKElectrocardiogram {
         let type = HKObjectType.electrocardiogramType()
         let predicate = HKQuery.predicateForObjects(with: [id])
-        return try await withCheckedThrowingContinuation { continuation in
-            let once = ContinuationGuard()
+        let coordinator = SeriesQueryCoordinator<HKElectrocardiogram, HKSampleQuery>()
+        return try await coordinator.run { operation in
+            operation.scheduleTimeout(after: Self.queryTimeoutNanoseconds)
             let query = HKSampleQuery(
                 sampleType: type,
                 predicate: predicate,
                 limit: 1,
                 sortDescriptors: nil
             ) { _, samples, error in
-                guard once.claim() else { return }
                 if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                if let ecg = samples?.first as? HKElectrocardiogram {
-                    continuation.resume(returning: ecg)
+                    operation.finish(.failure(error))
+                } else if let ecg = samples?.first as? HKElectrocardiogram {
+                    operation.finish(.success(ecg))
                 } else {
-                    continuation.resume(throwing: HealthKitServiceError.seriesSampleUnavailable(metric: "electrocardiogram"))
+                    operation.finish(.failure(HealthKitServiceError.seriesSampleUnavailable(metric: "electrocardiogram")))
                 }
             }
-            healthStore.execute(query)
+            guard operation.installQuery(query, stop: { self.healthStore.stop($0) }) else { return }
+            _ = operation.executeIfActive { self.healthStore.execute($0) }
         }
     }
 
@@ -263,13 +262,13 @@ struct ECGVoltageSeriesFetcher: SeriesFetching {
                 }
             }
             guard operation.installQuery(query, stop: { self.healthStore.stop($0) }) else { return }
-            operation.executeIfActive { self.healthStore.execute($0) }
+            _ = operation.executeIfActive { self.healthStore.execute($0) }
         }
     }
 
-    /// Bounds a long-running ECG read if HealthKit never reports `.done`.
-    /// Sixty seconds allows large ECG series time to stream on-device while
-    /// ensuring a suspended sync eventually returns control to the caller.
+    /// Bounds each HealthKit query in the ECG fetch: the sample lookup and
+    /// voltage stream each get up to sixty seconds, so the sequential fetch
+    /// can take up to two minutes before returning a timeout to its caller.
     private static let queryTimeoutNanoseconds: UInt64 = 60_000_000_000
 
     private final class MeasurementCollector: @unchecked Sendable {

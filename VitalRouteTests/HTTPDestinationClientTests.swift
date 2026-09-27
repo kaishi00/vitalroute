@@ -460,7 +460,20 @@ final class HTTPDestinationClientTests: XCTestCase {
             )
         }
 
-        await assertThrows(.malformedAcknowledgment) {
+        await assertThrows(.invalidResponse) {
+            _ = try await client.testConnection(to: self.endpoint, authorization: self.authorization)
+        }
+    }
+
+    func testMalformedHealthResponseUsesSafeInvalidResponseError() async {
+        let client = HTTPDestinationClient { request in
+            (
+                self.httpData("not-json"),
+                self.httpResponse(status: 200, url: request.url!)
+            )
+        }
+
+        await assertThrows(.invalidResponse) {
             _ = try await client.testConnection(to: self.endpoint, authorization: self.authorization)
         }
     }

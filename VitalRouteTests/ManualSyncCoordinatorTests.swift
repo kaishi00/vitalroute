@@ -618,6 +618,41 @@ final class ManualSyncCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testVanishedSeriesSampleOnFirstPageRetriesFromWindowStart() async throws {
+        let provider = StubHealthDataProvider()
+        provider.seriesSampleUnavailableOnFirstPageReads = 1
+        provider.script[.steps] = [page([7], anchor: "recovered", full: false)]
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        XCTAssertEqual(coordinator.lastOutcome?.result, .completed)
+        XCTAssertEqual(provider.exportQueries.map(\.sinceAnchor), [nil, nil])
+        XCTAssertEqual(coordinator.lastOutcome?.summary.recordsFound, 1)
+        XCTAssertEqual(client.sentBatches.flatMap { $0 }.count, 1)
+    }
+
+    @MainActor
+    func testPersistentFirstPageSeriesFailureStopsAfterOneRecoveryRetry() async throws {
+        let provider = StubHealthDataProvider()
+        provider.seriesSampleUnavailableEveryRead = true
+        let client = StubDestinationClient()
+        let coordinator = makeCoordinator(provider: provider, client: client)
+
+        coordinator.startSync(endpoint: endpoint, token: token, metrics: [.steps])
+        await waitForCompletion(coordinator)
+
+        guard case .failed = coordinator.lastOutcome?.result else {
+            XCTFail("expected persistent series failure to stop after bounded recovery")
+            return
+        }
+        XCTAssertEqual(provider.exportQueries.map(\.sinceAnchor), [nil, nil])
+        XCTAssertEqual(client.sentBatches.count, 0)
+    }
+
+    @MainActor
     func testNonRecoverablePageErrorPropagatesInsteadOfRecovery() async throws {
         let provider = StubHealthDataProvider()
         // First run completes and leaves a cursor.
@@ -1167,6 +1202,12 @@ private final class StubHealthDataProvider: HealthDataProviding {
     /// (recovery tests): a sample vanished between the page read and its
     /// series fetch.
     var seriesSampleUnavailableForAnchoredRead = false
+    /// A first-page fetch can lose its series parent too; this count scripts
+    /// the transient failure before any cursor exists.
+    var seriesSampleUnavailableOnFirstPageReads = 0
+    /// Repeats the unavailable-series error regardless of anchor, allowing
+    /// the one-retry recovery bound to be pinned.
+    var seriesSampleUnavailableEveryRead = false
     /// When set, a query with a non-nil anchor throws this error even though
     /// recovery cannot help (propagation tests).
     var nonRecoverablePageError: HealthKitServiceError?
@@ -1200,6 +1241,13 @@ private final class StubHealthDataProvider: HealthDataProviding {
         limit: Int
     ) async throws -> HealthExportPage {
         exportQueries.append(RecordedQuery(metric: metric, sinceAnchor: anchorData, windowStart: windowStart))
+        if seriesSampleUnavailableEveryRead {
+            throw HealthKitServiceError.seriesSampleUnavailable(metric: metric.rawValue)
+        }
+        if anchorData == nil, seriesSampleUnavailableOnFirstPageReads > 0 {
+            seriesSampleUnavailableOnFirstPageReads -= 1
+            throw HealthKitServiceError.seriesSampleUnavailable(metric: metric.rawValue)
+        }
         if corruptStoredAnchors, anchorData != nil {
             throw HealthKitServiceError.corruptedAnchor
         }

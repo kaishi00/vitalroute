@@ -461,6 +461,7 @@ final class ManualSyncCoordinator {
             destination: destination, metric: metric, windowStart: windowStart
         )
         var anchorData = savedCursor?.anchorData
+        var retriedSeriesSampleUnavailable = false
 
         for pageRead in 0..<SyncLimits.manualPagesPerMetricRun {
             try Task.checkCancellation()
@@ -478,31 +479,33 @@ final class ManualSyncCoordinator {
                     windowStart: windowStart,
                     limit: SyncLimits.healthQueryPageSize
                 )
-            } catch let error as HealthKitServiceError where anchorData != nil {
+            } catch let error as HealthKitServiceError {
                 switch error {
-                case .corruptedAnchor, .seriesSampleUnavailable:
-                    // The saved cursor is unreadable (drop it and re-read the
-                    // window from its start), or a sample vanished between the
-                    // page read and its series fetch — an anchored re-read no
-                    // longer reports it, and the receiver dedupes everything
-                    // already acknowledged. Without this recovery the category
-                    // would re-read the same doomed page on every sync.
-                    anchorData = nil
-                    do {
-                        try await stateStore.saveManualCursor(ManualExportCursor(
-                            destination: destination,
-                            metric: metric,
-                            windowStart: windowStart,
-                            anchorData: nil,
-                            updatedAt: Date()
-                        ))
-                    } catch {
-                        throw ManualSyncError.progressNotSaved
-                    }
-                    continue
+                case .corruptedAnchor where anchorData != nil:
+                    // Rebuild an unreadable stored cursor from the window start.
+                    break
+                case .seriesSampleUnavailable where !retriedSeriesSampleUnavailable:
+                    // A series parent can disappear on the first page too.
+                    // Retry from the window start once; if that read fails
+                    // again, propagate rather than looping on the same page.
+                    retriedSeriesSampleUnavailable = true
                 default:
                     throw error
                 }
+
+                anchorData = nil
+                do {
+                    try await stateStore.saveManualCursor(ManualExportCursor(
+                        destination: destination,
+                        metric: metric,
+                        windowStart: windowStart,
+                        anchorData: nil,
+                        updatedAt: Date()
+                    ))
+                } catch {
+                    throw ManualSyncError.progressNotSaved
+                }
+                continue
             }
 
             summary.recordsFound += page.records.count
