@@ -632,7 +632,8 @@ final class ReceiverGenerationStoreTests: XCTestCase {
         // Destination A's progress is gone...
         let aCursors = await store.loadManualCursors()
         XCTAssertTrue(aCursors.values.allSatisfy { $0.destination != destinationA })
-        XCTAssertNil(await store.loadCheckpoint(for: .steps))
+        let stepsCheckpoint = await store.loadCheckpoint(for: .steps)
+        XCTAssertNil(stepsCheckpoint)
         let retry = await store.loadRetryState()
         XCTAssertEqual(retry.consecutiveFailures, 0)
         // ...destination B's cursor survives.
