@@ -1323,6 +1323,16 @@ class StoreGenerationTests(ReceiverServerTestCase):
             storage.RecordStore(self.db_path).store_generation(),
         )
 
+    def test_store_generation_reports_none_when_database_file_swapped(self):
+        # A database file replaced by an empty/foreign file AFTER the store
+        # initialized (hot swap while the server runs) must answer with a
+        # null identity - which generation-aware clients treat as "never
+        # synchronized" - instead of an unhandled OperationalError.
+        store = storage.RecordStore(self.db_path)
+        self.assertIsNotNone(store.store_generation())
+        open(self.db_path, "wb").close()
+        self.assertIsNone(store.store_generation())
+
 
 class RoutingAndFramingTests(ReceiverServerTestCase):
     def test_unknown_path_is_404(self):

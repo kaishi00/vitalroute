@@ -71,15 +71,34 @@ struct ManualExportCursor: Codable, Equatable {
     static func key(destination: String, metric: HealthMetric, windowStart: Date) -> String {
         "\(metric.rawValue)|\(Int(windowStart.timeIntervalSince1970))|\(destination)"
     }
+
+    /// The destination component of a minted manual-window key
+    /// (`metric|depth|destination`). `maxSplits` keeps everything after the
+    /// second separator as one component, so this is the exact inverse of
+    /// `key(destination:metric:windowStart:)` for the key's tail.
+    static func destination(fromWindowKey key: String) -> String? {
+        key.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+            .last
+            .map(String.init)
+    }
 }
 
-/// The receiver datastore identity this device last synchronized against,
-/// per destination. When the receiver's current generation differs, every
-/// piece of delivery progress below was earned against a datastore that no
-/// longer exists and must not be trusted.
-struct ReceiverGenerationBinding: Codable, Equatable {
-    let destination: String
-    let storeGeneration: UUID
+/// What a receiver-datastore reconciliation decided. Computed and committed
+/// as ONE actor-isolated step, so concurrent sync paths can never interleave
+/// an invalidation between another reconciliation's decision and its commit.
+enum GenerationReconciliation: Equatable {
+    /// Same datastore as last time: progress stays exactly as it is.
+    case same
+    /// No remembered generation and no legacy progress: a fresh setup
+    /// adopting the receiver's identity.
+    case adopted
+    /// A remembered generation differs: the receiver's datastore was reset,
+    /// replaced, or rolled back, and progress was invalidated.
+    case rebuiltAfterReset
+    /// No remembered generation but pre-generation progress existed: legacy
+    /// state cannot prove compatibility with a generation-aware receiver,
+    /// so it was invalidated and history is re-sent.
+    case rebuiltFromLegacyState
 }
 
 /// Persisted retry/backoff bookkeeping. Counts and timestamps only.
@@ -319,29 +338,27 @@ actor SyncStateStore {
         directory.appendingPathComponent("receiver-generation.json")
     }
 
+    /// Destination -> the datastore generation that destination last
+    /// synchronized with. Keyed by destination so switching between
+    /// destinations and back does not read as "the datastore was reset".
+    /// A legacy single-binding file (or any undecodable content) decodes as
+    /// empty, which degrades to the safe self-healing rebuild.
+    private func loadReceiverGenerationBindings() -> [String: UUID] {
+        guard let data = try? Data(contentsOf: receiverGenerationURL),
+              let bindings = try? decoder.decode([String: UUID].self, from: data) else {
+            return [:]
+        }
+        return bindings
+    }
+
     /// The generation this device last synchronized with for the
     /// destination, or nil when there is none (fresh setup, a cleared
-    /// binding, or a binding written for a different destination).
+    /// binding, or a binding written only for other destinations).
     func loadReceiverGeneration(destination: String) -> UUID? {
-        guard let data = try? Data(contentsOf: receiverGenerationURL),
-              let binding = try? decoder.decode(ReceiverGenerationBinding.self, from: data),
-              binding.destination == destination else {
-            return nil
-        }
-        return binding.storeGeneration
+        loadReceiverGenerationBindings()[destination]
     }
 
-    /// Commits the binding. Crash-safety: this MUST be the last write of a
-    /// reconciliation — a persisted generation means the invalidation that
-    /// preceded it completed, so no crash can leave a new generation
-    /// coexisting with progress earned against the old datastore.
-    func saveReceiverGeneration(_ binding: ReceiverGenerationBinding) throws {
-        try ensurePrepared()
-        let data = try encoder.encode(binding)
-        try atomicWrite(data, to: receiverGenerationURL)
-    }
-
-    /// Forgets the binding (the "Rebuild sync history" action): the next
+    /// Forgets every binding (the "Rebuild sync history" action): the next
     /// reconciliation adopts whatever the receiver reports and, with
     /// progress cleared, re-bootstraps from the configured window.
     func clearReceiverGeneration() {
@@ -358,8 +375,7 @@ actor SyncStateStore {
             return true
         }
         if loadManualWindows().contains(where: { key, _ in
-            key.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
-                .last == Substring(destination)
+            ManualExportCursor.destination(fromWindowKey: key) == destination
         }) {
             return true
         }
@@ -372,21 +388,50 @@ actor SyncStateStore {
         return false
     }
 
-    /// Clears every piece of destination-bound delivery progress:
-    /// manual export cursors and windows, automatic checkpoints, and retry
-    /// bookkeeping. Crash-safety ordering with the generation binding:
-    /// each removal here is an atomic file operation, and the caller writes
-    /// the NEW binding only after this returns — a crash at any point
-    /// leaves the old (or absent) binding in place, so the next pass
-    /// detects the mismatch again and re-runs this idempotently. The
-    /// forbidden state — a committed new generation alongside trusted old
-    /// progress — is therefore unreachable.
+    /// The reconciliation decision and commit, as one actor-isolated,
+    /// non-`async` step: load, compare, invalidate, and commit run to
+    /// completion with no suspension point, so no concurrent reconciliation
+    /// or capture can interleave between this one's decision and its commit.
     ///
-    /// Deliberately untouched: the outbox and its pending scope (queued
-    /// events remain valid HealthKit facts for this destination — queued
-    /// deletions in particular cannot be re-derived from HealthKit, and
-    /// re-read additions dedupe at the receiver), the endpoint, credential,
-    /// metric selection, backfill depth, and HealthKit authorization.
+    /// Crash-safety ordering: the invalidation's removals are atomic file
+    /// operations and the NEW binding is written strictly last. A crash at
+    /// any earlier point leaves the old (or absent) binding in place, and
+    /// the stale-or-absent binding is exactly what re-triggers this
+    /// reconciliation idempotently. The forbidden state - a committed new
+    /// generation coexisting with progress earned against the old
+    /// datastore - is therefore unreachable.
+    ///
+    /// Deliberately untouched by the invalidation: the outbox and its
+    /// pending scope (queued events remain valid HealthKit facts for this
+    /// destination - queued deletions in particular cannot be re-derived
+    /// from HealthKit, and re-read additions dedupe at the receiver), the
+    /// endpoint, credential, metric selection, backfill depth, and HealthKit
+    /// authorization. Retry bookkeeping is a single destination-agnostic
+    /// file; clearing it here resets the backoff for the failing side, which
+    /// only happens when progress actually existed and is being rebuilt.
+    func reconcileGeneration(destination: String, generation: UUID) throws -> GenerationReconciliation {
+        let remembered = loadReceiverGeneration(destination: destination)
+        if remembered == generation {
+            return .same
+        }
+        let hadLegacyProgress = hasDeliveryProgress(destination: destination)
+        if remembered != nil || hadLegacyProgress {
+            try invalidateDeliveryProgress(destination: destination)
+        }
+        try ensurePrepared()
+        var bindings = loadReceiverGenerationBindings()
+        bindings[destination] = generation
+        try atomicWrite(try encoder.encode(bindings), to: receiverGenerationURL)
+        if let remembered {
+            return .rebuiltAfterReset
+        }
+        return hadLegacyProgress ? .rebuiltFromLegacyState : .adopted
+    }
+
+    /// Clears every piece of destination-bound delivery progress: manual
+    /// export cursors and windows, automatic checkpoints, and retry
+    /// bookkeeping. Removal failures throw so the caller's commit (the new
+    /// binding) never proceeds over state it failed to clear.
     func invalidateDeliveryProgress(destination: String) throws {
         try ensurePrepared()
         var cursors = loadManualCursors()
@@ -395,15 +440,14 @@ actor SyncStateStore {
 
         var windows = loadManualWindows()
         windows = windows.filter { key, _ in
-            key.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
-                .last != Substring(destination)
+            ManualExportCursor.destination(fromWindowKey: key) != destination
         }
         try atomicWrite(encoder.encode(windows), to: manualWindowsURL)
 
         for metric in MetricCatalog.metrics.map(\.metric) {
             if let checkpoint = loadCheckpoint(for: metric),
                checkpoint.scope.destination == destination {
-                clearCheckpoint(for: metric)
+                try FileManager.default.removeItem(at: url(for: metric))
             }
         }
         try saveRetryStateThrowing(DeliveryRetryState.initial)
@@ -453,22 +497,7 @@ actor SyncStateStore {
 /// receiver's current identity with the generation this device last
 /// synchronized against, performed before any destination-bound sync work.
 struct SyncGenerationCheck: Equatable {
-    enum Outcome: Equatable {
-        /// Same datastore as last time: progress stays exactly as it is.
-        case same
-        /// No remembered generation and no legacy progress: a fresh setup
-        /// adopting the receiver's identity.
-        case adopted
-        /// A remembered generation differs: the receiver's datastore was
-        /// reset, replaced, or rolled back, and progress was invalidated.
-        case rebuiltAfterReset
-        /// No remembered generation but pre-generation progress existed:
-        /// legacy state cannot prove compatibility with a generation-aware
-        /// receiver, so it was invalidated and history is re-sent.
-        case rebuiltFromLegacyState
-    }
-
-    let outcome: Outcome
+    let outcome: GenerationReconciliation
     let storeGeneration: UUID
 
     /// True when delivery progress was invalidated and the next reads start
@@ -493,8 +522,8 @@ enum SyncGenerationReconciliationError: LocalizedError, Equatable {
 
 /// The datastore-generation gate both sync paths run before touching
 /// destination-bound progress. Case semantics live in
-/// `SyncGenerationCheck.Outcome`; the write ordering is the crash-safety
-/// contract: invalidate first, commit the new binding last.
+/// `GenerationReconciliation`; the decision+commit is one actor-isolated
+/// step, and the network call stays outside the store.
 enum SyncGenerationReconciler {
     /// User-facing copy for a reconciliation that invalidated progress.
     /// Reused by both sync paths so the wording cannot drift.
@@ -521,26 +550,12 @@ enum SyncGenerationReconciler {
         guard let generation = health.canonicalStoreGeneration else {
             throw SyncGenerationReconciliationError.identityUnavailable
         }
-        let destination = endpoint.absoluteString
-
-        let remembered = await stateStore.loadReceiverGeneration(destination: destination)
-        if remembered == generation {
-            return SyncGenerationCheck(outcome: .same, storeGeneration: generation)
-        }
-        let hadLegacyProgress = await stateStore.hasDeliveryProgress(destination: destination)
-        try await stateStore.invalidateDeliveryProgress(destination: destination)
-        // The commit point — see ReceiverGenerationBinding. Everything above
-        // is idempotent under a crash: the stale or absent binding is what
-        // triggers this reconciliation, and it stays stale until here.
-        try await stateStore.saveReceiverGeneration(
-            ReceiverGenerationBinding(destination: destination, storeGeneration: generation)
+        // One actor-isolated step decides and commits; see
+        // reconcileGeneration for the crash-safety ordering contract.
+        let outcome = try await stateStore.reconcileGeneration(
+            destination: endpoint.absoluteString,
+            generation: generation
         )
-        let outcome: SyncGenerationCheck.Outcome
-        if remembered != nil {
-            outcome = .rebuiltAfterReset
-        } else {
-            outcome = hadLegacyProgress ? .rebuiltFromLegacyState : .adopted
-        }
         return SyncGenerationCheck(outcome: outcome, storeGeneration: generation)
     }
 }

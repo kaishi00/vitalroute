@@ -537,18 +537,72 @@ final class ReceiverGenerationStoreTests: XCTestCase {
     @MainActor
     func testBindingRoundTripsAndIsDestinationScoped() async throws {
         let store = SyncStateStore(directory: tempDirectory)
-        let generation = UUID()
-        try await store.saveReceiverGeneration(
-            ReceiverGenerationBinding(destination: destinationA, storeGeneration: generation)
-        )
+        let generationA = UUID()
+        let generationB = UUID()
+        try await store.saveReceiverGeneration(destination: destinationA, storeGeneration: generationA)
         let loaded = await store.loadReceiverGeneration(destination: destinationA)
-        XCTAssertEqual(loaded, generation)
+        XCTAssertEqual(loaded, generationA)
         // A different destination reads as "no remembered generation".
         let other = await store.loadReceiverGeneration(destination: destinationB)
         XCTAssertNil(other)
+        // Syncing destination B must not erase A's binding: switching
+        // destinations and back must not read as "the datastore was reset".
+        try await store.saveReceiverGeneration(destination: destinationB, storeGeneration: generationB)
+        let aAfterB = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertEqual(aAfterB, generationA)
         await store.clearReceiverGeneration()
         let cleared = await store.loadReceiverGeneration(destination: destinationA)
         XCTAssertNil(cleared)
+        let bCleared = await store.loadReceiverGeneration(destination: destinationB)
+        XCTAssertNil(bCleared)
+    }
+
+    @MainActor
+    func testReconcileGenerationImplementsTheStateMachineAtomically() async throws {
+        let store = SyncStateStore(directory: tempDirectory)
+        let first = UUID()
+        let second = UUID()
+
+        // Fresh: no remembered generation, no progress.
+        let adopted = try await store.reconcileGeneration(destination: destinationA, generation: first)
+        XCTAssertEqual(adopted, .adopted)
+
+        // Same generation: no rebuild.
+        let same = try await store.reconcileGeneration(destination: destinationA, generation: first)
+        XCTAssertEqual(same, .same)
+
+        // Legacy: progress exists, the remembered generation is gone.
+        await store.clearReceiverGeneration()
+        try await seedProgress(store, destination: destinationA)
+        let legacy = try await store.reconcileGeneration(destination: destinationA, generation: second)
+        XCTAssertEqual(legacy, .rebuiltFromLegacyState)
+
+        // Reset: a remembered generation differs.
+        let window = Date(timeIntervalSince1970: 1_700_000_000)
+        try await store.saveManualCursor(ManualExportCursor(
+            destination: destinationA, metric: .steps, windowStart: window,
+            anchorData: Data("anchor".utf8), updatedAt: Date()
+        ))
+        let third = UUID()
+        let reset = try await store.reconcileGeneration(destination: destinationA, generation: third)
+        XCTAssertEqual(reset, .rebuiltAfterReset)
+        let cursors = await store.loadManualCursors()
+        XCTAssertTrue(cursors.values.allSatisfy { $0.destination != destinationA })
+    }
+
+    @MainActor
+    func testCorruptGenerationBindingDecodesAsEmptyAndSelfHeals() async throws {
+        let store = SyncStateStore(directory: tempDirectory)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen-store-tests-corrupt")
+            .appendingPathComponent("state")
+            .appendingPathComponent("receiver-generation.json")
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data("{ not json".utf8).write(to: url)
+        let loaded = await store.loadReceiverGeneration(destination: destinationA)
+        XCTAssertNil(loaded, "an undecodable binding must read as none, so the legacy path self-heals")
     }
 
     @MainActor

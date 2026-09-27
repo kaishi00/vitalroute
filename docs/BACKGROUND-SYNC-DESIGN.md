@@ -236,8 +236,20 @@ directions.
 
 - **Capability detection**: `GET` the configured endpoint. A current
   receiver returns `"apiVersion": 3` plus
-  `"capabilities": ["additions", "deletions"]`. The client requires both
-  before automatic sync can be enabled.
+  `"capabilities": ["additions", "deletions"]` and a `storeGeneration`
+  datastore identity. The client requires all of them before automatic
+  sync can be enabled, and both sync paths re-verify the datastore
+  generation on every pass (see "Datastore identity" below).
+- **Datastore identity**: every delivery-progress file (manual cursors,
+  frozen windows, automatic checkpoints) is bound to the receiver's
+  `storeGeneration` as well as the destination URL. The gate runs before
+  any sync work: same generation continues; a different generation (or
+  legacy progress with no remembered generation) invalidates that
+  destination's progress and re-sends the configured history — the
+  receiver dedupes by record id; a receiver that answers without a usable
+  identity pauses with an update-the-receiver remedy. Invalidation is
+  atomic-first, binding-commit-last, so a crash can only re-trigger the
+  reconciliation, never leave new-generation-trusted old progress.
 - **`schemaVersion: 3` body**: `{"schemaVersion": 3, "createdAt", "batchId",
   "changes": [{"kind":"upsert","record":{…envelope…}} | {"kind":"delete",
   "id","metric","startDate","endDate"}]}` — records are envelopes carrying a

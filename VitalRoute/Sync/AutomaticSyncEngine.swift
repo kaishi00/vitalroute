@@ -200,6 +200,10 @@ final class AutomaticSyncEngine {
     /// notice before it was ever read. It is cleared when the user acts —
     /// enabling or disabling automatic sync.
     @ObservationIgnored private var discardedWorkNotice: String?
+    /// Set during enablement when the generation gate rebuilt this
+    /// destination's progress; surfaced at the end of enable, where the
+    /// generic status reset would otherwise swallow it.
+    @ObservationIgnored private var didRebuildAtEnablement = false
     /// Configuration snapshot; never carried across a destination change.
     @ObservationIgnored private var destination = ""
     @ObservationIgnored private var token: String?
@@ -349,6 +353,7 @@ final class AutomaticSyncEngine {
         // means a receiver reset/replacement detected at enablement wipes
         // this destination's progress before any new work is armed, instead
         // of old checkpoints silently suppressing a backfill.
+        didRebuildAtEnablement = false
         let authorization = DestinationAuthorization(bearerToken: trimmedToken)
         let health: ReceiverHealthResponse
         do {
@@ -369,16 +374,22 @@ final class AutomaticSyncEngine {
                 lastStatusMessage = message
                 return .failed(message: message)
             }
-            let check = try await SyncGenerationReconciler.reconcile(
-                endpoint: configuration.endpoint,
-                client: client,
-                authorization: authorization,
-                stateStore: stateStore,
-                knownHealth: health
-            )
-            if check.didRebuild {
-                lastStatusMessage = Self.rebuiltHistoryMessage
+            // Serialized with any in-flight sync work: the reconciliation's
+            // invalidate-and-commit must never interleave with active
+            // cursor/checkpoint writes, or a committed new generation could
+            // coexist with progress the new datastore never received. The
+            // gate can be held for a bounded manual run; the isCurrent check
+            // after it re-validates the decision that waited.
+            let check: SyncGenerationCheck = try await workGate.run { @MainActor in
+                try await SyncGenerationReconciler.reconcile(
+                    endpoint: configuration.endpoint,
+                    client: client,
+                    authorization: authorization,
+                    stateStore: stateStore,
+                    knownHealth: health
+                )
             }
+            didRebuildAtEnablement = check.didRebuild
         } catch let error as SyncGenerationReconciliationError {
             guard isCurrent(generation) else { return superseded("the capability check") }
             lastStatusMessage = error.localizedDescription
@@ -408,11 +419,16 @@ final class AutomaticSyncEngine {
         }
 
         // Registration is the last thing that can fail, so the engine only
-        // reports itself on once the observers are actually armed.
+        // reports itself on once the observers are actually armed. The
+        // enablement pass that follows reconciles as "same" (the binding is
+        // already committed), so this is the only place an enable-time
+        // rebuild notice can reach the user.
         defaults.set(true, forKey: Self.enabledFlagKey)
         mode = .active
         discardedWorkNotice = nil
-        lastStatusMessage = nil
+        lastStatusMessage = didRebuildAtEnablement
+            ? SyncGenerationReconciler.rebuiltHistoryNotice
+            : nil
 
         startPass(trigger: .enablement)
         return .enabled
@@ -984,28 +1000,31 @@ final class AutomaticSyncEngine {
         // Transient transport failures propagate (the pass fails into the
         // normal retry path); only a receiver that ANSWERS without a usable
         // identity pauses, with the update-the-receiver remedy.
-        if let endpoint = URL(string: destination) {
-            do {
-                let check = try await SyncGenerationReconciler.reconcile(
-                    endpoint: endpoint,
-                    client: client,
-                    authorization: DestinationAuthorization(bearerToken: token),
-                    stateStore: stateStore
-                )
-                if check.didRebuild {
-                    guard isCurrent(generation) else { return false }
-                    // Cleared checkpoints make the next reads bootstrap fresh
-                    // scopes; drop the in-memory backfill view so the status
-                    // reflects the restart honestly.
-                    backfillingMetrics.removeAll()
-                    lastStatusMessage = SyncGenerationReconciler.rebuiltHistoryNotice
-                }
-            } catch let error as SyncGenerationReconciliationError {
+        guard let endpoint = URL(string: destination) else {
+            // Fail closed: this gate exists so identity is never ambiguous.
+            mode = .paused(.receiverIncompatible("its destination is not a valid URL"))
+            return false
+        }
+        do {
+            let check = try await SyncGenerationReconciler.reconcile(
+                endpoint: endpoint,
+                client: client,
+                authorization: DestinationAuthorization(bearerToken: token),
+                stateStore: stateStore
+            )
+            if check.didRebuild {
                 guard isCurrent(generation) else { return false }
-                mode = .paused(.receiverIncompatible("it does not report a datastore identity"))
-                lastStatusMessage = error.localizedDescription
-                return false
+                // Cleared checkpoints make the next reads bootstrap fresh
+                // scopes; drop the in-memory backfill view so the status
+                // reflects the restart honestly.
+                backfillingMetrics.removeAll()
+                lastStatusMessage = SyncGenerationReconciler.rebuiltHistoryNotice
             }
+        } catch let error as SyncGenerationReconciliationError {
+            guard isCurrent(generation) else { return false }
+            mode = .paused(.receiverIncompatible("it does not report a datastore identity"))
+            lastStatusMessage = error.localizedDescription
+            return false
         }
 
         // Observers lost to a deferred pause (or a fresh enable whose pass
@@ -1308,7 +1327,11 @@ final class AutomaticSyncEngine {
                 retryState.lastSuccessAt = now()
                 await stateStore.saveRetryState(retryState)
                 nextRetryAt = nil
-                if quarantinedDuringRun == 0 && skippedDuringRun == 0 {
+                if quarantinedDuringRun == 0 && skippedDuringRun == 0,
+                   // A rebuild notice set earlier in this pass explains the
+                   // re-send the user is watching; delivery success must not
+                   // erase it with the (stale) discarded-work bookkeeping.
+                   lastStatusMessage != SyncGenerationReconciler.rebuiltHistoryNotice {
                     lastStatusMessage = discardedWorkNotice
                 }
             } catch let cancellation as CancellationError {

@@ -408,13 +408,22 @@ class RecordStore:
             connection.close()
 
     def store_generation(self):
-        """The persisted datastore identity, or None before first init."""
+        """The persisted datastore identity, or None when unavailable.
+
+        OperationalError is reported as None rather than raised: a database
+        hot-swapped for an empty/foreign file while the server runs must
+        answer the health response with a null identity (which generation-
+        aware clients treat as "never synchronized") instead of crashing.
+        """
         connection = self._connect()
         try:
-            row = connection.execute(
-                "SELECT value FROM schema_info WHERE key = ?",
-                (_STORE_GENERATION_KEY,),
-            ).fetchone()
+            try:
+                row = connection.execute(
+                    "SELECT value FROM schema_info WHERE key = ?",
+                    (_STORE_GENERATION_KEY,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
             return row[0] if row else None
         finally:
             connection.close()

@@ -215,15 +215,22 @@ final class ManualSyncCoordinator {
     /// counterpart of the automatic generation detection, for a receiver
     /// whose datastore changed in a way the generation cannot describe
     /// (it always can — this exists so a user is never waiting on one).
-    /// Returns false when the endpoint is not usable (nothing changed).
+    ///
+    /// Serialized through the shared work gate: an invalidation landing
+    /// between an in-flight pass's reads and its writes would otherwise be
+    /// self-healing but wasteful. Returns false when the endpoint is not
+    /// usable or a sync is in flight (nothing changed).
     func rebuildDestinationHistory(endpoint rawEndpoint: String) async -> Bool {
-        guard let endpoint = URL(string: rawEndpoint), endpoint.scheme == "https" else {
+        guard !isSyncing else { return false }
+        guard let configuration = try? DestinationConfiguration(endpoint: rawEndpoint) else {
             return false
         }
-        let destination = endpoint.absoluteString
+        let destination = configuration.endpoint.absoluteString
         do {
-            try await stateStore.invalidateDeliveryProgress(destination: destination)
-            await stateStore.clearReceiverGeneration()
+            try await workGate.run { @MainActor in
+                try await self.stateStore.invalidateDeliveryProgress(destination: destination)
+                await self.stateStore.clearReceiverGeneration()
+            }
         } catch {
             return false
         }
@@ -588,6 +595,9 @@ final class ManualSyncCoordinator {
         }
         if let configurationError = error as? DestinationConfigurationError {
             return configurationError.localizedDescription
+        }
+        if let reconciliationError = error as? SyncGenerationReconciliationError {
+            return reconciliationError.errorDescription ?? "Sync stopped."
         }
         return "Sync stopped: \(error.localizedDescription)"
     }
