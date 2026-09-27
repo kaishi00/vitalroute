@@ -45,7 +45,7 @@ enum ServerSetup {
     /// contract-v3 draft) predates the fail-closed schema reset, the
     /// unversioned-table boot protection, orphan-chunk suppression, and
     /// the transport-limit hardening, and must never be referenced again.
-    static let compatibleReceiverRef = "d165b5b1247d6c418ef97f24adea439b2ea14132"
+    static let compatibleReceiverRef = "4fdacd375a99811d0793cb75fae8e97675efade6"
 
     /// The URL shape the app expects. The configured endpoint is the exact
     /// ingestion URL; the connection test is `GET` on the same URL.
