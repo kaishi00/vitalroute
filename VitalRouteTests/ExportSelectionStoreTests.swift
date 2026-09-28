@@ -141,9 +141,11 @@ final class ExportSelectionStoreTests: XCTestCase {
         )
 
         XCTAssertTrue(selectedLabel.contains("3 samples"))
+        XCTAssertTrue(selectedLabel.contains("Selected for export"))
         XCTAssertFalse(unselectedLabel.contains("samples"))
         XCTAssertTrue(unselectedLabel.contains("Not selected for export"))
         XCTAssertFalse(selectedZeroLabel.contains("0 samples"))
+        XCTAssertTrue(selectedZeroLabel.contains("Selected for export"))
     }
 
     func testRecentRecordPresentationImmediatelyFiltersDeselectedMetrics() {
@@ -178,6 +180,10 @@ final class ExportSelectionStoreTests: XCTestCase {
         let mindfulSession = try XCTUnwrap(HealthMetric(rawValue: "mindfulSession"))
         XCTAssertFalse(store.selectedMetrics.contains(mindfulSession))
         XCTAssertTrue(MetricCatalog.selectableMetrics.contains { $0.metric.rawValue == "bloodPressure" })
+        let bloodPressureDescription = try XCTUnwrap(MetricCatalog.descriptor(for: .bloodPressure)?.shortDescription)
+        XCTAssertTrue(bloodPressureDescription.contains("Paired systolic/diastolic"))
+        XCTAssertTrue(bloodPressureDescription.contains("Background updates are unverified"))
+        XCTAssertTrue(bloodPressureDescription.contains("reopen the app or use Sync Now"))
         XCTAssertFalse(try XCTUnwrap(MetricCatalog.descriptor(for: .bloodPressureSystolic)).userSelectable)
         XCTAssertFalse(try XCTUnwrap(MetricCatalog.descriptor(for: .bloodPressureDiastolic)).userSelectable)
     }

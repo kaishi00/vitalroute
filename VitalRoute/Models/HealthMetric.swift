@@ -348,7 +348,7 @@ enum MetricCatalog {
         MetricDescriptor(
             metric: HealthMetric(unchecked: "bloodPressure"),
             displayName: "Blood pressure",
-            shortDescription: "Blood pressure correlations",
+            shortDescription: "Paired systolic/diastolic readings. Background updates are unverified; reopen the app or use Sync Now to check.",
             symbolName: "stethoscope",
             group: .vitals,
             healthKitIdentifier: "HKCorrelationTypeIdentifierBloodPressure",

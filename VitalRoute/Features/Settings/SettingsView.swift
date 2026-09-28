@@ -30,7 +30,12 @@ struct SettingsView: View {
             } header: {
                 Text("Automatic sync")
             } footer: {
-                Text("When on, VitalRoute watches the metrics you enabled in Health Data and delivers additions and deletions to your destination, resuming after interruptions. iOS decides when background work actually runs: delivery is throttled, never guaranteed to be immediate, and stops until the next launch if you force-quit the app. Opening the app catches up right away.")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("When on, VitalRoute watches the metrics you enabled in Health Data and delivers additions and deletions to your destination, resuming after interruptions. iOS decides when background work actually runs: delivery is throttled, never guaranteed to be immediate, and stops until the next launch if you force-quit the app. Opening the app catches up right away.")
+                    if selectionStore.selectedMetrics.contains(.bloodPressure) {
+                        Text("With Blood Pressure selected, background updates may not wake VitalRoute. Open the app or tap Sync Now to catch up.")
+                    }
+                }
             }
 
             Section("Sync behavior") {

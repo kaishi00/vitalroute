@@ -63,7 +63,8 @@ struct HealthDataView: View {
     ) -> String {
         let latest = latestRecord.map { "Latest: \($0.displayValue)." } ?? emptyDescription
         let count = isSelected && sampleCount > 0 ? " \(sampleCount) samples." : ""
-        return "Include \(metric.displayName) in export. \(metric.shortDescription). \(latest)\(count)"
+        let selectionState = isSelected ? "Selected for export." : "Not selected for export."
+        return "\(metric.displayName). \(selectionState) \(metric.shortDescription). \(latest)\(count)"
     }
 
     var body: some View {
