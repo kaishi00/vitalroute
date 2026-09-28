@@ -100,6 +100,9 @@ extension HealthRecord {
         case .category(let payload):
             return payload.name.map { Self.humanizedCategoryName($0) } ?? "value \(payload.value)"
         case .correlation(let payload):
+            if metric.rawValue == "bloodPressure" {
+                return Self.bloodPressureDisplayValue(payload.components)
+            }
             return payload.components
                 .map { "\($0.value.formatted(.number.precision(.fractionLength(0...1)))) \($0.unit)" }
                 .joined(separator: " / ")
@@ -116,6 +119,21 @@ extension HealthRecord {
             return Self.humanizedCategoryName(payload.classification)
         case .clinical(let payload):
             return payload.fhirType
+        }
+    }
+
+    private static func bloodPressureDisplayValue(_ components: [CorrelationComponent]) -> String {
+        let systolic = components.first { $0.metric == "bloodPressureSystolic" }
+        let diastolic = components.first { $0.metric == "bloodPressureDiastolic" }
+        switch (systolic, diastolic) {
+        case let (.some(sys), .some(dia)):
+            return "Systolic \(sys.value.formatted(.number.precision(.fractionLength(0...1)))) \(sys.unit) · Diastolic \(dia.value.formatted(.number.precision(.fractionLength(0...1)))) \(dia.unit)"
+        case let (.some(sys), .none):
+            return "Systolic \(sys.value.formatted(.number.precision(.fractionLength(0...1)))) \(sys.unit) · Diastolic unavailable"
+        case let (.none, .some(dia)):
+            return "Systolic unavailable · Diastolic \(dia.value.formatted(.number.precision(.fractionLength(0...1)))) \(dia.unit)"
+        case (.none, .none):
+            return "Blood pressure reading unavailable"
         }
     }
 

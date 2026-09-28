@@ -122,7 +122,7 @@ enum HealthKitRecordMapper {
         case .quantity(let canonicalUnit):
             guard let quantity = sample as? HKQuantitySample else { return nil }
             return MappedSample(record: envelope.record(data: .quantity(QuantityData(
-                value: quantity.quantity.doubleValue(for: canonicalUnit.hkUnit),
+                value: canonicalUnit.wireValue(quantity.quantity.doubleValue(for: canonicalUnit.hkUnit)),
                 unit: canonicalUnit.unitString
             ))))
         case .category(let naming):
@@ -198,6 +198,32 @@ enum HealthKitRecordMapper {
         switch naming {
         case .sleepAnalysis:
             sleepStageName(rawValue)
+        case .appleStandHour:
+            switch HKCategoryValueAppleStandHour(rawValue: rawValue) {
+            case .some(.stood): "stood"
+            case .some(.idle): "idle"
+            case .none: nil
+            @unknown default: nil
+            }
+        case .mindfulSession:
+            rawValue == HKCategoryValue.notApplicable.rawValue ? "mindfulSession" : nil
+        case .heartRateEvent:
+            rawValue == HKCategoryValue.notApplicable.rawValue ? "recorded" : nil
+        case .irregularHeartRhythmEvent:
+            rawValue == HKCategoryValue.notApplicable.rawValue ? "recorded" : nil
+        case .appleWalkingSteadinessEvent:
+            switch HKCategoryValueAppleWalkingSteadinessEvent(rawValue: rawValue) {
+            case .some(.initialLow): "initialLow"
+            case .some(.initialVeryLow): "initialVeryLow"
+            case .some(.repeatLow): "repeatLow"
+            case .some(.repeatVeryLow): "repeatVeryLow"
+            case .none: nil
+            @unknown default: nil
+            }
+        case .environmentalAudioExposureEvent:
+            rawValue == HKCategoryValueEnvironmentalAudioExposureEvent.momentaryLimit.rawValue ? "momentaryLimit" : nil
+        case .headphoneAudioExposureEvent:
+            rawValue == HKCategoryValueHeadphoneAudioExposureEvent.sevenDayLimit.rawValue ? "sevenDayLimit" : nil
         }
     }
 
@@ -237,7 +263,7 @@ enum HealthKitRecordMapper {
             else { continue }
             components.append(CorrelationComponent(
                 metric: metric.rawValue,
-                value: quantitySample.quantity.doubleValue(for: canonicalUnit.hkUnit),
+                value: canonicalUnit.wireValue(quantitySample.quantity.doubleValue(for: canonicalUnit.hkUnit)),
                 unit: canonicalUnit.unitString
             ))
         }
@@ -519,6 +545,10 @@ enum HealthKitRecordMapper {
 }
 
 extension CanonicalUnit {
+    func wireValue(_ value: Double) -> Double {
+        self == .percent ? value * 100 : value
+    }
+
     var hkUnit: HKUnit {
         switch self {
         case .count: .count()
@@ -526,6 +556,16 @@ extension CanonicalUnit {
         case .milliseconds: HKUnit.secondUnit(with: .milli)
         case .kilocalories: .kilocalorie()
         case .millimetersOfMercury: .millimeterOfMercury()
+        case .percent: .percent()
+        case .kilograms: .gramUnit(with: .kilo)
+        case .meters: .meter()
+        case .metersPerSecond: .meter().unitDivided(by: .second())
+        case .degreesCelsius: .degreeCelsius()
+        case .milligramsPerDeciliter: .gramUnit(with: .milli).unitDivided(by: .literUnit(with: .deci))
+        case .millilitersPerKilogramMinute: .literUnit(with: .milli).unitDivided(by: .gramUnit(with: .kilo).unitMultiplied(by: .minute()))
+        case .watts: .watt()
+        case .decibelsAWeightedSPL: .decibelAWeightedSoundPressureLevel()
+        case .minutes: .minute()
         }
     }
 
@@ -538,6 +578,16 @@ extension CanonicalUnit {
         case .milliseconds: "ms"
         case .kilocalories: "kcal"
         case .millimetersOfMercury: "mmHg"
+        case .percent: "%"
+        case .kilograms: "kg"
+        case .meters: "m"
+        case .metersPerSecond: "m/s"
+        case .degreesCelsius: "degC"
+        case .milligramsPerDeciliter: "mg/dL"
+        case .millilitersPerKilogramMinute: "mL/(kg*min)"
+        case .watts: "W"
+        case .decibelsAWeightedSPL: "dBASPL"
+        case .minutes: "min"
         }
     }
 }

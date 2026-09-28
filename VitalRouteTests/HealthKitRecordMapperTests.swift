@@ -7,14 +7,8 @@ final class HealthKitRecordMapperTests: XCTestCase {
 
     // MARK: Type resolution
 
-    func testEverySelectableMetricMapsToItsHealthKitSampleType() throws {
+    func testEveryCatalogMetricResolvesToItsDeclaredHealthKitSampleType() throws {
         for descriptor in MetricCatalog.metrics {
-            if descriptor.metric.rawValue == "bloodPressure" {
-                // Correlation types are not HKSampleTypes resolvable through
-                // the sample-type path in this environment; their components
-                // are what gets authorized.
-                continue
-            }
             let sampleType = try XCTUnwrap(
                 HealthKitRecordMapper.sampleType(for: descriptor),
                 "no sample type for \(descriptor.metric.rawValue)"
@@ -30,6 +24,33 @@ final class HealthKitRecordMapperTests: XCTestCase {
         XCTAssertTrue(identifiers.contains("HKCorrelationTypeIdentifierBloodPressure"))
         XCTAssertTrue(identifiers.contains("HKQuantityTypeIdentifierBloodPressureSystolic"))
         XCTAssertTrue(identifiers.contains("HKQuantityTypeIdentifierBloodPressureDiastolic"))
+        XCTAssertEqual(identifiers.count, 3)
+    }
+
+    func testMixedSelectionProducesExactAuthorizationAndQueryTypeSets() throws {
+        let bloodPressure = try XCTUnwrap(HealthMetric(rawValue: "bloodPressure"))
+        let selection: Set<HealthMetric> = [bloodPressure, .heartRate, .sleep]
+        let expected = Set([
+            "HKCorrelationTypeIdentifierBloodPressure",
+            "HKQuantityTypeIdentifierBloodPressureSystolic",
+            "HKQuantityTypeIdentifierBloodPressureDiastolic",
+            "HKQuantityTypeIdentifierHeartRate",
+            "HKCategoryTypeIdentifierSleepAnalysis",
+        ])
+
+        let authorizationIdentifiers = Set(
+            HealthKitRecordMapper.objectTypes(for: selection).map(\.identifier)
+        )
+        XCTAssertEqual(authorizationIdentifiers, expected)
+
+        let queryIdentifiers = Set(
+            HealthKitRecordMapper.sampleTypes(for: selection).map(\.identifier)
+        )
+        XCTAssertEqual(queryIdentifiers, Set([
+            "HKCorrelationTypeIdentifierBloodPressure",
+            "HKQuantityTypeIdentifierHeartRate",
+            "HKCategoryTypeIdentifierSleepAnalysis",
+        ]))
     }
 
     // MARK: Quantity
@@ -65,6 +86,40 @@ final class HealthKitRecordMapperTests: XCTestCase {
         }
     }
 
+    func testEnvironmentalAudioEventUsesHealthKitsActualRawIdentifier() throws {
+        let metric = try XCTUnwrap(HealthMetric(rawValue: "environmentalAudioExposureEvent"))
+        XCTAssertEqual(metric.descriptor.healthKitIdentifier, HKCategoryTypeIdentifier.environmentalAudioExposureEvent.rawValue)
+    }
+
+    func testNewQuantityUnitsAndPercentageScalingMapRealSamples() throws {
+        let glucoseUnit = HKUnit.gramUnit(with: .milli).unitDivided(by: .literUnit(with: .deci))
+        let vo2Unit = HKUnit.literUnit(with: .milli).unitDivided(by: HKUnit.gramUnit(with: .kilo).unitMultiplied(by: .minute()))
+        let countPerSecond = HKUnit.count().unitDivided(by: .second())
+        let cases: [(String, HKUnit, Double, Double, String)] = [
+            ("bodyFatPercentage", .percent(), 0.42, 42, "%"),
+            ("oxygenSaturation", .percent(), 0.98, 98, "%"),
+            ("bloodGlucose", glucoseUnit, 105, 105, "mg/dL"),
+            ("vo2Max", vo2Unit, 42.5, 42.5, "mL/(kg*min)"),
+            ("bodyMass", .gramUnit(with: .kilo), 72.4, 72.4, "kg"),
+            ("height", .meter(), 1.72, 1.72, "m"),
+            ("walkingSpeed", .meter().unitDivided(by: .second()), 1.1, 1.1, "m/s"),
+            ("bodyTemperature", .degreeCelsius(), 36.7, 36.7, "degC"),
+            ("runningPower", .watt(), 240, 240, "W"),
+            ("environmentalAudioExposure", .decibelAWeightedSoundPressureLevel(), 78, 78, "dBASPL"),
+            ("appleExerciseTime", .minute(), 35, 35, "min"),
+            ("respiratoryRate", countPerSecond, 0.25, 15, "count/min"),
+        ]
+        for (raw, unit, value, expected, expectedUnit) in cases {
+            let metric = try XCTUnwrap(HealthMetric(rawValue: raw))
+            let type = try XCTUnwrap(HealthKitRecordMapper.sampleType(for: metric.descriptor) as? HKQuantityType)
+            let sample = HKQuantitySample(type: type, quantity: HKQuantity(unit: unit, doubleValue: value), start: date, end: date.addingTimeInterval(1))
+            let record = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: sample, metric: metric)?.record)
+            guard case .quantity(let payload) = record.data else { return XCTFail("expected quantity payload") }
+            XCTAssertEqual(payload.value, expected, accuracy: 0.001)
+            XCTAssertEqual(payload.unit, expectedUnit)
+        }
+    }
+
     // MARK: Category
 
     func testConvertsSleepSampleToNamedCategoryRecord() throws {
@@ -92,6 +147,34 @@ final class HealthKitRecordMapperTests: XCTestCase {
         // values, so the unmappable stage path is exercised on the naming
         // function directly.
         XCTAssertNil(HealthKitRecordMapper.categoryName(999, naming: .sleepAnalysis))
+    }
+
+    func testNamedCategoryCatalogUsesKnownNamesAndNilForUnknownValues() throws {
+        let nameStrategies: [(String, HKCategoryTypeIdentifier, CategoryNaming, Int, String, String)] = [
+            ("appleStandHour", .appleStandHour, .appleStandHour, HKCategoryValueAppleStandHour.stood.rawValue, "stood", "Stood"),
+            ("mindfulSession", .mindfulSession, .mindfulSession, HKCategoryValue.notApplicable.rawValue, "mindfulSession", "Mindful session"),
+            ("highHeartRateEvent", .highHeartRateEvent, .heartRateEvent, HKCategoryValue.notApplicable.rawValue, "recorded", "Recorded"),
+            ("irregularHeartRhythmEvent", .irregularHeartRhythmEvent, .irregularHeartRhythmEvent, HKCategoryValue.notApplicable.rawValue, "recorded", "Recorded"),
+            ("appleWalkingSteadinessEvent", .appleWalkingSteadinessEvent, .appleWalkingSteadinessEvent, HKCategoryValueAppleWalkingSteadinessEvent.initialLow.rawValue, "initialLow", "Initial low"),
+            ("environmentalAudioExposureEvent", .environmentalAudioExposureEvent, .environmentalAudioExposureEvent, HKCategoryValueEnvironmentalAudioExposureEvent.momentaryLimit.rawValue, "momentaryLimit", "Momentary limit"),
+            ("headphoneAudioExposureEvent", .headphoneAudioExposureEvent, .headphoneAudioExposureEvent, HKCategoryValueHeadphoneAudioExposureEvent.sevenDayLimit.rawValue, "sevenDayLimit", "Seven day limit"),
+        ]
+        for (raw, identifier, naming, value, expectedName, expectedDisplayValue) in nameStrategies {
+            let metric = try XCTUnwrap(HealthMetric(rawValue: raw))
+            let type = try XCTUnwrap(HKObjectType.categoryType(forIdentifier: identifier))
+            let sample = HKCategorySample(type: type, value: value, start: date, end: date)
+            let record = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: sample, metric: metric)?.record)
+            guard case .category(let payload) = record.data else { return XCTFail("expected category payload") }
+            XCTAssertEqual(payload.name, expectedName)
+            XCTAssertEqual(record.displayValue, expectedDisplayValue)
+            XCTAssertNil(HealthKitRecordMapper.categoryName(999, naming: naming))
+        }
+        let low = try XCTUnwrap(HKObjectType.categoryType(forIdentifier: .lowHeartRateEvent))
+        let lowSample = HKCategorySample(type: low, value: HKCategoryValue.notApplicable.rawValue, start: date, end: date)
+        let lowRecord = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: lowSample, metric: HealthMetric(rawValue: "lowHeartRateEvent")!)?.record)
+        guard case .category(let lowPayload) = lowRecord.data else { return XCTFail("expected category payload") }
+        XCTAssertEqual(lowPayload.name, "recorded")
+        XCTAssertEqual(lowRecord.displayValue, "Recorded")
     }
 
     // MARK: Correlation

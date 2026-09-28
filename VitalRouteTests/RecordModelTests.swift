@@ -103,6 +103,33 @@ final class RecordModelTests: XCTestCase {
         XCTAssertEqual(decoded, original)
     }
 
+    func testBloodPressureDisplayUsesSystolicThenDiastolicLabelsRegardlessOfStorageOrder() {
+        let pressure = HealthRecord(
+            metric: .bloodPressure,
+            startDate: date,
+            endDate: date,
+            data: .correlation(CorrelationData(components: [
+                CorrelationComponent(metric: "bloodPressureDiastolic", value: 78, unit: "mmHg"),
+                CorrelationComponent(metric: "bloodPressureSystolic", value: 122, unit: "mmHg"),
+            ]))
+        )
+
+        XCTAssertEqual(pressure.displayValue, "Systolic 122 mmHg · Diastolic 78 mmHg")
+    }
+
+    func testIncompleteBloodPressureCorrelationDisplaysUnavailableComponentSafely() {
+        let pressure = HealthRecord(
+            metric: .bloodPressure,
+            startDate: date,
+            endDate: date,
+            data: .correlation(CorrelationData(components: [
+                CorrelationComponent(metric: "bloodPressureDiastolic", value: 78, unit: "mmHg"),
+            ]))
+        )
+
+        XCTAssertEqual(pressure.displayValue, "Systolic unavailable · Diastolic 78 mmHg")
+    }
+
     func testWorkoutRecordRoundTrips() throws {
         let original = record(
             metric: .workouts,

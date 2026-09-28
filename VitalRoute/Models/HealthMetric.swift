@@ -83,11 +83,28 @@ enum CanonicalUnit: String, Hashable, Sendable {
     case milliseconds
     case kilocalories
     case millimetersOfMercury
+    case percent
+    case kilograms
+    case meters
+    case metersPerSecond
+    case degreesCelsius
+    case milligramsPerDeciliter
+    case millilitersPerKilogramMinute
+    case watts
+    case decibelsAWeightedSPL
+    case minutes
 }
 
 /// How a category sample's raw value becomes a stable value name.
 enum CategoryNaming: String, Hashable, Sendable {
     case sleepAnalysis
+    case appleStandHour
+    case mindfulSession
+    case heartRateEvent
+    case irregularHeartRhythmEvent
+    case appleWalkingSteadinessEvent
+    case environmentalAudioExposureEvent
+    case headphoneAudioExposureEvent
 }
 
 /// How a metric's HealthKit samples become records. The mapper switches on
@@ -118,9 +135,14 @@ enum ExtractionPlan: Hashable, Sendable {
 struct MetricDescriptor: Hashable, Identifiable, Sendable {
     /// UI grouping for the Health Data screen.
     enum Group: String, CaseIterable, Sendable {
-        case vitals
-        case sleep
         case activity
+        case heart
+        case vitals
+        case mobility
+        case body
+        case sleep
+        case hearing
+        case mindfulness
     }
 
     let metric: HealthMetric
@@ -179,6 +201,14 @@ struct MetricDescriptor: Hashable, Identifiable, Sendable {
 /// app can represent. The iOS client owns this catalog — the receiver
 /// deliberately does not duplicate it.
 enum MetricCatalog {
+    private static func quantity(_ raw: String, _ name: String, _ detail: String, _ symbol: String, _ group: MetricDescriptor.Group, _ identifier: String, _ unit: CanonicalUnit) -> MetricDescriptor {
+        MetricDescriptor(metric: HealthMetric(unchecked: raw), displayName: name, shortDescription: detail, symbolName: symbol, group: group, healthKitIdentifier: identifier, extraction: .quantity(canonicalUnit: unit))
+    }
+
+    private static func category(_ raw: String, _ name: String, _ detail: String, _ symbol: String, _ group: MetricDescriptor.Group, _ identifier: String, _ naming: CategoryNaming) -> MetricDescriptor {
+        MetricDescriptor(metric: HealthMetric(unchecked: raw), displayName: name, shortDescription: detail, symbolName: symbol, group: group, healthKitIdentifier: identifier, extraction: .category(naming: naming))
+    }
+
     static let metrics: [MetricDescriptor] = [
         MetricDescriptor(
             metric: HealthMetric(unchecked: "steps"),
@@ -194,7 +224,7 @@ enum MetricCatalog {
             displayName: "Heart rate",
             shortDescription: "Heart rate samples",
             symbolName: "heart",
-            group: .vitals,
+            group: .heart,
             healthKitIdentifier: "HKQuantityTypeIdentifierHeartRate",
             extraction: .quantity(canonicalUnit: .countPerMinute)
         ),
@@ -203,7 +233,7 @@ enum MetricCatalog {
             displayName: "Resting heart rate",
             shortDescription: "Resting heart rate samples",
             symbolName: "heart",
-            group: .vitals,
+            group: .heart,
             healthKitIdentifier: "HKQuantityTypeIdentifierRestingHeartRate",
             extraction: .quantity(canonicalUnit: .countPerMinute)
         ),
@@ -212,7 +242,7 @@ enum MetricCatalog {
             displayName: "Heart rate variability",
             shortDescription: "SDNN measurements",
             symbolName: "waveform.path.ecg",
-            group: .vitals,
+            group: .heart,
             healthKitIdentifier: "HKQuantityTypeIdentifierHeartRateVariabilitySDNN",
             extraction: .quantity(canonicalUnit: .milliseconds)
         ),
@@ -243,11 +273,57 @@ enum MetricCatalog {
             healthKitIdentifier: "HKWorkoutTypeIdentifier",
             extraction: .workout
         ),
+        quantity("walkingHeartRateAverage", "Walking heart rate average", "Average heart rate while walking", "figure.walk", .heart, "HKQuantityTypeIdentifierWalkingHeartRateAverage", .countPerMinute),
+        quantity("heartRateRecoveryOneMinute", "Heart rate recovery", "Heart rate decrease after one minute", "heart", .heart, "HKQuantityTypeIdentifierHeartRateRecoveryOneMinute", .countPerMinute),
+        quantity("vo2Max", "VO₂ max", "Cardiorespiratory fitness estimate", "lungs", .heart, "HKQuantityTypeIdentifierVO2Max", .millilitersPerKilogramMinute),
+        quantity("atrialFibrillationBurden", "Atrial fibrillation burden", "Time in atrial fibrillation", "waveform.path.ecg", .heart, "HKQuantityTypeIdentifierAtrialFibrillationBurden", .percent),
+        quantity("oxygenSaturation", "Oxygen saturation", "Blood oxygen saturation", "lungs", .vitals, "HKQuantityTypeIdentifierOxygenSaturation", .percent),
+        quantity("respiratoryRate", "Respiratory rate", "Breaths per minute", "wind", .vitals, "HKQuantityTypeIdentifierRespiratoryRate", .countPerMinute),
+        quantity("bodyTemperature", "Body temperature", "Body temperature measurement", "thermometer.medium", .vitals, "HKQuantityTypeIdentifierBodyTemperature", .degreesCelsius),
+        quantity("bloodGlucose", "Blood glucose", "Blood glucose concentration", "drop", .vitals, "HKQuantityTypeIdentifierBloodGlucose", .milligramsPerDeciliter),
+        quantity("appleSleepingWristTemperature", "Wrist temperature", "Temperature while sleeping", "thermometer.medium", .sleep, "HKQuantityTypeIdentifierAppleSleepingWristTemperature", .degreesCelsius),
+        quantity("bodyMass", "Body mass", "Body weight measurement", "scalemass", .body, "HKQuantityTypeIdentifierBodyMass", .kilograms),
+        quantity("bodyFatPercentage", "Body fat percentage", "Proportion of body mass that is fat", "percent", .body, "HKQuantityTypeIdentifierBodyFatPercentage", .percent),
+        quantity("leanBodyMass", "Lean body mass", "Body mass excluding fat", "figure.stand", .body, "HKQuantityTypeIdentifierLeanBodyMass", .kilograms),
+        quantity("bodyMassIndex", "Body mass index", "Body mass index measurement", "figure.stand", .body, "HKQuantityTypeIdentifierBodyMassIndex", .count),
+        quantity("height", "Height", "Height measurement", "ruler", .body, "HKQuantityTypeIdentifierHeight", .meters),
+        quantity("waistCircumference", "Waist circumference", "Waist circumference measurement", "ruler", .body, "HKQuantityTypeIdentifierWaistCircumference", .meters),
+        quantity("flightsClimbed", "Flights climbed", "Flights of stairs climbed", "stairs", .activity, "HKQuantityTypeIdentifierFlightsClimbed", .count),
+        quantity("distanceWalkingRunning", "Walking and running distance", "Distance walked or run", "figure.walk", .activity, "HKQuantityTypeIdentifierDistanceWalkingRunning", .meters),
+        quantity("distanceCycling", "Cycling distance", "Distance cycled", "bicycle", .activity, "HKQuantityTypeIdentifierDistanceCycling", .meters),
+        quantity("distanceSwimming", "Swimming distance", "Distance swum", "figure.pool.swim", .activity, "HKQuantityTypeIdentifierDistanceSwimming", .meters),
+        quantity("appleExerciseTime", "Exercise time", "Minutes spent exercising", "figure.run", .activity, "HKQuantityTypeIdentifierAppleExerciseTime", .minutes),
+        quantity("appleStandTime", "Stand time", "Minutes spent standing", "figure.stand", .activity, "HKQuantityTypeIdentifierAppleStandTime", .minutes),
+        quantity("basalEnergyBurned", "Basal energy", "Energy used at rest", "flame", .activity, "HKQuantityTypeIdentifierBasalEnergyBurned", .kilocalories),
+        quantity("runningPower", "Running power", "Power while running", "figure.run", .activity, "HKQuantityTypeIdentifierRunningPower", .watts),
+        quantity("runningSpeed", "Running speed", "Speed while running", "figure.run", .activity, "HKQuantityTypeIdentifierRunningSpeed", .metersPerSecond),
+        quantity("cyclingPower", "Cycling power", "Power while cycling", "bicycle", .activity, "HKQuantityTypeIdentifierCyclingPower", .watts),
+        quantity("cyclingSpeed", "Cycling speed", "Speed while cycling", "bicycle", .activity, "HKQuantityTypeIdentifierCyclingSpeed", .metersPerSecond),
+        quantity("cyclingCadence", "Cycling cadence", "Pedal revolutions per minute", "bicycle", .activity, "HKQuantityTypeIdentifierCyclingCadence", .countPerMinute),
+        quantity("distanceWheelchair", "Wheelchair distance", "Distance traveled in a wheelchair", "figure.roll", .activity, "HKQuantityTypeIdentifierDistanceWheelchair", .meters),
+        quantity("pushCount", "Wheelchair pushes", "Wheelchair push count", "figure.roll", .activity, "HKQuantityTypeIdentifierPushCount", .count),
+        quantity("walkingSpeed", "Walking speed", "Walking speed measurement", "figure.walk", .mobility, "HKQuantityTypeIdentifierWalkingSpeed", .metersPerSecond),
+        quantity("walkingStepLength", "Walking step length", "Length of walking steps", "figure.walk", .mobility, "HKQuantityTypeIdentifierWalkingStepLength", .meters),
+        quantity("walkingAsymmetryPercentage", "Walking asymmetry", "Percentage of asymmetric steps", "figure.walk", .mobility, "HKQuantityTypeIdentifierWalkingAsymmetryPercentage", .percent),
+        quantity("walkingDoubleSupportPercentage", "Walking double support", "Percentage of gait cycle with both feet down", "figure.walk", .mobility, "HKQuantityTypeIdentifierWalkingDoubleSupportPercentage", .percent),
+        quantity("stairAscentSpeed", "Stair ascent speed", "Speed ascending stairs", "figure.stairs", .mobility, "HKQuantityTypeIdentifierStairAscentSpeed", .metersPerSecond),
+        quantity("stairDescentSpeed", "Stair descent speed", "Speed descending stairs", "figure.stairs", .mobility, "HKQuantityTypeIdentifierStairDescentSpeed", .metersPerSecond),
+        quantity("sixMinuteWalkTestDistance", "Six-minute walk distance", "Distance in a six-minute walk test", "figure.walk", .mobility, "HKQuantityTypeIdentifierSixMinuteWalkTestDistance", .meters),
+        quantity("appleWalkingSteadiness", "Walking steadiness", "Walking steadiness estimate", "figure.walk", .mobility, "HKQuantityTypeIdentifierAppleWalkingSteadiness", .percent),
+        quantity("environmentalAudioExposure", "Environmental audio exposure", "Environmental sound level", "ear", .hearing, "HKQuantityTypeIdentifierEnvironmentalAudioExposure", .decibelsAWeightedSPL),
+        quantity("headphoneAudioExposure", "Headphone audio exposure", "Headphone sound level", "headphones", .hearing, "HKQuantityTypeIdentifierHeadphoneAudioExposure", .decibelsAWeightedSPL),
+        category("appleStandHour", "Stand hour", "Hourly stand goal status", "figure.stand", .activity, "HKCategoryTypeIdentifierAppleStandHour", .appleStandHour),
+        category("mindfulSession", "Mindful session", "Mindfulness session intervals", "brain.head.profile", .mindfulness, "HKCategoryTypeIdentifierMindfulSession", .mindfulSession),
+        category("highHeartRateEvent", "High heart rate event", "High heart rate notifications", "heart", .heart, "HKCategoryTypeIdentifierHighHeartRateEvent", .heartRateEvent),
+        category("lowHeartRateEvent", "Low heart rate event", "Low heart rate notifications", "heart", .heart, "HKCategoryTypeIdentifierLowHeartRateEvent", .heartRateEvent),
+        category("irregularHeartRhythmEvent", "Irregular rhythm event", "Irregular heart rhythm notifications", "waveform.path.ecg", .heart, "HKCategoryTypeIdentifierIrregularHeartRhythmEvent", .irregularHeartRhythmEvent),
+        category("appleWalkingSteadinessEvent", "Walking steadiness event", "Walking steadiness notifications", "figure.walk", .mobility, "HKCategoryTypeIdentifierAppleWalkingSteadinessEvent", .appleWalkingSteadinessEvent),
+        // The current HealthKit case retains its pre-rename raw identifier.
+        category("environmentalAudioExposureEvent", "Environmental audio event", "Environmental sound exposure events", "ear", .hearing, "HKCategoryTypeIdentifierAudioExposureEvent", .environmentalAudioExposureEvent),
+        category("headphoneAudioExposureEvent", "Headphone audio event", "Headphone sound exposure events", "headphones", .hearing, "HKCategoryTypeIdentifierHeadphoneAudioExposureEvent", .headphoneAudioExposureEvent),
         // Correlation plumbing: blood pressure's components are real
         // quantity metrics referenced by correlation records, but they are
         // never selected or exported on their own (userSelectable: false).
-        // A visible bloodPressure metric is future catalog work; the record
-        // shape and mapper already carry it.
         MetricDescriptor(
             metric: HealthMetric(unchecked: "bloodPressureSystolic"),
             displayName: "Blood pressure (systolic)",
@@ -280,7 +356,7 @@ enum MetricCatalog {
                 "HKQuantityTypeIdentifierBloodPressureSystolic",
                 "HKQuantityTypeIdentifierBloodPressureDiastolic",
             ],
-            userSelectable: false
+            userSelectable: true
         ),
     ]
 
