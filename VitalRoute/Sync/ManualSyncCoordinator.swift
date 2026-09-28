@@ -264,7 +264,7 @@ final class ManualSyncCoordinator {
             }
             let configuration = try DestinationConfiguration(endpoint: endpoint)
             guard !metrics.isEmpty else {
-                recordPreflightFailure("Select at least one category in Health Data before syncing.")
+                recordPreflightFailure("Select at least one metric in Health Data before syncing.")
                 return
             }
             plan = SyncPlan(

@@ -13,7 +13,7 @@ struct SettingsView: View {
         List {
             Section("Privacy") {
                 Label("No analytics or advertising", systemImage: "hand.raised")
-                Text("Sync sends only the categories you enable, only to the destination you configure — manually when you tap Sync Now, automatically only if you turn automatic sync on.")
+                Text("Sync sends only the metrics you enable, only to the destination you configure — manually when you tap Sync Now, automatically only if you turn automatic sync on.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Text("VitalRoute requests read access only. It does not write to Apple Health.")
@@ -30,12 +30,17 @@ struct SettingsView: View {
             } header: {
                 Text("Automatic sync")
             } footer: {
-                Text("When on, VitalRoute watches the categories you enabled in Health Data and delivers additions and deletions to your destination, resuming after interruptions. iOS decides when background work actually runs: delivery is throttled, never guaranteed to be immediate, and stops until the next launch if you force-quit the app. Opening the app catches up right away.")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("When on, VitalRoute watches the metrics you enabled in Health Data and delivers additions and deletions to your destination, resuming after interruptions. iOS decides when background work actually runs: delivery is throttled, never guaranteed to be immediate, and stops until the next launch if you force-quit the app. Opening the app catches up right away.")
+                    if selectionStore.selectedMetrics.contains(.bloodPressure) {
+                        Text("With Blood Pressure selected, background updates may not wake VitalRoute. Open the app or tap Sync Now to catch up.")
+                    }
+                }
             }
 
             Section("Sync behavior") {
                 Label("Manual sync", systemImage: "arrow.triangle.2.circlepath")
-                Text("Sync Now reads the configured history (currently \(backfillStore.depth.label.lowercased())) for the selected categories and uploads it in batches over HTTPS. It works with or without automatic sync.")
+                Text("Sync Now reads the configured history (currently \(backfillStore.depth.label.lowercased())) for the selected metrics and uploads it in batches over HTTPS. It works with or without automatic sync.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -81,7 +86,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            // Prerequisites gate *enabling* only. A user whose categories were
+            // Prerequisites gate *enabling* only. A user whose metrics were
             // cleared, or whose API key was removed, must still be able to
             // turn automatic sync off.
             .disabled(isTogglingAutomaticSync || (!autoSyncEngine.isEnabled && !prerequisitesSatisfied))
@@ -139,9 +144,9 @@ struct SettingsView: View {
 
     private var historyFooter: String {
         if backfillStore.depth == .allRecords {
-            return "Every record in Apple Health is included the first time a category syncs. The initial backfill can be very large; it runs in resumable chunks that continue across syncs until caught up."
+            return "Every record in Apple Health is included the first time a metric syncs. The initial backfill can be very large; it runs in resumable chunks that continue across syncs until caught up."
         }
-        return "How far back the first sync of a category reaches. From then on, every change is captured going forward regardless of this setting. Choosing a deeper history re-syncs a fresh window that reaches further back; a shallower choice never discards what was already captured."
+        return "How far back the first sync of a metric reaches. From then on, every change is captured going forward regardless of this setting. Choosing a deeper history re-syncs a fresh window that reaches further back; a shallower choice never discards what was already captured."
     }
 
     private var modeDescription: String {

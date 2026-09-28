@@ -2,13 +2,20 @@ import XCTest
 @testable import VitalRoute
 
 final class HealthMetricTests: XCTestCase {
-    func testCatalogContainsTheSevenSelectableMetrics() {
+    func testCatalogContainsTheFiftyFiveSelectableMetrics() {
         let selectable = MetricCatalog.selectableMetrics.map(\.metric.rawValue)
         XCTAssertEqual(Set(selectable), Set([
             "steps", "heartRate", "restingHeartRate", "heartRateVariability",
-            "sleep", "activeEnergy", "workouts",
+            "sleep", "activeEnergy", "workouts", "bloodPressure",
+            "walkingHeartRateAverage", "heartRateRecoveryOneMinute", "vo2Max", "atrialFibrillationBurden",
+            "oxygenSaturation", "respiratoryRate", "bodyTemperature", "bloodGlucose", "appleSleepingWristTemperature",
+            "bodyMass", "bodyFatPercentage", "leanBodyMass", "bodyMassIndex", "height", "waistCircumference",
+            "flightsClimbed", "distanceWalkingRunning", "distanceCycling", "distanceSwimming", "appleExerciseTime", "appleStandTime", "basalEnergyBurned",
+            "runningPower", "runningSpeed", "cyclingPower", "cyclingSpeed", "cyclingCadence", "distanceWheelchair", "pushCount",
+            "walkingSpeed", "walkingStepLength", "walkingAsymmetryPercentage", "walkingDoubleSupportPercentage", "stairAscentSpeed", "stairDescentSpeed", "sixMinuteWalkTestDistance", "appleWalkingSteadiness",
+            "environmentalAudioExposure", "headphoneAudioExposure", "appleStandHour", "mindfulSession", "highHeartRateEvent", "lowHeartRateEvent", "irregularHeartRhythmEvent", "appleWalkingSteadinessEvent", "environmentalAudioExposureEvent", "headphoneAudioExposureEvent",
         ]))
-        XCTAssertEqual(selectable.count, 7, "no duplicate selectable identifiers")
+        XCTAssertEqual(selectable.count, 55, "no duplicate selectable identifiers")
     }
 
     func testEveryDescriptorDeclaresAUniqueHealthKitIdentifier() {
@@ -16,12 +23,24 @@ final class HealthMetricTests: XCTestCase {
         XCTAssertEqual(Set(identifiers).count, identifiers.count)
     }
 
-    func testComponentMetricsAreNotUserSelectable() {
-        for rawValue in ["bloodPressureSystolic", "bloodPressureDiastolic", "bloodPressure"] {
+    func testCatalogGroupsUseAllEightSectionsAndKeepHeartMetricsTogether() {
+        XCTAssertEqual(Set(MetricDescriptor.Group.allCases.map(\.rawValue)), Set([
+            "activity", "heart", "vitals", "mobility", "body", "sleep", "hearing", "mindfulness",
+        ]))
+        for metric in [HealthMetric.heartRate, .restingHeartRate, .heartRateVariability] {
+            XCTAssertEqual(metric.group, .heart)
+        }
+        XCTAssertEqual(MetricCatalog.selectableMetrics.count, 55)
+    }
+
+    func testComponentMetricsAreNotUserSelectable() throws {
+        for rawValue in ["bloodPressureSystolic", "bloodPressureDiastolic"] {
             let metric = try? XCTUnwrap(HealthMetric(rawValue: rawValue))
             XCTAssertNotNil(metric, "\(rawValue) should be in the catalog")
             XCTAssertFalse(metric?.descriptor.userSelectable ?? true)
         }
+        let bloodPressure = try XCTUnwrap(HealthMetric(rawValue: "bloodPressure"))
+        XCTAssertTrue(bloodPressure.descriptor.userSelectable)
     }
 
     func testDescriptorRecordKindsMatchExtractionPlans() {
@@ -54,7 +73,7 @@ final class HealthMetricTests: XCTestCase {
             MetricCatalog.metric(withHealthKitIdentifier: "HKQuantityTypeIdentifierStepCount"),
             .steps
         )
-        XCTAssertNil(MetricCatalog.metric(withHealthKitIdentifier: "HKQuantityTypeIdentifierBodyMass"))
+        XCTAssertEqual(MetricCatalog.metric(withHealthKitIdentifier: "HKQuantityTypeIdentifierBodyMass"), HealthMetric(rawValue: "bodyMass"))
     }
 
     func testMetricDecodingRejectsIdentifiersOutsideTheCatalog() throws {

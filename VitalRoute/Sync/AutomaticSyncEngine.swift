@@ -35,7 +35,7 @@ enum AutomaticSyncPauseReason: Equatable {
         case .credentialMissing:
             "Automatic sync is paused: add the API key for this destination."
         case .selectionEmpty:
-            "Automatic sync is paused: enable at least one category in Health Data."
+            "Automatic sync is paused: select at least one metric in Health Data."
         case .receiverIncompatible(let detail):
             "Automatic sync is paused: the destination is not compatible (\(detail)). Update the receiver, then turn automatic sync off and on again."
         case .queueAtCapacity:
@@ -374,7 +374,7 @@ final class AutomaticSyncEngine {
         do {
             guard isCurrent(generation) else { return superseded("the capability check") }
             guard health.supportsDeletions else {
-                let message = "The destination receiver does not support deletions (contract v3). Update it to a v3 receiver, then try again. Manual sync keeps working."
+                let message = "The destination receiver does not support deletions (contract v3). Automatic Sync requires a v3 receiver with deletion support; update it, then try again."
                 lastStatusMessage = message
                 return .failed(message: message)
             }
@@ -420,7 +420,7 @@ final class AutomaticSyncEngine {
             return .failed(message: error.localizedDescription)
         } catch AutomaticSyncEnableError.deletionsUnsupported {
             guard isCurrent(generation) else { return superseded("the capability check") }
-            let message = "The destination receiver does not support deletions (contract v3). Update it to a v3 receiver, then try again. Manual sync keeps working."
+            let message = "The destination receiver does not support deletions (contract v3). Automatic Sync requires a v3 receiver with deletion support; update it, then try again."
             lastStatusMessage = message
             return .failed(message: message)
         } catch {

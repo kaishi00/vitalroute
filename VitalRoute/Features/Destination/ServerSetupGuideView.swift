@@ -81,7 +81,7 @@ struct ServerSetupGuideView: View {
     private var overview: some View {
         section("What VitalRoute does") {
             paragraph(
-                "VitalRoute sends the Apple Health categories you choose from your iPhone to a server you trust — usually one you run yourself. Nothing is sent anywhere until you configure a destination and start a sync, and the app itself never shares data with any other service."
+                "VitalRoute sends only the Apple Health metrics you select to a server you trust — usually one you run yourself. Data is sent when you start a manual sync or enable Automatic Sync; while Automatic Sync is on, selection changes can trigger catch-up delivery. The app never shares data with any other service."
             )
         }
     }
@@ -104,7 +104,7 @@ struct ServerSetupGuideView: View {
                     Text("Test Connection")
                         .font(.headline)
                     paragraph(
-                        "The “Test connection” button on the Destination screen checks that the endpoint is reachable, that its HTTPS certificate is valid, and that your API token is accepted. It is a single read-only request: it never sends or returns health records. It succeeds on both older (v1) and current receivers — turning on Automatic Sync separately requires the current contract (v2, with additions and deletions), and that check happens when you enable it."
+                        "The “Test connection” button on the Destination screen checks that the endpoint is reachable, that its HTTPS certificate is valid, and that your API token is accepted. It is a single read-only request: it never sends or returns health records. It succeeds on both older (v1) and current receivers — turning on Automatic Sync separately requires the current contract (v3, with additions and deletions), and that check happens when you enable it."
                     )
                 }
 
@@ -112,12 +112,12 @@ struct ServerSetupGuideView: View {
                     Text("After connecting")
                         .font(.headline)
                     bullets([
-                        "Health Data tab: choose which categories may be exported.",
+                        "Health Data tab: choose which metrics may be exported.",
                         "Overview tab: use “Sync now” for a manual sync whenever you like.",
                         "Settings tab: turn on Automatic Sync to let the app deliver new records in the background.",
                     ])
                     paragraph(
-                        "Automatic sync runs when iOS grants background time, so delivery times vary — it is not a fixed schedule. Manual sync works even with a receiver that only supports the older v1 contract; automatic sync needs v2."
+                        "Automatic sync runs when iOS grants background time, so delivery times vary — it is not a fixed schedule. Both manual and automatic sync require the current v3 contract; Automatic Sync also requires deletion support."
                     )
                 }
             }

@@ -1,7 +1,7 @@
 # VitalRoute record architecture (contract v3)
 
-This document describes the health-record model introduced before any
-broad HealthKit metric expansion: a common record **envelope** plus a
+This document describes the health-record model and expanded HealthKit
+metric catalog: a common record **envelope** plus a
 strongly typed **data payload**, a static client-side **metric catalog**,
 and a chunked strategy for **large series**. The wire contract lives in
 `server/API.md`; the reliability machinery that moves these records lives
@@ -101,11 +101,11 @@ they stay invisible to selection and export.
 - Clinical records decode `HKFHIRResource.data` into `FHIRJSON` —
   structure preserved, never stringified.
 
-The current visible catalog is deliberately unchanged (the seven
-selectable metrics). The model, wire format, receiver validation, and
-extraction seams already carry the families above; expanding the catalog
-is descriptor + (for series kinds) loader wiring, not another protocol or
-database redesign.
+The catalog now exposes 55 selectable metrics. The model, wire format,
+receiver validation, and extraction seams carry the families above; adding
+ordinary metrics uses descriptor entries, while a new structural extraction
+path still requires its plan and query adapter. Neither requires another
+protocol or database redesign.
 
 ## Large series
 

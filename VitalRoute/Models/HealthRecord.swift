@@ -87,19 +87,25 @@ struct HealthRecord: Codable, Equatable, Identifiable, Sendable {
 }
 
 extension HealthRecord {
-    /// A short, human-readable summary for dashboards. Formatting lives on
-    /// the payload kind — never on the metric — so new metrics of an
-    /// existing kind display correctly with zero UI work.
+    /// A short, human-readable summary for dashboards. Formatting generally
+    /// follows the payload kind; blood pressure correlations use metric
+    /// identity to label their systolic and diastolic components.
     var displayValue: String {
         switch data {
         case .quantity(let payload):
             if payload.unit == "s" {
                 return Self.durationLabel(payload.value)
             }
+            if payload.unit == "1" {
+                return payload.value.formatted(.number.precision(.fractionLength(0...1)))
+            }
             return "\(payload.value.formatted(.number.precision(.fractionLength(0...1)))) \(payload.unit)"
         case .category(let payload):
             return payload.name.map { Self.humanizedCategoryName($0) } ?? "value \(payload.value)"
         case .correlation(let payload):
+            if metric.rawValue == HealthMetric.bloodPressure.rawValue {
+                return Self.bloodPressureDisplayValue(payload.components)
+            }
             return payload.components
                 .map { "\($0.value.formatted(.number.precision(.fractionLength(0...1)))) \($0.unit)" }
                 .joined(separator: " / ")
@@ -116,6 +122,21 @@ extension HealthRecord {
             return Self.humanizedCategoryName(payload.classification)
         case .clinical(let payload):
             return payload.fhirType
+        }
+    }
+
+    private static func bloodPressureDisplayValue(_ components: [CorrelationComponent]) -> String {
+        let systolic = components.first { $0.metric == HealthMetric.bloodPressureSystolic.rawValue }
+        let diastolic = components.first { $0.metric == HealthMetric.bloodPressureDiastolic.rawValue }
+        switch (systolic, diastolic) {
+        case let (.some(sys), .some(dia)):
+            return "Systolic \(sys.value.formatted(.number.precision(.fractionLength(0...1)))) \(sys.unit) · Diastolic \(dia.value.formatted(.number.precision(.fractionLength(0...1)))) \(dia.unit)"
+        case let (.some(sys), .none):
+            return "Systolic \(sys.value.formatted(.number.precision(.fractionLength(0...1)))) \(sys.unit) · Diastolic unavailable"
+        case let (.none, .some(dia)):
+            return "Systolic unavailable · Diastolic \(dia.value.formatted(.number.precision(.fractionLength(0...1)))) \(dia.unit)"
+        case (.none, .none):
+            return "Blood pressure reading unavailable"
         }
     }
 

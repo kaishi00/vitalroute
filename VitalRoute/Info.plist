@@ -27,9 +27,9 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSHealthShareUsageDescription</key>
-	<string>VitalRoute reads only the Apple Health categories shown in Health Data so you can route recent records to a destination you control.</string>
+	<string>VitalRoute reads only the Apple Health metrics you select in Health Data so you can route recent records to a destination you control.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>VitalRoute reads the Apple Health categories you choose to route recent records to a destination you control, and never writes to Apple Health.</string>
+	<string>VitalRoute reads the Apple Health metrics you choose to route recent records to a destination you control, and never writes to Apple Health.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>

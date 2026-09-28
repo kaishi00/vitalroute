@@ -481,7 +481,7 @@ final class HealthKitService: HealthDataProviding {
         guard isAvailable else {
             throw HealthKitServiceError.unavailable
         }
-        let sampleTypes = HealthKitRecordMapper.sampleTypes(for: metrics)
+        let sampleTypes = HealthKitRecordMapper.observerSampleTypes(for: metrics)
         try await observers.start(for: sampleTypes, handler: handler)
     }
 
@@ -535,7 +535,7 @@ enum HealthKitServiceError: LocalizedError, Equatable {
         case .authorizationFailed:
             "Apple Health authorization could not be completed. Grant access in Settings > Health and try again."
         case .noMetricsRequested:
-            "Select at least one category in Health Data first."
+            "Select at least one metric in Health Data first."
         case .corruptedAnchor:
             "The stored synchronization checkpoint is unreadable; it will be rebuilt from the initial window."
         case .registrationSuperseded:

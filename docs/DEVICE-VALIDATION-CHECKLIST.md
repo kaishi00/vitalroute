@@ -15,9 +15,9 @@ relying on automatic sync for real data, validate on a physical iPhone:
    fails on iOS 15+ and observer-driven background work silently never
    arrives.
 1. **Authorization prompt path** — first enable of automatic sync in the
-   foreground shows the HealthKit permission sheet for exactly the selected
-   categories; granting produces a successful bootstrap (Settings shows a
-   last delivery).
+   foreground shows the HealthKit permission sheet for the data types needed
+   by the selected metrics; granting produces a successful bootstrap
+   (Settings shows a last delivery).
 2. **Watch-written samples** — with the app in the background, record
    samples from a paired Apple Watch (workout, heart-rate, steps). Confirm
    the observer wake captures and delivers them (Settings → last check /
@@ -44,9 +44,29 @@ relying on automatic sync for real data, validate on a physical iPhone:
    discarded with a notice and only newly captured data reaches the new
    endpoint. Repeat with the app force-quit between the destination change
    and the relaunch.
-10. **Turn-off while degraded** — clear the category selection (or remove
+10. **Turn-off while degraded** — clear the metric selection (or remove
    the API key) while automatic sync is on, then confirm the Settings toggle
    can still be turned **off**.
+11. **Blood-pressure correlation background delivery** — run both scenarios
+    below on a physical iPhone with a source that writes actual blood-pressure
+    correlation samples (not standalone systolic/diastolic quantities):
+    - **Blood pressure only:** select only Blood pressure, enable Automatic
+      Sync, and confirm observer registration succeeds. While the app is in
+      the background, add a blood-pressure correlation and verify that the
+      receiver gets the correlation record with its components. Delete that
+      sample in Health and verify the deletion reaches the receiver. Add
+      another correlation while the app is not running, relaunch it, and
+      verify foreground catch-up delivers the missed change.
+    - **Mixed metrics:** select Blood pressure and a non-correlation metric
+      such as heart rate. Confirm both register successfully; then add samples
+      from their respective sources while the app is in the background. Verify
+      the non-correlation metric continues to wake and deliver, and check
+      whether blood-pressure correlations are captured and delivered as above.
+
+    A successful systolic/diastolic quantity observer registration does not
+    prove that a correlation-contained blood-pressure sample triggers that
+    observer. Component-observer wake behavior for correlation samples remains
+    unproven until these physical-device checks pass.
 
 Limitation statement: until this checklist is executed on hardware,
 background-delivery behavior (throttling frequency, wake reliability,

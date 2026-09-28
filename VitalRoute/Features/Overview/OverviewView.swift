@@ -68,7 +68,7 @@ struct OverviewView: View {
                     .accessibilityHidden(true)
             }
 
-            Text("VitalRoute requests read-only access to the categories you enable in Health Data. Apple keeps read permission private, so an empty result can mean there is no recent data or access was not granted.")
+            Text("VitalRoute requests read-only access to the metrics you select in Health Data. Apple keeps read permission private, so an empty result can mean there is no recent data or access was not granted.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -195,7 +195,7 @@ struct OverviewView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text("Syncing sends every record found in the window for the selected categories — not just the preview above — in batches of \(SyncLimits.recordsPerUploadBatch). It only happens when you tap Sync Now; saving settings or opening the app never uploads data. Retrying is safe: the receiver keeps one copy of each record.")
+            Text("Syncing sends every record found in the window for selected metrics — not just the preview above — in batches of \(SyncLimits.recordsPerUploadBatch). Manual sync starts when you tap Sync Now. When automatic sync is enabled, changes to selected metrics can also trigger uploads, and new records may upload when Apple Health wakes VitalRoute. Retrying is safe: the receiver keeps one copy of each record.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -235,13 +235,13 @@ struct OverviewView: View {
                 Text("The latest health-data query did not complete.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-            } else if model.recentRecords.isEmpty {
-                Text("No recent samples were returned for the selected categories. Apple Health does not reveal whether read access was declined or no data is available.")
+            } else if selectedRecentRecords.isEmpty {
+                Text("No recent samples are available for the selected metrics. Refresh recent data to update this preview. Apple Health does not reveal whether read access was declined or no data is available.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                ForEach(model.recentRecords.prefix(3)) { record in
+                ForEach(selectedRecentRecords.prefix(3)) { record in
                     HStack(spacing: 12) {
                         Image(systemName: record.metric.symbolName)
                             .foregroundStyle(.teal)
@@ -269,6 +269,13 @@ struct OverviewView: View {
     }
 
     // MARK: Derived state
+
+    private var selectedRecentRecords: [HealthRecord] {
+        HealthDataView.recordsForSelectedMetrics(
+            model.recentRecords,
+            selectedMetrics: selectionStore.selectedMetrics
+        )
+    }
 
     private var automaticSyncSummary: String {
         let pending = autoSyncEngine.pendingCount > 0
@@ -349,9 +356,9 @@ struct OverviewView: View {
             return "Add the API key for this destination to enable syncing."
         }
         if !selectionStore.hasSelection {
-            return "Enable at least one category in Health Data to sync."
+            return "Select at least one metric in Health Data to sync."
         }
-        return "Sends \(backfillStore.depth == .allRecords ? "all records" : "the \(backfillStore.depth.label.lowercased())") for \(selectionStore.selectedMetrics.count) selected categor\(selectionStore.selectedMetrics.count == 1 ? "y" : "ies") to your destination."
+        return "Sends \(backfillStore.depth == .allRecords ? "all records" : "the \(backfillStore.depth.label.lowercased())") for \(selectionStore.selectedMetrics.count) selected metric\(selectionStore.selectedMetrics.count == 1 ? "" : "s") to your destination."
     }
 
     private var syncProgressText: String {
@@ -361,7 +368,7 @@ struct OverviewView: View {
         case .authorizing:
             return "Confirming Apple Health access…"
         case .readingHealthData:
-            return "Reading \(backfillStore.depth == .allRecords ? "all records" : "the \(backfillStore.depth.label.lowercased())") of selected categories…"
+            return "Reading \(backfillStore.depth == .allRecords ? "all records" : "the \(backfillStore.depth.label.lowercased())") for selected metrics…"
         case .uploading(let batch, let totalBatches):
             // totalBatches is 0 while pages stream (the total is unknown).
             let scope = totalBatches > 0 ? "batch \(batch) of \(totalBatches)" : "batch \(batch)"
@@ -379,7 +386,7 @@ struct OverviewView: View {
                 ? "Destination was reset — rebuilding sync history. "
                 : ""
             if outcome.summary.recordsFound == 0 {
-                return rebuild + "Sync finished: no records were found in the window for the selected categories. Nothing was sent."
+                return rebuild + "Sync finished: no records were found in the window for the selected metrics. Nothing was sent."
             }
             let skipped = outcome.summary.skippedRecords > 0
                 ? " \(outcome.summary.skippedRecords) record(s) were skipped because they exceed the destination's size limits."

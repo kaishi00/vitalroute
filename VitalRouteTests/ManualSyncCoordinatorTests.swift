@@ -989,7 +989,7 @@ final class ManualSyncCoordinatorTests: XCTestCase {
             XCTFail("expected failure outcome")
             return
         }
-        XCTAssertTrue(message.contains("category"))
+        XCTAssertTrue(message.contains("metric"))
         XCTAssertEqual(provider.authorizationCount, 0)
     }
 
