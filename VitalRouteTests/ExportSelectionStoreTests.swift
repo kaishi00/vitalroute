@@ -144,6 +144,7 @@ final class ExportSelectionStoreTests: XCTestCase {
         XCTAssertTrue(selectedLabel.contains("Selected for export"))
         XCTAssertFalse(unselectedLabel.contains("samples"))
         XCTAssertTrue(unselectedLabel.contains("Not selected for export"))
+        XCTAssertEqual(unselectedLabel.components(separatedBy: "Not selected for export").count - 1, 1)
         XCTAssertFalse(selectedZeroLabel.contains("0 samples"))
         XCTAssertTrue(selectedZeroLabel.contains("Selected for export"))
     }
