@@ -68,7 +68,7 @@ struct DestinationView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The next sync re-sends the selected categories' configured history to the destination. The receiver keeps one copy of each record, so nothing is duplicated. Your endpoint, API key, and selection are kept.")
+            Text("The next sync re-sends the selected metrics' configured history to the destination. The receiver keeps one copy of each record, so nothing is duplicated. Your endpoint, API key, and selection are kept.")
         }
         .onAppear {
             enterEditingIfUnconfigured()

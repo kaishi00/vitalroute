@@ -15,9 +15,9 @@ relying on automatic sync for real data, validate on a physical iPhone:
    fails on iOS 15+ and observer-driven background work silently never
    arrives.
 1. **Authorization prompt path** — first enable of automatic sync in the
-   foreground shows the HealthKit permission sheet for exactly the selected
-   categories; granting produces a successful bootstrap (Settings shows a
-   last delivery).
+   foreground shows the HealthKit permission sheet for the data types needed
+   by the selected metrics; granting produces a successful bootstrap
+   (Settings shows a last delivery).
 2. **Watch-written samples** — with the app in the background, record
    samples from a paired Apple Watch (workout, heart-rate, steps). Confirm
    the observer wake captures and delivers them (Settings → last check /
@@ -44,7 +44,7 @@ relying on automatic sync for real data, validate on a physical iPhone:
    discarded with a notice and only newly captured data reaches the new
    endpoint. Repeat with the app force-quit between the destination change
    and the relaunch.
-10. **Turn-off while degraded** — clear the category selection (or remove
+10. **Turn-off while degraded** — clear the metric selection (or remove
    the API key) while automatic sync is on, then confirm the Settings toggle
    can still be turned **off**.
 

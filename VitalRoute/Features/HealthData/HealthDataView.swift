@@ -38,12 +38,14 @@ struct HealthDataView: View {
         Self.groupedDescriptors(query: searchText)[group] ?? []
     }
 
-    private func descriptionText(for metric: HealthMetric) -> String {
-        metric.shortDescription
-    }
-
-    private func accessibleMetricLabel(_ metric: HealthMetric) -> String {
-        "Include \(metric.displayName) in export. \(descriptionText(for: metric))"
+    private func accessibleMetricLabel(
+        for metric: HealthMetric,
+        latestRecord: HealthRecord?,
+        sampleCount: Int,
+        emptyDescription: String
+    ) -> String {
+        let latest = latestRecord.map { "Latest: \($0.displayValue)." } ?? emptyDescription
+        return "Include \(metric.displayName) in export. \(metric.shortDescription). \(latest) \(sampleCount) samples."
     }
 
     var body: some View {
@@ -123,7 +125,9 @@ struct HealthDataView: View {
         if model.isLoadingHealthData {
             return "Loading recent data…"
         }
-        return model.authorizationRequestCompleted ? "Query did not complete" : metric.shortDescription
+        return model.authorizationRequestCompleted
+            ? "Query did not complete"
+            : "Review Apple Health access to check for samples"
     }
 
     private func metricRow(for metric: HealthMetric) -> some View {
@@ -166,6 +170,11 @@ struct HealthDataView: View {
             .accessibilityElement(children: .combine)
         }
         .toggleStyle(.switch)
-        .accessibilityLabel(accessibleMetricLabel(metric))
+        .accessibilityLabel(accessibleMetricLabel(
+            for: metric,
+            latestRecord: newestRecord,
+            sampleCount: records.count,
+            emptyDescription: emptyRowDescription(for: metric)
+        ))
     }
 }

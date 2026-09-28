@@ -33,13 +33,14 @@ final class HealthMetricTests: XCTestCase {
         XCTAssertEqual(MetricCatalog.selectableMetrics.count, 55)
     }
 
-    func testComponentMetricsAreNotUserSelectable() {
+    func testComponentMetricsAreNotUserSelectable() throws {
         for rawValue in ["bloodPressureSystolic", "bloodPressureDiastolic"] {
             let metric = try? XCTUnwrap(HealthMetric(rawValue: rawValue))
             XCTAssertNotNil(metric, "\(rawValue) should be in the catalog")
             XCTAssertFalse(metric?.descriptor.userSelectable ?? true)
         }
-        XCTAssertTrue(HealthMetric(rawValue: "bloodPressure")!.descriptor.userSelectable)
+        let bloodPressure = try XCTUnwrap(HealthMetric(rawValue: "bloodPressure"))
+        XCTAssertTrue(bloodPressure.descriptor.userSelectable)
     }
 
     func testDescriptorRecordKindsMatchExtractionPlans() {

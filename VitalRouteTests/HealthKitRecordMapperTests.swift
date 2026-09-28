@@ -171,7 +171,8 @@ final class HealthKitRecordMapperTests: XCTestCase {
         }
         let low = try XCTUnwrap(HKObjectType.categoryType(forIdentifier: .lowHeartRateEvent))
         let lowSample = HKCategorySample(type: low, value: HKCategoryValue.notApplicable.rawValue, start: date, end: date)
-        let lowRecord = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: lowSample, metric: HealthMetric(rawValue: "lowHeartRateEvent")!)?.record)
+        let lowMetric = try XCTUnwrap(HealthMetric(rawValue: "lowHeartRateEvent"))
+        let lowRecord = try XCTUnwrap(HealthKitRecordMapper.makeMappedSample(from: lowSample, metric: lowMetric)?.record)
         guard case .category(let lowPayload) = lowRecord.data else { return XCTFail("expected category payload") }
         XCTAssertEqual(lowPayload.name, "recorded")
         XCTAssertEqual(lowRecord.displayValue, "Recorded")

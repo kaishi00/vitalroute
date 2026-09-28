@@ -1,9 +1,9 @@
 # Automatic Background Sync — Design
 
 Scope: after the user explicitly enables automatic sync, VitalRoute observes
-changes to selected Apple Health categories and reliably delivers additions
+changes to selected Apple Health metrics and reliably delivers additions
 **and deletions** to the configured receiver, resuming safely after
-interruptions. Out of scope: MCP/agent access, dashboards, new categories,
+interruptions. Out of scope: MCP/agent access, dashboards, new metrics,
 subscriptions, vendor services.
 
 Sources followed: Apple's `HKAnchoredObjectQuery` documentation (the anchor
@@ -47,8 +47,8 @@ entitlements are declared in `project.yml` and generated into
   offline.
 - **Paused(reason)**: automatic work stops, queued work and checkpoints are
   kept. Reasons: destination or credential missing/changed, receiver
-  incompatible (auth/protocol/ack failures), queue at capacity, category
-  selection empty, protected data unavailable (locked device).
+  incompatible (auth/protocol/ack failures), queue at capacity, empty metric
+  selection, protected data unavailable (locked device).
 - Enabling requires: saved destination + credential + non-empty selection +
   a foreground receiver capability check (see §5) + HealthKit authorization
   requested through the foreground action that enables. Background work never

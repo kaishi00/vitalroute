@@ -87,9 +87,9 @@ struct HealthRecord: Codable, Equatable, Identifiable, Sendable {
 }
 
 extension HealthRecord {
-    /// A short, human-readable summary for dashboards. Formatting lives on
-    /// the payload kind — never on the metric — so new metrics of an
-    /// existing kind display correctly with zero UI work.
+    /// A short, human-readable summary for dashboards. Formatting generally
+    /// follows the payload kind; blood pressure correlations use metric
+    /// identity to label their systolic and diastolic components.
     var displayValue: String {
         switch data {
         case .quantity(let payload):
@@ -100,7 +100,7 @@ extension HealthRecord {
         case .category(let payload):
             return payload.name.map { Self.humanizedCategoryName($0) } ?? "value \(payload.value)"
         case .correlation(let payload):
-            if metric.rawValue == "bloodPressure" {
+            if metric.rawValue == HealthMetric.bloodPressure.rawValue {
                 return Self.bloodPressureDisplayValue(payload.components)
             }
             return payload.components
