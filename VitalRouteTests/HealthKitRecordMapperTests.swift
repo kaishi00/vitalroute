@@ -17,21 +17,22 @@ final class HealthKitRecordMapperTests: XCTestCase {
         }
     }
 
-    func testAuthorizationObjectTypesIncludeCorrelationComponents() throws {
+    func testAuthorizationObjectTypesUseOnlyCorrelationComponents() throws {
         let bloodPressure = try XCTUnwrap(HealthMetric(rawValue: "bloodPressure"))
         let types = HealthKitRecordMapper.objectTypes(for: [bloodPressure])
         let identifiers = Set(types.map(\.identifier))
-        XCTAssertTrue(identifiers.contains("HKCorrelationTypeIdentifierBloodPressure"))
         XCTAssertTrue(identifiers.contains("HKQuantityTypeIdentifierBloodPressureSystolic"))
         XCTAssertTrue(identifiers.contains("HKQuantityTypeIdentifierBloodPressureDiastolic"))
-        XCTAssertEqual(identifiers.count, 3)
+        XCTAssertEqual(identifiers, Set([
+            "HKQuantityTypeIdentifierBloodPressureSystolic",
+            "HKQuantityTypeIdentifierBloodPressureDiastolic",
+        ]))
     }
 
     func testMixedSelectionProducesExactAuthorizationAndQueryTypeSets() throws {
         let bloodPressure = try XCTUnwrap(HealthMetric(rawValue: "bloodPressure"))
         let selection: Set<HealthMetric> = [bloodPressure, .heartRate, .sleep]
         let expected = Set([
-            "HKCorrelationTypeIdentifierBloodPressure",
             "HKQuantityTypeIdentifierBloodPressureSystolic",
             "HKQuantityTypeIdentifierBloodPressureDiastolic",
             "HKQuantityTypeIdentifierHeartRate",
@@ -51,6 +52,20 @@ final class HealthKitRecordMapperTests: XCTestCase {
             "HKQuantityTypeIdentifierHeartRate",
             "HKCategoryTypeIdentifierSleepAnalysis",
         ]))
+
+        // Correlation components are stored within the BP correlation, so
+        // component observers do not prove HealthKit will notify for every
+        // BP write; background delivery still needs device validation.
+        let observerIdentifiers = Set(
+            HealthKitRecordMapper.observerSampleTypes(for: selection).map(\.identifier)
+        )
+        XCTAssertEqual(observerIdentifiers, Set([
+            "HKQuantityTypeIdentifierBloodPressureSystolic",
+            "HKQuantityTypeIdentifierBloodPressureDiastolic",
+            "HKQuantityTypeIdentifierHeartRate",
+            "HKCategoryTypeIdentifierSleepAnalysis",
+        ]))
+        XCTAssertFalse(observerIdentifiers.contains("HKCorrelationTypeIdentifierBloodPressure"))
     }
 
     // MARK: Quantity

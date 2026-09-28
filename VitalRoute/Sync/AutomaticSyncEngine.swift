@@ -35,7 +35,7 @@ enum AutomaticSyncPauseReason: Equatable {
         case .credentialMissing:
             "Automatic sync is paused: add the API key for this destination."
         case .selectionEmpty:
-            "Automatic sync is paused: enable at least one category in Health Data."
+            "Automatic sync is paused: select at least one metric in Health Data."
         case .receiverIncompatible(let detail):
             "Automatic sync is paused: the destination is not compatible (\(detail)). Update the receiver, then turn automatic sync off and on again."
         case .queueAtCapacity:

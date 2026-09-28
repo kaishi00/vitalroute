@@ -47,6 +47,26 @@ relying on automatic sync for real data, validate on a physical iPhone:
 10. **Turn-off while degraded** — clear the metric selection (or remove
    the API key) while automatic sync is on, then confirm the Settings toggle
    can still be turned **off**.
+11. **Blood-pressure correlation background delivery** — run both scenarios
+    below on a physical iPhone with a source that writes actual blood-pressure
+    correlation samples (not standalone systolic/diastolic quantities):
+    - **Blood pressure only:** select only Blood pressure, enable Automatic
+      Sync, and confirm observer registration succeeds. While the app is in
+      the background, add a blood-pressure correlation and verify that the
+      receiver gets the correlation record with its components. Delete that
+      sample in Health and verify the deletion reaches the receiver. Add
+      another correlation while the app is not running, relaunch it, and
+      verify foreground catch-up delivers the missed change.
+    - **Mixed metrics:** select Blood pressure and a non-correlation metric
+      such as heart rate. Confirm both register successfully; then add samples
+      from their respective sources while the app is in the background. Verify
+      the non-correlation metric continues to wake and deliver, and check
+      whether blood-pressure correlations are captured and delivered as above.
+
+    A successful systolic/diastolic quantity observer registration does not
+    prove that a correlation-contained blood-pressure sample triggers that
+    observer. Component-observer wake behavior for correlation samples remains
+    unproven until these physical-device checks pass.
 
 Limitation statement: until this checklist is executed on hardware,
 background-delivery behavior (throttling frequency, wake reliability,

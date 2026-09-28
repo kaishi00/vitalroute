@@ -73,15 +73,19 @@ enum HealthKitRecordMapper {
         }
     }
 
-    /// Every object type that must be authorized to read the given
-    /// metrics: each metric's own type plus the component types of
-    /// correlations (a blood pressure correlation is unreadable without
-    /// its systolic/diastolic quantity types).
+    /// Every object type that must be authorized to read the given metrics.
+    /// HealthKit correlation queries authorize access through their
+    /// contained sample types, so correlations contribute only components.
     static func objectTypes(for metrics: Set<HealthMetric>) -> Set<HKObjectType> {
         var types = Set<HKObjectType>()
         for metric in metrics {
             let descriptor = metric.descriptor
-            let identifiers = [descriptor.healthKitIdentifier] + descriptor.componentIdentifiers
+            let identifiers: [String]
+            if case .correlation = descriptor.extraction {
+                identifiers = descriptor.componentIdentifiers
+            } else {
+                identifiers = [descriptor.healthKitIdentifier] + descriptor.componentIdentifiers
+            }
             for identifier in identifiers {
                 if let type = Self.sampleType(healthKitIdentifier: identifier) {
                     types.insert(type)
@@ -91,13 +95,40 @@ enum HealthKitRecordMapper {
         return types
     }
 
-    /// Sample types for observers and queries: one per metric, deduplicated.
+    /// Query sample types: one per selected metric, deduplicated.
     static func sampleTypes(for metrics: Set<HealthMetric>) -> [HKSampleType] {
         var seen = Set<String>()
         var types: [HKSampleType] = []
         for metric in MetricCatalog.metrics.map(\.metric) where metrics.contains(metric) {
             guard let type = sampleType(for: metric.descriptor) else { continue }
             if seen.insert(type.identifier).inserted {
+                types.append(type)
+            }
+        }
+        return types
+    }
+
+    /// Observer registration types. HealthKit does not support background
+    /// delivery for correlation types, so selected correlations observe
+    /// their component quantities while queries still fetch the correlation.
+    /// Apple documents that correlation components are stored as part of the
+    /// correlation; component observer notifications therefore need physical
+    /// device validation and are not guaranteed by this mapping alone.
+    static func observerSampleTypes(for metrics: Set<HealthMetric>) -> [HKSampleType] {
+        var seen = Set<String>()
+        var types: [HKSampleType] = []
+        for metric in MetricCatalog.metrics.map(\.metric) where metrics.contains(metric) {
+            let descriptor = metric.descriptor
+            let identifiers: [String]
+            if case .correlation = descriptor.extraction {
+                identifiers = descriptor.componentIdentifiers
+            } else {
+                identifiers = [descriptor.healthKitIdentifier]
+            }
+            for identifier in identifiers {
+                guard let type = sampleType(healthKitIdentifier: identifier),
+                      seen.insert(type.identifier).inserted
+                else { continue }
                 types.append(type)
             }
         }

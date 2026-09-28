@@ -123,8 +123,8 @@ extension HealthRecord {
     }
 
     private static func bloodPressureDisplayValue(_ components: [CorrelationComponent]) -> String {
-        let systolic = components.first { $0.metric == "bloodPressureSystolic" }
-        let diastolic = components.first { $0.metric == "bloodPressureDiastolic" }
+        let systolic = components.first { $0.metric == HealthMetric.bloodPressureSystolic.rawValue }
+        let diastolic = components.first { $0.metric == HealthMetric.bloodPressureDiastolic.rawValue }
         switch (systolic, diastolic) {
         case let (.some(sys), .some(dia)):
             return "Systolic \(sys.value.formatted(.number.precision(.fractionLength(0...1)))) \(sys.unit) · Diastolic \(dia.value.formatted(.number.precision(.fractionLength(0...1)))) \(dia.unit)"

@@ -76,7 +76,7 @@ final class VitalRouteModelTests: XCTestCase {
         XCTAssertEqual(provider.queryCount, 0)
         XCTAssertEqual(
             model.healthDataError,
-            "Select at least one category in Health Data, then review access."
+            "Select at least one metric in Health Data, then review access."
         )
     }
 

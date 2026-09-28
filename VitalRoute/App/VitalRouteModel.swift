@@ -35,7 +35,7 @@ final class VitalRouteModel {
             return
         }
         guard !metrics.isEmpty else {
-            healthDataError = "Select at least one category in Health Data, then review access."
+            healthDataError = "Select at least one metric in Health Data, then review access."
             return
         }
         guard !isLoadingHealthData else {
