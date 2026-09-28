@@ -5,15 +5,31 @@ struct HealthDataView: View {
     @Environment(ExportSelectionStore.self) private var selectionStore
     @State private var searchText = ""
 
+    /// Familiar abbreviations map to the catalog IDs that describe them.
+    /// Keeping these few discovery aliases here avoids per-metric UI logic.
+    private static let searchAliases: [String: Set<String>] = [
+        "hrv": ["heartRateVariability"],
+        "bmi": ["bodyMassIndex"],
+        "spo2": ["oxygenSaturation"],
+        "bpm": ["heartRate", "restingHeartRate", "walkingHeartRateAverage", "heartRateRecoveryOneMinute"],
+    ]
+
+    private static func searchNormalized(_ value: String) -> String {
+        value.lowercased()
+            .replacingOccurrences(of: "₂", with: "2")
+            .replacingOccurrences(of: "₀", with: "0")
+    }
+
     /// Pure catalog filtering so the selector's search and grouping contract
     /// can be checked without constructing SwiftUI views.
     static func filteredDescriptors(query: String) -> [MetricDescriptor] {
         let descriptors = MetricCatalog.selectableMetrics
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let term = searchNormalized(query.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !term.isEmpty else { return descriptors }
         return descriptors.filter {
-            $0.displayName.localizedCaseInsensitiveContains(term)
-                || $0.shortDescription.localizedCaseInsensitiveContains(term)
+            let searchableText = searchNormalized("\($0.displayName) \($0.shortDescription) \($0.metric.rawValue)")
+            return searchableText.localizedCaseInsensitiveContains(term)
+                || searchAliases[term, default: []].contains($0.metric.rawValue)
         }
     }
 
@@ -38,14 +54,16 @@ struct HealthDataView: View {
         Self.groupedDescriptors(query: searchText)[group] ?? []
     }
 
-    private func accessibleMetricLabel(
+    static func accessibleMetricLabel(
         for metric: HealthMetric,
         latestRecord: HealthRecord?,
         sampleCount: Int,
-        emptyDescription: String
+        emptyDescription: String,
+        isSelected: Bool
     ) -> String {
         let latest = latestRecord.map { "Latest: \($0.displayValue)." } ?? emptyDescription
-        return "Include \(metric.displayName) in export. \(metric.shortDescription). \(latest) \(sampleCount) samples."
+        let count = isSelected && sampleCount > 0 ? " \(sampleCount) samples." : ""
+        return "Include \(metric.displayName) in export. \(metric.shortDescription). \(latest)\(count)"
     }
 
     var body: some View {
@@ -163,18 +181,18 @@ struct HealthDataView: View {
                     Text("\(records.count)")
                         .font(.subheadline.weight(.semibold).monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .accessibilityLabel("\(records.count) samples")
                 }
             }
             .padding(.vertical, 3)
             .accessibilityElement(children: .combine)
         }
         .toggleStyle(.switch)
-        .accessibilityLabel(accessibleMetricLabel(
+        .accessibilityLabel(Self.accessibleMetricLabel(
             for: metric,
             latestRecord: newestRecord,
             sampleCount: records.count,
-            emptyDescription: emptyRowDescription(for: metric)
+            emptyDescription: emptyRowDescription(for: metric),
+            isSelected: isSelected
         ))
     }
 }

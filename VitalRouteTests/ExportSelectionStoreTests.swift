@@ -92,6 +92,60 @@ final class ExportSelectionStoreTests: XCTestCase {
         XCTAssertEqual(Set(grouped.keys), [.sleep])
     }
 
+    func testMetricSearchFindsCommonAbbreviationsAndRawIDs() {
+        let expectedIDs = [
+            "vo2": "vo2Max",
+            "hrv": "heartRateVariability",
+            "bmi": "bodyMassIndex",
+            "spo2": "oxygenSaturation",
+            "bpm": "heartRate",
+            "heartRateVariability": "heartRateVariability",
+        ]
+
+        for (query, expectedID) in expectedIDs {
+            XCTAssertTrue(
+                HealthDataView.filteredDescriptors(query: query).contains { $0.metric.rawValue == expectedID },
+                "Expected search for \(query) to find \(expectedID)"
+            )
+        }
+    }
+
+    func testToggleAccessibilityIncludesCountOnlyForSelectedMetrics() {
+        let date = Date(timeIntervalSince1970: 1_735_689_600)
+        let latestStepRecord = HealthRecord(
+            metric: .steps,
+            startDate: date,
+            endDate: date,
+            data: .quantity(QuantityData(value: 120, unit: "count"))
+        )
+        let selectedLabel = HealthDataView.accessibleMetricLabel(
+            for: .steps,
+            latestRecord: latestStepRecord,
+            sampleCount: 3,
+            emptyDescription: "No recent samples shown; refresh to check",
+            isSelected: true
+        )
+        let unselectedLabel = HealthDataView.accessibleMetricLabel(
+            for: .steps,
+            latestRecord: nil,
+            sampleCount: 0,
+            emptyDescription: "Not selected for export",
+            isSelected: false
+        )
+        let selectedZeroLabel = HealthDataView.accessibleMetricLabel(
+            for: .steps,
+            latestRecord: nil,
+            sampleCount: 0,
+            emptyDescription: "No recent samples shown; refresh to check",
+            isSelected: true
+        )
+
+        XCTAssertTrue(selectedLabel.contains("3 samples"))
+        XCTAssertFalse(unselectedLabel.contains("samples"))
+        XCTAssertTrue(unselectedLabel.contains("Not selected for export"))
+        XCTAssertFalse(selectedZeroLabel.contains("0 samples"))
+    }
+
     func testRecentRecordPresentationImmediatelyFiltersDeselectedMetrics() {
         let date = Date(timeIntervalSince1970: 1_735_689_600)
         let steps = HealthRecord(

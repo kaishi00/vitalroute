@@ -220,10 +220,11 @@ final class HealthKitRecordMapperTests: XCTestCase {
             objects: [systolic, diastolic]
         )
 
+        let bloodPressure = try XCTUnwrap(HealthMetric(rawValue: "bloodPressure"))
         let mapped = try XCTUnwrap(
             HealthKitRecordMapper.makeMappedSample(
                 from: correlation,
-                metric: HealthMetric(rawValue: "bloodPressure")!
+                metric: bloodPressure
             )
         )
         let record = try XCTUnwrap(mapped.record)
