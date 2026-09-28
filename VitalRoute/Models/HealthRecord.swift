@@ -96,6 +96,9 @@ extension HealthRecord {
             if payload.unit == "s" {
                 return Self.durationLabel(payload.value)
             }
+            if payload.unit == "1" {
+                return payload.value.formatted(.number.precision(.fractionLength(0...1)))
+            }
             return "\(payload.value.formatted(.number.precision(.fractionLength(0...1)))) \(payload.unit)"
         case .category(let payload):
             return payload.name.map { Self.humanizedCategoryName($0) } ?? "value \(payload.value)"

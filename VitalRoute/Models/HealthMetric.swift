@@ -79,6 +79,7 @@ extension HealthMetric {
 /// over it, rather than growing switches across the app.
 enum CanonicalUnit: String, Hashable, Sendable {
     case count
+    case dimensionless
     case countPerMinute
     case milliseconds
     case kilocalories
@@ -285,7 +286,7 @@ enum MetricCatalog {
         quantity("bodyMass", "Body mass", "Body weight measurement", "scalemass", .body, "HKQuantityTypeIdentifierBodyMass", .kilograms),
         quantity("bodyFatPercentage", "Body fat percentage", "Proportion of body mass that is fat", "percent", .body, "HKQuantityTypeIdentifierBodyFatPercentage", .percent),
         quantity("leanBodyMass", "Lean body mass", "Body mass excluding fat", "figure.stand", .body, "HKQuantityTypeIdentifierLeanBodyMass", .kilograms),
-        quantity("bodyMassIndex", "Body mass index", "Body mass index measurement", "figure.stand", .body, "HKQuantityTypeIdentifierBodyMassIndex", .count),
+        quantity("bodyMassIndex", "Body mass index", "Body mass index measurement", "figure.stand", .body, "HKQuantityTypeIdentifierBodyMassIndex", .dimensionless),
         quantity("height", "Height", "Height measurement", "ruler", .body, "HKQuantityTypeIdentifierHeight", .meters),
         quantity("waistCircumference", "Waist circumference", "Waist circumference measurement", "ruler", .body, "HKQuantityTypeIdentifierWaistCircumference", .meters),
         quantity("flightsClimbed", "Flights climbed", "Flights of stairs climbed", "stairs", .activity, "HKQuantityTypeIdentifierFlightsClimbed", .count),

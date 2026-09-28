@@ -44,9 +44,9 @@ final class HealthKitRecordMapperTests: XCTestCase {
         )
         XCTAssertEqual(authorizationIdentifiers, expected)
 
-        let queryIdentifiers = Set(
-            HealthKitRecordMapper.sampleTypes(for: selection).map(\.identifier)
-        )
+        let queryIdentifiers = Set(selection.compactMap {
+            HealthKitRecordMapper.sampleType(for: $0.descriptor)?.identifier
+        })
         XCTAssertEqual(queryIdentifiers, Set([
             "HKCorrelationTypeIdentifierBloodPressure",
             "HKQuantityTypeIdentifierHeartRate",
@@ -115,6 +115,7 @@ final class HealthKitRecordMapperTests: XCTestCase {
             ("oxygenSaturation", .percent(), 0.98, 98, "%"),
             ("bloodGlucose", glucoseUnit, 105, 105, "mg/dL"),
             ("vo2Max", vo2Unit, 42.5, 42.5, "mL/(kg*min)"),
+            ("bodyMassIndex", .count(), 22, 22, "1"),
             ("bodyMass", .gramUnit(with: .kilo), 72.4, 72.4, "kg"),
             ("height", .meter(), 1.72, 1.72, "m"),
             ("walkingSpeed", .meter().unitDivided(by: .second()), 1.1, 1.1, "m/s"),
@@ -132,6 +133,9 @@ final class HealthKitRecordMapperTests: XCTestCase {
             guard case .quantity(let payload) = record.data else { return XCTFail("expected quantity payload") }
             XCTAssertEqual(payload.value, expected, accuracy: 0.001)
             XCTAssertEqual(payload.unit, expectedUnit)
+            if raw == "bodyMassIndex" {
+                XCTAssertEqual(record.displayValue, "22")
+            }
         }
     }
 

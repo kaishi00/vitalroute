@@ -538,6 +538,18 @@ final class DisplayValueFormattingTests: XCTestCase {
         }
     }
 
+    func testDimensionlessBodyMassIndexOmitsUnitSuffix() throws {
+        let bodyMassIndex = try XCTUnwrap(HealthMetric(rawValue: "bodyMassIndex"))
+        let record = HealthRecord(
+            metric: bodyMassIndex,
+            startDate: date,
+            endDate: date,
+            data: .quantity(QuantityData(value: 22, unit: "1"))
+        )
+
+        XCTAssertEqual(record.displayValue, "22")
+    }
+
     func testExtremeAndNonFiniteQuantitySecondsDoNotTrap() {
         for (seconds, expected) in [
             (Double.greatestFiniteMagnitude, "\(Int.max) min"),

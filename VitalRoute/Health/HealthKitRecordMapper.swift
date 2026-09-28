@@ -95,19 +95,6 @@ enum HealthKitRecordMapper {
         return types
     }
 
-    /// Query sample types: one per selected metric, deduplicated.
-    static func sampleTypes(for metrics: Set<HealthMetric>) -> [HKSampleType] {
-        var seen = Set<String>()
-        var types: [HKSampleType] = []
-        for metric in MetricCatalog.metrics.map(\.metric) where metrics.contains(metric) {
-            guard let type = sampleType(for: metric.descriptor) else { continue }
-            if seen.insert(type.identifier).inserted {
-                types.append(type)
-            }
-        }
-        return types
-    }
-
     /// Observer registration types. HealthKit does not support background
     /// delivery for correlation types, so selected correlations observe
     /// their component quantities while queries still fetch the correlation.
@@ -583,6 +570,7 @@ extension CanonicalUnit {
     var hkUnit: HKUnit {
         switch self {
         case .count: .count()
+        case .dimensionless: .count()
         case .countPerMinute: HKUnit.count().unitDivided(by: .minute())
         case .milliseconds: HKUnit.secondUnit(with: .milli)
         case .kilocalories: .kilocalorie()
@@ -605,6 +593,7 @@ extension CanonicalUnit {
     var unitString: String {
         switch self {
         case .count: "count"
+        case .dimensionless: "1"
         case .countPerMinute: "count/min"
         case .milliseconds: "ms"
         case .kilocalories: "kcal"
