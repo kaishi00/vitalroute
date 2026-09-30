@@ -30,6 +30,11 @@ targets:
       path: VitalRoute/Info.plist
       properties:
         CFBundleDisplayName: VitalRoute
+        # Expansion strings, not literals: Xcode 27 lets a literal Info.plist
+        # value win over CURRENT_PROJECT_VERSION/MARKETING_VERSION passed at
+        # archive time, which would freeze the TestFlight build number.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSHealthShareUsageDescription: VitalRoute reads only the Apple Health metrics you select in Health Data so you can route recent records to a destination you control.
         # Export compliance: VitalRoute ships no non-exempt encryption.
         # All crypto is Apple-provided exempt usage — HTTPS via
