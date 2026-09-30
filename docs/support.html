@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VitalRoute Support</title>
+<meta name="description" content="Support for VitalRoute: documentation, issues, and answers.">
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    background: light-dark(#fafafa, #111);
+    color: light-dark(#1d1d1f, #f2f2f2);
+  }
+  main { max-width: 42rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+  h1 { font-size: 1.9rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; }
+  a { color: light-dark(#0a66c2, #6db3ff); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;
+         background: light-dark(#eee, #26262a); padding: .1em .35em; border-radius: 5px; }
+  details { margin: .6rem 0; padding: .75rem 1rem; border-radius: 10px;
+            background: light-dark(#f0f0f3, #1e1e22); }
+  summary { font-weight: 600; cursor: pointer; }
+  footer { margin-top: 3rem; font-size: .85rem; color: light-dark(#777, #999); }
+</style>
+</head>
+<body>
+<main>
+  <h1>VitalRoute Support</h1>
+
+  <h2>Documentation</h2>
+  <p>Everything you need to deploy the receiver, configure a destination, and sync:</p>
+  <ul>
+    <li><a href="https://github.com/kaishi00/vitalroute#readme">README — overview and build instructions</a></li>
+    <li><a href="https://github.com/kaishi00/vitalroute/tree/main/server">Receiver deployment (server/)</a></li>
+    <li><a href="https://github.com/kaishi00/vitalroute/blob/main/server/DEPLOYMENT.md">Receiver deployment guide</a></li>
+    <li>The in-app setup guide (Destination screen) walks through the whole process.</li>
+  </ul>
+
+  <h2>Bug reports and feature requests</h2>
+  <p>Please open an issue on the
+  <a href="https://github.com/kaishi00/vitalroute/issues">GitHub issue tracker</a>.
+  Include your iOS version, device model, and what you expected versus what happened.
+  Never include real health data in a bug report.</p>
+
+  <h2>Common questions</h2>
+
+  <details>
+    <summary>Where does my health data go?</summary>
+    <p>Only to the HTTPS endpoint you configure. The developer operates no servers and
+    receives nothing. See the <a href="privacy.html">privacy policy</a>.</p>
+  </details>
+
+  <details>
+    <summary>Why isn't background sync delivering instantly?</summary>
+    <p>iOS schedules background work and throttles it; delivery is never guaranteed to be
+    immediate, and it pauses entirely after a force-quit until you next open the app.
+    Opening VitalRoute catches everything up right away. This is expected platform
+    behavior, not a malfunction.</p>
+  </details>
+
+  <details>
+    <summary>The connection test passes but sync fails</summary>
+    <p>The test checks reachability, TLS, and your API key without sending records.
+    If sync still fails, check that your receiver is reachable from outside your network
+    (HTTPS with a certificate your device trusts) and review the receiver logs.
+    The README's troubleshooting section covers common causes.</p>
+  </details>
+
+  <details>
+    <summary>Can I use this without a server?</summary>
+    <p>The app opens and navigates without a destination configured, but its purpose is
+    routing health data, so there is nothing to see until you set up a receiver. The
+    receiver is a single Docker Compose command on your own hardware.</p>
+  </details>
+
+  <details>
+    <summary>Does VitalRoute work on iPad or Mac?</summary>
+    <p>VitalRoute is an iPhone app. It is not distributed for iPad or Mac.</p>
+  </details>
+
+  <footer>
+    VitalRoute is an independent project and is not affiliated with Apple Inc.
+  </footer>
+</main>
+</body>
+</html>

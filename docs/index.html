@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VitalRoute</title>
+<meta name="description" content="VitalRoute routes the Apple Health data you choose to an endpoint you control.">
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    background: light-dark(#fafafa, #111);
+    color: light-dark(#1d1d1f, #f2f2f2);
+  }
+  main { max-width: 42rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+  h1 { font-size: 2.2rem; margin: 0 0 .25rem; }
+  .tagline { font-size: 1.15rem; color: light-dark(#555, #aaa); margin-top: 0; }
+  nav { margin: 2rem 0; display: flex; flex-wrap: wrap; gap: .75rem; }
+  nav a {
+    display: inline-block; padding: .6rem 1.2rem; border-radius: 10px;
+    text-decoration: none; font-weight: 600;
+    background: light-dark(#e8e8ed, #2a2a2e);
+    color: light-dark(#1d1d1f, #f2f2f2);
+  }
+  nav a.primary {
+    background: light-dark(#0a66c2, #3d8bfd); color: #fff;
+  }
+  section { margin-top: 2.5rem; }
+  h2 { font-size: 1.25rem; }
+  ul { padding-left: 1.25rem; }
+  li { margin: .4rem 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;
+         background: light-dark(#eee, #26262a); padding: .1em .35em; border-radius: 5px; }
+  a { color: light-dark(#0a66c2, #6db3ff); }
+  footer { margin-top: 3rem; font-size: .85rem; color: light-dark(#777, #999); }
+</style>
+</head>
+<body>
+<main>
+  <h1>VitalRoute</h1>
+  <p class="tagline">Your health data, routed to your own server.</p>
+
+  <nav>
+    <a class="primary" href="https://github.com/kaishi00/vitalroute">GitHub repository</a>
+    <a href="privacy.html">Privacy Policy</a>
+    <a href="support.html">Support</a>
+  </nav>
+
+  <section>
+    <h2>What it does</h2>
+    <p>VitalRoute is a native iOS app that sends the Apple Health data you explicitly select
+    to an HTTPS endpoint you control. You choose which metrics leave the device, you choose
+    where they go, and the included reference receiver stores them on your own hardware.</p>
+  </section>
+
+  <section>
+    <h2>Principles</h2>
+    <ul>
+      <li>Nothing is collected by the developer. There is no developer cloud.</li>
+      <li>Every metric is off by default. You opt in per metric.</li>
+      <li>Read-only access to Apple Health. VitalRoute never writes to Health.</li>
+      <li>No analytics, no advertising, no accounts, no third-party SDKs.</li>
+      <li>Your endpoint and its API key are stored in the device Keychain.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Getting started</h2>
+    <p>Deploy the reference receiver, point VitalRoute at your HTTPS endpoint, select the
+    metrics you want, and sync. Full setup instructions are in the
+    <a href="https://github.com/kaishi00/vitalroute#readme">repository README</a> and the
+    in-app setup guide.</p>
+  </section>
+
+  <footer>
+    VitalRoute is an independent project and is not affiliated with Apple Inc.
+    Apple Health is a trademark of Apple Inc.
+  </footer>
+</main>
+</body>
+</html>

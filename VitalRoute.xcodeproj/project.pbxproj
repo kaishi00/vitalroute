@@ -26,6 +26,7 @@
 		3764D99AFB5EC1848AFC1AF8 /* VitalRouteModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 711E1DD1FC2624EA1E6E61DA /* VitalRouteModel.swift */; };
 		38FE8F4CE03FF89B07BEA143 /* FHIRJSON.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB31E2FB82DE16EDB51189AB /* FHIRJSON.swift */; };
 		459D3293B03D01AD0B0246C0 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DBB21975C9F05A1352B6ADE3 /* Assets.xcassets */; };
+		13317CEE6BDF3C49041C840B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 213A8031BE7F52338688BF06 /* PrivacyInfo.xcprivacy */; };
 		475A17FA563DBBC2A932511D /* OverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF0B77CA424E9FB356524D3B /* OverviewView.swift */; };
 		4D4BCA61CC398A1E3B16E185 /* HealthMetric.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCF0F120103661DDE2DB95CA /* HealthMetric.swift */; };
 		52D4DA3AE945A7FC71B7BD66 /* DestinationConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 253F1897B82767544D465728 /* DestinationConfiguration.swift */; };
@@ -132,6 +133,7 @@
 		D43A57F7EF0A32938F96F1A9 /* ManualSyncCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualSyncCoordinatorTests.swift; sourceTree = "<group>"; };
 		D54B37CCD5BA917FB54C8B85 /* VitalRoute.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VitalRoute.entitlements; sourceTree = "<group>"; };
 		DBB21975C9F05A1352B6ADE3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		213A8031BE7F52338688BF06 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		DCF0F120103661DDE2DB95CA /* HealthMetric.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthMetric.swift; sourceTree = "<group>"; };
 		E5DEE3382F095688AA2155C7 /* AutomaticSyncEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomaticSyncEngine.swift; sourceTree = "<group>"; };
 		ED7894B4CC321B724420477D /* ServerSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSetup.swift; sourceTree = "<group>"; };
@@ -225,6 +227,7 @@
 			isa = PBXGroup;
 			children = (
 				DBB21975C9F05A1352B6ADE3 /* Assets.xcassets */,
+				213A8031BE7F52338688BF06 /* PrivacyInfo.xcprivacy */,
 				65FE661EF803A7FA195EA8C9 /* Info.plist */,
 				D54B37CCD5BA917FB54C8B85 /* VitalRoute.entitlements */,
 				C098FDEBF8A5F339F341B727 /* App */,
@@ -402,6 +405,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				459D3293B03D01AD0B0246C0 /* Assets.xcassets in Resources */,
+				13317CEE6BDF3C49041C840B /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

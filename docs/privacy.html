@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VitalRoute Privacy Policy</title>
+<meta name="description" content="VitalRoute privacy policy: your health data goes only where you send it.">
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    background: light-dark(#fafafa, #111);
+    color: light-dark(#1d1d1f, #f2f2f2);
+  }
+  main { max-width: 42rem; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+  h1 { font-size: 1.9rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; }
+  .updated { color: light-dark(#777, #999); font-size: .9rem; }
+  a { color: light-dark(#0a66c2, #6db3ff); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;
+         background: light-dark(#eee, #26262a); padding: .1em .35em; border-radius: 5px; }
+  ul { padding-left: 1.25rem; }
+  li { margin: .35rem 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>VitalRoute Privacy Policy</h1>
+  <p class="updated">Last updated: September 30, 2026</p>
+
+  <p>VitalRoute is built so that your health data moves only at your command, to a
+  destination you choose. This policy explains exactly what happens to your data.</p>
+
+  <h2>The short version</h2>
+  <p>The developer operates no servers, collects no data, and receives nothing from
+  VitalRoute. Health data leaves your device only when you configure a destination and
+  sync, and it goes to that destination — not to the developer.</p>
+
+  <h2>What data VitalRoute accesses</h2>
+  <p>VitalRoute reads from Apple Health (HealthKit) only the metrics you explicitly enable
+  in the Health Data screen. Nothing is selected by default. Access is read-only: VitalRoute
+  never writes to, modifies, or deletes anything in Apple Health. iOS shows a permission
+  prompt for each data category, and you can revoke access at any time in Settings.</p>
+
+  <h2>What data leaves your device</h2>
+  <p>Health records for the metrics you selected are uploaded, over HTTPS, to the endpoint
+  you configure. That endpoint is yours (or your household's) — typically a self-hosted
+  receiver running on your own hardware. Records are transmitted only when you tap
+  Sync Now, or automatically if you explicitly enable Automatic Sync in Settings.</p>
+
+  <h2>What the developer collects</h2>
+  <p>Nothing. VitalRoute has no analytics, no advertising, no crash reporting, no accounts,
+  no sign-in, and no developer-operated backend. The developer never sees your health data,
+  your endpoint address, or your API key.</p>
+
+  <h2>Data stored on your device</h2>
+  <ul>
+    <li>Your destination URL and API key are stored in the iOS Keychain.</li>
+    <li>Your selected metrics are stored in standard app preferences.</li>
+    <li>When Automatic Sync is on, records waiting to be delivered are held in a
+        data-protected queue in your app's container, excluded from backups, and deleted
+        as soon as your receiver acknowledges them.</li>
+  </ul>
+
+  <h2>Third parties</h2>
+  <p>VitalRoute contains no third-party SDKs and communicates with no service other than
+  the endpoint you configure. Your data is never sold, shared, or used for advertising
+  or tracking of any kind.</p>
+
+  <h2>Deleting your data</h2>
+  <p>Records already delivered live on your receiver, under your control — delete them
+  there, or turn the receiver off. Deleting the app from your device removes the stored
+  destination, API key, selection preferences, and any undelivered queue contents.</p>
+
+  <h2>Children</h2>
+  <p>VitalRoute is a general-audience utility and does not knowingly collect personal
+  information from anyone, because it does not collect information at all.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy can be raised on the
+  <a href="https://github.com/kaishi00/vitalroute/issues">project issue tracker</a>.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy changes, the updated date above will change with it.</p>
+</main>
+</body>
+</html>

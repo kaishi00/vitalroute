@@ -19,6 +19,8 @@ struct SettingsView: View {
                 Text("VitalRoute requests read access only. It does not write to Apple Health.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                Link("Privacy Policy", destination: URL(string: "https://kaishi00.github.io/vitalroute/privacy.html")!)
+                Link("Support", destination: URL(string: "https://kaishi00.github.io/vitalroute/support.html")!)
             }
 
             Section {
