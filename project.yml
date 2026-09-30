@@ -30,8 +30,6 @@ targets:
       path: VitalRoute/Info.plist
       properties:
         CFBundleDisplayName: VitalRoute
-        CFBundleShortVersionString: 0.1.0
-        CFBundleVersion: '8'
         NSHealthShareUsageDescription: VitalRoute reads only the Apple Health metrics you select in Health Data so you can route recent records to a destination you control.
         # Export compliance: VitalRoute ships no non-exempt encryption.
         # All crypto is Apple-provided exempt usage — HTTPS via
